@@ -5,8 +5,6 @@
 //  Created by NodePassProject on 5/30/26.
 //
 
-// MARK: Various code quality violation issues in this file (handler patterns), consider refactor
-
 import Foundation
 import Synchronization
 
@@ -35,14 +33,21 @@ actor NowhereUDPConnection {
             }
         }
     }
-    private nonisolated let phase = Mutex<Phase>(.idle)
+    private struct Lifecycle: PhaseHolding {
+        var phase: Phase = .idle
+        var routeRegistered = false
+        var controlStreamID: Int64?
+    }
+
+    /// Callback entry points are nonisolated, so lifecycle state lives in one
+    /// lock-protected value while packet sequencing remains actor-isolated.
+    private nonisolated let lifecycle = Mutex(Lifecycle())
 
     // MARK: Control stream (handshake)
 
     /// Control-stream bytes for the flow-open handshake. Producer is `Sendable` (ngtcp2 queue);
     /// single consumer via `nextControlChunk()`.
     private let controlInbox = AsyncInbox<Data>()
-    private var controlStreamID: Int64 = -1
 
     // MARK: Inbound datagrams
 
@@ -68,7 +73,7 @@ actor NowhereUDPConnection {
     }
 
     nonisolated var isConnected: Bool {
-        phase.withLock { if case .ready = $0 { true } else { false } }
+        lifecycle.withLock { if case .ready = $0.phase { true } else { false } }
     }
     nonisolated var outerTLSVersion: TLSVersion? { .tls13 }
     nonisolated var deliversDatagrams: Bool { true }
@@ -80,12 +85,14 @@ actor NowhereUDPConnection {
     // MARK: - Open
 
     func open() async throws {
-        let begin = phase.withLock { Phase.transition(&$0, to: .opening) }
+        let begin = lifecycle.withLock { $0.transition(to: .opening) }
         guard begin else { throw AnywhereError.proxy(.nowhere, .streamClosed) }
         do {
             _ = try await session.registerUDPSession(self, requestedFlowID: flowHeader.flowID)
-            let registrationAdopted = phase.withLock { state in
-                if case .opening = state { true } else { false }
+            let registrationAdopted = lifecycle.withLock { state in
+                guard case .opening = state.phase else { return false }
+                state.routeRegistered = true
+                return true
             }
             guard registrationAdopted else {
                 session.releaseUDPSession(flowHeader.flowID)
@@ -96,13 +103,14 @@ actor NowhereUDPConnection {
                 target: flowHeader.carriesTarget ? destination : nil
             )
             let sid = try await session.openUDPControlStream(for: self, request: request)
-            controlStreamID = sid
-            let streamAdopted = phase.withLock { state in
-                if case .opening = state { true } else { false }
+            let streamAdopted = lifecycle.withLock { state in
+                guard case .opening = state.phase else { return false }
+                state.controlStreamID = sid
+                return true
             }
             guard streamAdopted else {
-                releaseControlStream(reset: true)
-                session.releaseUDPSession(flowHeader.flowID)
+                session.shutdownStream(sid)
+                session.releaseUDPControlStream(sid)
                 throw AnywhereError.proxy(.nowhere, .streamClosed)
             }
 
@@ -132,11 +140,11 @@ actor NowhereUDPConnection {
             releaseControlStream(reset: false)
             if flowHeader.role != .open {
                 session.activateUDPSession(flowHeader.flowID)
-                let activated = phase.withLock { Phase.transition(&$0, to: .ready) }
+                let activated = lifecycle.withLock { $0.transition(to: .ready) }
                 guard activated else { throw AnywhereError.proxy(.nowhere, .streamClosed) }
             } else {
-                let stillOpening = phase.withLock { state in
-                    if case .opening = state { true } else { false }
+                let stillOpening = lifecycle.withLock { state in
+                    if case .opening = state.phase { true } else { false }
                 }
                 guard stillOpening else { throw AnywhereError.proxy(.nowhere, .streamClosed) }
             }
@@ -188,12 +196,12 @@ actor NowhereUDPConnection {
 
     /// Called by the logical split-flow coordinator after the selected downlink has READY.
     nonisolated func activatePairedFlow() {
-        let opening = phase.withLock { phase in
-            if case .opening = phase { true } else { false }
+        let opening = lifecycle.withLock { state in
+            if case .opening = state.phase { true } else { false }
         }
         guard opening else { return }
         session.activateUDPSession(flowHeader.flowID)
-        _ = phase.withLock { Phase.transition(&$0, to: .ready) }
+        _ = lifecycle.withLock { $0.transition(to: .ready) }
     }
 
     func sendRaw(_ data: Data) async throws {
@@ -264,19 +272,24 @@ actor NowhereUDPConnection {
     // MARK: - Teardown
 
     private nonisolated func terminate(error: Error?, sendAdvisory: Bool) {
-        enum Prior { case ready, notReady, alreadyClosed }
-        let prior: Prior = phase.withLock { state in
-            switch state {
-            case .closed: return .alreadyClosed
+        enum Prior { case ready, notReady }
+        typealias Cleanup = (prior: Prior, controlStreamID: Int64?, releaseRoute: Bool)
+        let cleanup: Cleanup? = lifecycle.withLock { state in
+            let prior: Prior
+            switch state.phase {
+            case .closed: return nil
             case .ready:
-                Phase.transition(&state, to: .closed)
-                return .ready
+                prior = .ready
             case .idle, .opening:
-                Phase.transition(&state, to: .closed)
-                return .notReady
+                prior = .notReady
             }
+            state.transition(to: .closed)
+            let result = (prior, state.controlStreamID, state.routeRegistered)
+            state.controlStreamID = nil
+            state.routeRegistered = false
+            return result
         }
-        guard prior != .alreadyClosed else { return }
+        guard let cleanup else { return }
         if let error {
             datagramInbox.finish(throwing: error)
             controlInbox.finish(throwing: error)
@@ -285,17 +298,28 @@ actor NowhereUDPConnection {
             controlInbox.finish()
         }
         termination.fire(error)
-        Task { await self.teardown(sendAdvisory: sendAdvisory, reset: prior == .notReady) }
+        if sendAdvisory {
+            // Keep the route reserved until CLOSE is submitted so a newly opened
+            // flow cannot reuse the same ID and receive this advisory by mistake.
+            Task { [self] in
+                await sendCloseFrame()
+                finishTeardown(
+                    controlStreamID: cleanup.controlStreamID,
+                    resetControlStream: cleanup.prior == .notReady,
+                    releaseRoute: cleanup.releaseRoute
+                )
+            }
+        } else {
+            finishTeardown(
+                controlStreamID: cleanup.controlStreamID,
+                resetControlStream: cleanup.prior == .notReady,
+                releaseRoute: cleanup.releaseRoute
+            )
+        }
     }
 
     private func fail(_ error: Error) {
         terminate(error: error, sendAdvisory: false)
-    }
-
-    private func teardown(sendAdvisory: Bool, reset: Bool) async {
-        if sendAdvisory { await sendCloseFrame() }
-        releaseControlStream(reset: reset)
-        session.releaseUDPSession(flowHeader.flowID)
     }
 
     private func sendCloseFrame() async {
@@ -305,10 +329,26 @@ actor NowhereUDPConnection {
         try? await session.writeDatagrams([frame])
     }
 
-    private func releaseControlStream(reset: Bool) {
-        guard controlStreamID >= 0 else { return }
-        let sid = controlStreamID
-        controlStreamID = -1
+    private nonisolated func finishTeardown(
+        controlStreamID: Int64?,
+        resetControlStream: Bool,
+        releaseRoute: Bool
+    ) {
+        if let controlStreamID {
+            if resetControlStream { session.shutdownStream(controlStreamID) }
+            session.releaseUDPControlStream(controlStreamID)
+        }
+        if releaseRoute {
+            session.releaseUDPSession(flowHeader.flowID)
+        }
+    }
+
+    private nonisolated func releaseControlStream(reset: Bool) {
+        let sid = lifecycle.withLock { state -> Int64? in
+            defer { state.controlStreamID = nil }
+            return state.controlStreamID
+        }
+        guard let sid else { return }
         if reset { session.shutdownStream(sid) }
         session.releaseUDPControlStream(sid)
     }

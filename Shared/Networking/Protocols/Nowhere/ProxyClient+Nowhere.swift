@@ -35,7 +35,11 @@ nonisolated private final class NowhereLeasedConnection: ProxyConnection {
 
     func sendRaw(_ data: Data) async throws {
         do { try await inner.sendRaw(data) }
-        catch { lease.release(); throw error }
+        catch {
+            inner.abort()
+            lease.release()
+            throw error
+        }
     }
 
     func receiveRaw() async throws -> Data? {
@@ -44,14 +48,20 @@ nonisolated private final class NowhereLeasedConnection: ProxyConnection {
             if data == nil { lease.release() }
             return data
         } catch {
+            inner.abort()
             lease.release()
             throw error
         }
     }
 
     func cancel() {
-        lease.release()
         inner.cancel()
+        lease.release()
+    }
+
+    func abort() {
+        inner.abort()
+        lease.release()
     }
 
     deinit { lease.release() }
@@ -67,12 +77,13 @@ nonisolated extension ProxyClient {
         destinationPort: UInt16,
         initialData: Data?
     ) async throws -> ProxyConnection {
-        guard case .nowhere(let key, let uplink, let downlink, let pool, let securityLayer) = configuration.outbound else {
+        guard case .nowhere(let key, let uplink, let downlink, let multiplex, let securityLayer) = configuration.outbound else {
             throw AnywhereError.proxy(.nowhere, .protocolViolation(detail: "Invalid Nowhere configuration"))
         }
         guard let tls = securityLayer.tlsConfiguration else {
             throw AnywhereError.proxy(.nowhere, .protocolViolation(detail: "Nowhere TLS configuration not set"))
         }
+        let effectiveMultiplex = multiplex && (uplink == .tcp || downlink == .tcp)
         let identityKey = NowhereTransportIdentityKey(
             configurationID: configuration.id,
             proxyHost: configuration.serverAddress,
@@ -80,6 +91,7 @@ nonisolated extension ProxyClient {
             key: key,
             uplink: uplink,
             downlink: downlink,
+            multiplex: effectiveMultiplex,
             tls: tls
         )
         let sessionID = try NowhereTransportIdentityRegistry.shared.identity(for: identityKey)
@@ -89,7 +101,7 @@ nonisolated extension ProxyClient {
             key: key,
             uplink: uplink,
             downlink: downlink,
-            pool: pool,
+            multiplex: effectiveMultiplex,
             sessionID: sessionID,
             tls: tls
         )
@@ -97,18 +109,15 @@ nonisolated extension ProxyClient {
         let destination = try NowhereProtocol.Target(host: destinationHost, port: destinationPort)
 
         let asymmetric = uplink != downlink
-        if asymmetric, tunnel != nil || configuration.chain?.isEmpty == false {
+        if asymmetric, !nwConfig.multiplex,
+           tunnel != nil || configuration.chain?.isEmpty == false {
             throw AnywhereError.proxy(.nowhere, .protocolViolation(detail: "Asymmetric Nowhere carriers do not support proxy chains"))
         }
 
-        if uplink != .tcp || downlink != .tcp || pool == 0 || tunnel != nil {
-            NowhereTCPConnectionPoolRegistry.shared.disable(configurationID: configuration.id)
-        }
-
         let configuredChainCanRebuildQUIC = configuration.chain?.isEmpty == false
-            && uplink == .udp && downlink == .udp
+            && (uplink == .udp && downlink == .udp || nwConfig.multiplex)
         let retries = tunnel == nil || configuredChainCanRebuildQUIC ? 1 : 0
-        let deadline = DispatchTime.now() + .seconds(30)
+        let deadline = ContinuousClock.now.advanced(by: .seconds(30))
 
         return try await connectLogicalNowhere(
             nwConfig: nwConfig,
@@ -127,7 +136,7 @@ nonisolated extension ProxyClient {
         destination: NowhereProtocol.Target,
         initialData: Data?,
         identityKey: NowhereTransportIdentityKey,
-        deadline: DispatchTime,
+        deadline: ContinuousClock.Instant,
         retriesLeft: Int
     ) async throws -> ProxyConnection {
         // The idle-close timer / SessionReplaced can race an open; retries share the
@@ -142,63 +151,35 @@ nonisolated extension ProxyClient {
 
             let attempt = NowhereFlowOpenAttempt()
             do {
-                // Single-winner race: the open (success/failure) vs. the deadline, resolved by
-                // `attempt.claimResult()` — the winner returns/throws, the loser returns nil and is
-                // torn down. Structured `withThrowingTaskGroup`, so the loser is cancelled on exit.
-                let connection = try await withThrowingTaskGroup(of: ProxyConnection?.self) { group in
-                    group.addTask { [weak self] in
-                        guard let self else {
-                            if attempt.claimResult() {
-                                throw AnywhereError.transport(.terminated)
-                            }
-                            return nil
-                        }
-                        do {
-                            let opened: ProxyConnection
-                            if nwConfig.uplink != nwConfig.downlink {
-                                opened = try await self.connectAsymmetricNowhere(
-                                    nwConfig: nwConfig,
-                                    command: command,
-                                    destination: destination,
-                                    initialData: initialData,
-                                    flowID: flowID,
-                                    attempt: attempt
-                                )
-                            } else {
-                                opened = try await self.connectDuplexNowhere(
-                                    nwConfig: nwConfig,
-                                    command: command,
-                                    destination: destination,
-                                    initialData: initialData,
-                                    flowID: flowID,
-                                    attempt: attempt
-                                )
-                            }
-                            if attempt.claimResult() { return opened }
-                            opened.cancel()   // the deadline already won
-                            return nil
-                        } catch {
-                            if attempt.claimResult() { throw error }
-                            return nil
-                        }
-                    }
-                    group.addTask {
-                        // Deadline racer: sleep to the shared absolute deadline,
-                        // then claim + tear down bound halves before failing.
-                        let nowNanos = DispatchTime.now().uptimeNanoseconds
-                        let deadlineNanos = deadline.uptimeNanoseconds
-                        let delayNanos = deadlineNanos > nowNanos ? deadlineNanos - nowNanos : 0
-                        try? await Task.sleep(nanoseconds: delayNanos)
-                        guard !Task.isCancelled, attempt.claimResult() else { return nil }
-                        attempt.cancel()
-                        throw AnywhereError.proxy(.nowhere, .openTimeout)
-                    }
-                    defer { group.cancelAll() }
-                    while let result = try await group.next() {
-                        if let opened = result { return opened }
-                        // nil = this task lost the claim; await the winner.
-                    }
+                let remaining = ContinuousClock.now.duration(to: deadline)
+                guard remaining > .zero else {
                     throw AnywhereError.proxy(.nowhere, .openTimeout)
+                }
+                let connection = try await withDialDeadline(
+                    remaining,
+                    onExpiry: { attempt.cancel() },
+                    error: { AnywhereError.proxy(.nowhere, .openTimeout) },
+                    discardingLateResult: { $0.cancel() }
+                ) { [weak self] in
+                    guard let self else { throw AnywhereError.transport(.terminated) }
+                    if nwConfig.uplink != nwConfig.downlink {
+                        return try await self.connectAsymmetricNowhere(
+                            nwConfig: nwConfig,
+                            command: command,
+                            destination: destination,
+                            initialData: initialData,
+                            flowID: flowID,
+                            attempt: attempt
+                        )
+                    }
+                    return try await self.connectDuplexNowhere(
+                        nwConfig: nwConfig,
+                        command: command,
+                        destination: destination,
+                        initialData: initialData,
+                        flowID: flowID,
+                        attempt: attempt
+                    )
                 }
                 return NowhereLeasedConnection(inner: connection, lease: flowLease)
             } catch {
@@ -211,6 +192,11 @@ nonisolated extension ProxyClient {
                 }()
                 let replaySafe = !attempt.hasStartedEarlyDataWrite || explicitReplacement
                 if retriesLeft > 0, replaySafe, Self.isRetryableLogicalNowhereFailure(error) {
+                    if explicitReplacement, nwConfig.multiplex {
+                        NowhereMuxShardRegistry.shared.invalidate(
+                            configurationID: configuration.id
+                        )
+                    }
                     if Self.shouldInvalidateAsymmetricQUICSession(
                         error: error,
                         uplink: nwConfig.uplink,
@@ -286,27 +272,32 @@ nonisolated extension ProxyClient {
         )
 
         if nwConfig.uplink == .tcp {
-            if nwConfig.pool > 0, tunnel == nil {
-                let connection: ProxyConnection
+            if nwConfig.multiplex {
+                let inheritedTunnel = tunnel
+                if inheritedTunnel != nil { setChainTunnel(nil) }
+                let chain = inheritedTunnel == nil ? configuredNowhereChain : nil
                 do {
-                    connection = try await NowhereTCPConnectionPoolRegistry.shared.acquire(
-                        configurationID: configuration.id,
-                        configuration: nwConfig,
-                        connectHost: directDialHost,
+                    let connection = try await openMultiplexedNowhereHalf(
+                        nwConfig: nwConfig,
                         destination: destination,
-                        mode: mode,
                         flowHeader: header,
                         initialData: initialData,
-                        attempt: attempt
+                        attempt: attempt,
+                        providedTunnel: inheritedTunnel,
+                        chain: chain
+                    )
+                    let logical: ProxyConnection = mode == .tcp
+                        ? connection
+                        : NowhereTCPUDPConnection(inner: connection)
+                    return NowhereDirectionalConnection(
+                        uplink: logical,
+                        downlink: logical,
+                        kind: kind
                     )
                 } catch {
+                    inheritedTunnel?.cancel()
                     throw Self.logicalNowhereFailure(error, context: .tcpCarrier)
                 }
-                return NowhereDirectionalConnection(
-                    uplink: connection,
-                    downlink: connection,
-                    kind: kind
-                )
             }
 
             let connection = NowhereTCPConnection(
@@ -327,7 +318,6 @@ nonisolated extension ProxyClient {
             do {
                 try await connection.openFresh(
                     destination: destination,
-                    mode: mode,
                     flowHeader: header,
                     initialData: initialData,
                     attempt: attempt
@@ -370,7 +360,7 @@ nonisolated extension ProxyClient {
             )
         }
 
-        let client = NowhereClient.shared(for: nwConfig)
+        let client = try NowhereClient.shared(for: nwConfig)
         return try await dispatchNowhere(
             client: client,
             header: header,
@@ -400,6 +390,39 @@ nonisolated extension ProxyClient {
             uplink: nwConfig.uplink, downlink: nwConfig.downlink
         )
 
+        let inheritedUplinkTunnel = tunnel
+        if inheritedUplinkTunnel != nil { setChainTunnel(nil) }
+        let rebuiltChain: [ProxyConfiguration]?
+        if inheritedUplinkTunnel != nil {
+            guard !parentChain.isEmpty else {
+                inheritedUplinkTunnel?.cancel()
+                throw AnywhereError.proxy(
+                    .nowhere,
+                    .protocolViolation(detail: "Mixed Nowhere Mux needs a rebuildable parent chain for its second carrier")
+                )
+            }
+            rebuiltChain = parentChain
+        } else {
+            rebuiltChain = configuredNowhereChain
+        }
+        if let rebuiltChain {
+            let carriersToRebuild: [NowhereNetwork] = inheritedUplinkTunnel == nil
+                ? [nwConfig.uplink, nwConfig.downlink]
+                : [nwConfig.downlink]
+            do {
+                for carrier in carriersToRebuild {
+                    let deliver: ProxyCommand = carrier == .tcp ? .tcp : .udp
+                    _ = try Self.computeChainHopCommands(
+                        chain: rebuiltChain,
+                        lastDeliver: deliver
+                    ).get()
+                }
+            } catch {
+                inheritedUplinkTunnel?.cancel()
+                throw error
+            }
+        }
+
         // Race the two carrier halves; the first hard failure aborts the sibling. A half
         // that already succeeded is bound to `attempt`, so the caller's teardown reaches it.
         return try await withThrowingTaskGroup(of: (isUplink: Bool, connection: ProxyConnection).self) { group in
@@ -408,7 +431,9 @@ nonisolated extension ProxyClient {
                     let connection = try await self.openAsymmetricHalf(
                         nwConfig: nwConfig, destination: destination, mode: mode,
                         header: open, carrier: nwConfig.uplink, attempt: attempt,
-                        initialData: initialData
+                        initialData: initialData,
+                        providedTunnel: inheritedUplinkTunnel,
+                        chain: inheritedUplinkTunnel == nil ? rebuiltChain : nil
                     )
                     return (true, connection)
                 } catch {
@@ -422,7 +447,9 @@ nonisolated extension ProxyClient {
                     let connection = try await self.openAsymmetricHalf(
                         nwConfig: nwConfig, destination: destination, mode: mode,
                         header: attach, carrier: nwConfig.downlink, attempt: attempt,
-                        initialData: nil
+                        initialData: nil,
+                        providedTunnel: nil,
+                        chain: rebuiltChain
                     )
                     return (false, connection)
                 } catch {
@@ -444,6 +471,7 @@ nonisolated extension ProxyClient {
                 // the already-bound (or in-flight) half so its open unblocks promptly, then
                 // the group drains before we rethrow.
                 attempt.cancel()
+                inheritedUplinkTunnel?.cancel()
                 group.cancelAll()
                 throw error
             }
@@ -477,9 +505,29 @@ nonisolated extension ProxyClient {
         header: NowhereProtocol.FlowHeader,
         carrier: NowhereNetwork,
         attempt: NowhereFlowOpenAttempt,
-        initialData: Data?
+        initialData: Data?,
+        providedTunnel: ProxyConnection?,
+        chain: [ProxyConfiguration]?
     ) async throws -> ProxyConnection {
         if carrier == .tcp {
+            if nwConfig.multiplex {
+                let connection = try await openMultiplexedNowhereHalf(
+                    nwConfig: nwConfig,
+                    destination: destination,
+                    flowHeader: header,
+                    initialData: initialData,
+                    attempt: attempt,
+                    providedTunnel: providedTunnel,
+                    chain: chain
+                )
+                switch mode {
+                case .tcp:
+                    return connection
+                case .udp:
+                    return NowhereTCPUDPConnection(inner: connection)
+                }
+            }
+
             let connection = NowhereTCPConnection(
                 configuration: nwConfig,
                 connectHost: directDialHost,
@@ -496,7 +544,6 @@ nonisolated extension ProxyClient {
             do {
                 try await connection.openFresh(
                     destination: destination,
-                    mode: mode,
                     flowHeader: header,
                     initialData: initialData,
                     attempt: attempt
@@ -513,7 +560,21 @@ nonisolated extension ProxyClient {
             }
         }
 
-        let client = NowhereClient.shared(for: nwConfig)
+        let client: NowhereClient
+        if let providedTunnel {
+            client = NowhereClient.chained(
+                configuration: nwConfig,
+                transport: ProxyConnectionDatagramTransport(connection: providedTunnel)
+            )
+        } else if let chain, !chain.isEmpty {
+            client = try await acquireChainedNowhereClient(
+                nwConfig: nwConfig,
+                chain: chain,
+                lastDeliver: .udp
+            )
+        } else {
+            client = try NowhereClient.shared(for: nwConfig)
+        }
         if header.kind == .tcp {
             return try await client.openTCPHalf(
                 destination: destination,
@@ -563,6 +624,166 @@ nonisolated extension ProxyClient {
         )
     }
 
+    private func openMultiplexedNowhereHalf(
+        nwConfig: NowhereConfiguration,
+        destination: NowhereProtocol.Target,
+        flowHeader: NowhereProtocol.FlowHeader,
+        initialData: Data?,
+        attempt: NowhereFlowOpenAttempt,
+        providedTunnel: ProxyConnection?,
+        chain: [ProxyConfiguration]?
+    ) async throws -> ProxyConnection {
+        let stream: NowhereMuxStream
+        let ownedCarrier: NowhereMuxCarrier?
+
+        if let providedTunnel {
+            let carrier = try await Self.makeNowhereMuxCarrier(
+                configuration: nwConfig,
+                connectHost: directDialHost,
+                tunnel: providedTunnel
+            )
+            do {
+                stream = try await carrier.openStream(flowID: flowHeader.flowID)
+                ownedCarrier = carrier
+            } catch {
+                carrier.abort()
+                throw error
+            }
+        } else {
+            let carrierChain: [ProxyConfiguration]
+            let carrierBuilder: @Sendable () async throws -> NowhereMuxCarrier
+            let connectHost = directDialHost
+
+            if let chain, !chain.isEmpty {
+                let cascadeCommands = try Self.computeChainHopCommands(
+                    chain: chain,
+                    lastDeliver: .tcp
+                ).get()
+                carrierChain = chain
+                let proxyHost = configuration.serverAddress
+                let proxyPort = configuration.serverPort
+                let useResolvedAddress = useResolvedAddressForDirectDial
+                carrierBuilder = {
+                    let holders = Mutex<[ProxyClient]>([])
+                    do {
+                        let tunnel = try await ProxyClient.buildDetachedChainTunnel(
+                            chain: chain,
+                            hopCommands: cascadeCommands,
+                            finalDestination: (proxyHost, proxyPort),
+                            useResolvedAddressForDirectDial: useResolvedAddress,
+                            track: { client in holders.withLock { $0.append(client) } }
+                        )
+                        let snapshot = holders.withLock { $0 }
+                        return try await Self.makeNowhereMuxCarrier(
+                            configuration: nwConfig,
+                            connectHost: connectHost,
+                            tunnel: tunnel,
+                            chainHolders: snapshot
+                        )
+                    } catch {
+                        let snapshot = holders.withLock { $0 }
+                        for client in snapshot { await client.cancel() }
+                        throw error
+                    }
+                }
+            } else {
+                carrierChain = []
+                carrierBuilder = {
+                    try await Self.makeNowhereMuxCarrier(
+                        configuration: nwConfig,
+                        connectHost: connectHost,
+                        tunnel: nil
+                    )
+                }
+            }
+
+            stream = try await NowhereMuxShardRegistry.shared.acquire(
+                configurationID: configuration.id,
+                configuration: nwConfig,
+                connectHost: connectHost,
+                chain: carrierChain,
+                flowID: flowHeader.flowID,
+                builder: carrierBuilder
+            )
+            ownedCarrier = nil
+        }
+
+        let connection = NowhereMuxFlowConnection(
+            stream: stream,
+            ownedCarrier: ownedCarrier
+        )
+        guard !isCancelled, attempt.bind(connection) else {
+            connection.abort()
+            throw AnywhereError.proxy(.nowhere, .streamClosed)
+        }
+        do {
+            try await connection.open(
+                destination: destination,
+                flowHeader: flowHeader,
+                initialData: initialData,
+                attempt: attempt
+            )
+            return connection
+        } catch {
+            connection.abort()
+            throw error
+        }
+    }
+
+    private static func makeNowhereMuxCarrier(
+        configuration: NowhereConfiguration,
+        connectHost: String,
+        tunnel: ProxyConnection?,
+        chainHolders: [ProxyClient] = []
+    ) async throws -> NowhereMuxCarrier {
+        let client = TLSClient(configuration: configuration.tcpTLSConfiguration)
+        let record: TLSRecordConnection
+        if let tunnel {
+            record = try await client.connect(overTunnel: tunnel)
+        } else {
+            record = try await client.connect(
+                host: connectHost,
+                port: configuration.proxyPort
+            )
+        }
+
+        do {
+            guard configuration.acceptsNegotiatedALPN(record.negotiatedALPN) else {
+                throw AnywhereError.tls(.handshakeFailed(
+                    detail: "Portal did not negotiate the configured ALPN"
+                ))
+            }
+            let exporter = try record.exportKeyingMaterial(
+                label: "EXPORTER-Nowhere-Auth",
+                context: Data(),
+                length: 32
+            )
+            let auth = try NowhereProtocol.makeAuthFrame(
+                authKey: configuration.authKey,
+                transport: .tlsTCP,
+                exporter: exporter,
+                sessionID: configuration.sessionID
+            )
+            let transport = TLSByteTransport(record)
+            var bootstrap = auth
+            bootstrap.append(NowhereMuxConstants.marker)
+            do {
+                try await transport.send(bootstrap)
+            } catch {
+                transport.cancel()
+                throw error
+            }
+            return NowhereMuxCarrier(
+                transport: transport,
+                tlsVersion: TLSVersion(rawValue: record.tlsVersion),
+                chainHolders: chainHolders
+            )
+        } catch {
+            record.cancel()
+            throw error
+        }
+    }
+
     private func connectPooledChainedNowhere(
         nwConfig: NowhereConfiguration,
         chain: [ProxyConfiguration],
@@ -571,52 +792,12 @@ nonisolated extension ProxyClient {
         destination: NowhereProtocol.Target,
         initialData: Data?
     ) async throws -> ProxyConnection {
-        let chainSignature = chain.map { $0.id.uuidString }.joined(separator: ":")
-
-        let cascadeCommands: [ProxyCommand]
-        switch Self.computeChainHopCommands(
-            chain: chain,
-            outerProtocol: .nowhere,
-            outerCommand: header.kind == .udp ? .udp : .tcp
-        ) {
-        case .success(let cmds):
-            cascadeCommands = cmds
-        case .failure(let error):
-            throw error
-        }
-
-        let nwServerAddress = configuration.serverAddress
-        let nwServerPort = configuration.serverPort
-        let useResolvedAddress = useResolvedAddressForDirectDial
-
         let client: NowhereClient
         do {
-            client = try await NowhereClient.acquireChained(
-                configuration: nwConfig,
-                chainSignature: chainSignature,
-                // Builder must be self-free: one build is shared across concurrent
-                // waiters and outlives any single caller's ProxyClient.
-                builder: {
-                    let holders = Mutex<[ProxyClient]>([])
-                    do {
-                        let chainTunnel = try await ProxyClient.buildDetachedChainTunnel(
-                            chain: chain,
-                            hopCommands: cascadeCommands,
-                            finalDestination: (nwServerAddress, nwServerPort),
-                            useResolvedAddressForDirectDial: useResolvedAddress,
-                            track: { client in
-                                holders.withLock { $0.append(client) }
-                            }
-                        )
-                        let snapshot = holders.withLock { $0 }
-                        let transport = ProxyConnectionDatagramTransport(connection: chainTunnel)
-                        return (transport, snapshot)
-                    } catch {
-                        let snapshot = holders.withLock { $0 }
-                        for c in snapshot { await c.cancel() }
-                        throw error
-                    }
-                }
+            client = try await acquireChainedNowhereClient(
+                nwConfig: nwConfig,
+                chain: chain,
+                lastDeliver: .udp
             )
         } catch {
             throw Self.logicalNowhereFailure(error, context: .chainBuild)
@@ -627,6 +808,53 @@ nonisolated extension ProxyClient {
             attempt: attempt,
             destination: destination,
             initialData: initialData
+        )
+    }
+
+    private var configuredNowhereChain: [ProxyConfiguration]? {
+        if let chain = configuration.chain, !chain.isEmpty { return chain }
+        return nil
+    }
+
+    private func acquireChainedNowhereClient(
+        nwConfig: NowhereConfiguration,
+        chain: [ProxyConfiguration],
+        lastDeliver: ProxyCommand
+    ) async throws -> NowhereClient {
+        let cascadeCommands = try Self.computeChainHopCommands(
+            chain: chain,
+            lastDeliver: lastDeliver
+        ).get()
+        let nwServerAddress = configuration.serverAddress
+        let nwServerPort = configuration.serverPort
+        let useResolvedAddress = useResolvedAddressForDirectDial
+
+        return try await NowhereClient.acquireChained(
+            configuration: nwConfig,
+            chain: chain,
+            // Builder must be self-free: one build is shared across concurrent
+            // waiters and outlives any single caller's ProxyClient.
+            builder: {
+                let holders = Mutex<[ProxyClient]>([])
+                do {
+                    let chainTunnel = try await ProxyClient.buildDetachedChainTunnel(
+                        chain: chain,
+                        hopCommands: cascadeCommands,
+                        finalDestination: (nwServerAddress, nwServerPort),
+                        useResolvedAddressForDirectDial: useResolvedAddress,
+                        track: { client in holders.withLock { $0.append(client) } }
+                    )
+                    let snapshot = holders.withLock { $0 }
+                    return (
+                        ProxyConnectionDatagramTransport(connection: chainTunnel),
+                        snapshot
+                    )
+                } catch {
+                    let snapshot = holders.withLock { $0 }
+                    for client in snapshot { await client.cancel() }
+                    throw error
+                }
+            }
         )
     }
 }

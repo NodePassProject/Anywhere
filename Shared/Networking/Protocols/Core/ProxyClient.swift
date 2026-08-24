@@ -181,6 +181,19 @@ nonisolated final class ProxyClient: Sendable {
             )
         }
 
+        // Nowhere TLS Mux owns its carrier routing. In particular, mixed TCP/UDP
+        // configurations need two independent paths through the configured chain,
+        // one ending in a TCP tunnel and the other in a datagram tunnel.
+        if configuration.outboundProtocol == .nowhere,
+           configuration.nowhereMultiplex {
+            return try await connectWithCommand(
+                command: command,
+                destinationHost: destinationHost,
+                destinationPort: destinationPort,
+                initialData: initialData
+            )
+        }
+
         if configuration.outboundProtocol == .nowhere,
            configuration.nowhereUplink != configuration.nowhereDownlink {
             throw AnywhereError.proxy(.nowhere, .protocolViolation(detail: "Asymmetric Nowhere carriers do not support proxy chains"))
