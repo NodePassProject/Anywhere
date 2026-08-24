@@ -78,21 +78,23 @@ nonisolated extension ProxyConfiguration {
         }
         let uplink = try carrier(rawUp, name: "up")
         let downlink = try carrier(rawDown, name: "down")
-        let supportsPreconnect = uplink == .tcp && downlink == .tcp
-        let pool: Int
-        if !supportsPreconnect {
-            pool = 0
-        } else if let rawPool = parameters["pool"] {
-            guard let parsed = Int(rawPool), parsed >= 0 else {
-                throw AnywhereError.parse(.invalidURL("Invalid Nowhere pool value"))
-            }
-            pool = min(parsed, NowherePool.validRange.upperBound)
-        } else {
-            pool = supportsPreconnect ? NowherePool.enabledDefault : 0
+        let multiplex: Bool
+        switch parameters["mux"] {
+        case nil, "0":
+            multiplex = false
+        case "1":
+            multiplex = uplink == .tcp || downlink == .tcp
+        default:
+            throw AnywhereError.parse(.invalidURL("Invalid Nowhere mux value"))
         }
 
         let rawSNI = parameters["sni"]
-        let sni = rawSNI == nil || rawSNI!.isEmpty || rawSNI == "none" ? body.host : rawSNI!
+        let sni: String
+        if let rawSNI, !rawSNI.isEmpty, rawSNI != "none" {
+            sni = rawSNI
+        } else {
+            sni = body.host
+        }
         let alpn: [String]?
         if let rawALPN = parameters["alpn"] {
             guard !rawALPN.isEmpty, rawALPN.utf8.count <= UInt8.max else {
@@ -113,7 +115,7 @@ nonisolated extension ProxyConfiguration {
                 key: key,
                 uplink: uplink,
                 downlink: downlink,
-                pool: pool,
+                multiplex: multiplex,
                 securityLayer: .tls(tlsConfiguration)
             )
         )

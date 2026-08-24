@@ -9,7 +9,6 @@ import Foundation
 import CryptoKit
 import Darwin
 
-/// Nowhere's compact application protocol. All multibyte integers use network byte order.
 nonisolated enum NowhereProtocol {
     static let closeErrCodeOK: UInt64 = 0x100
     static let defaultALPN = "now/1"
@@ -20,6 +19,7 @@ nonisolated enum NowhereProtocol {
     static let udpFragmentHeaderSize = 13
     static let maxUDPPacketSize = Int(UInt16.max)
     static let maxDomainLength = 253
+    static let maxPortalHops: UInt8 = 7
 
     typealias AuthKey = Data
 
@@ -72,10 +72,30 @@ nonisolated enum NowhereProtocol {
         let kind: FlowKind
         let uplink: NowhereNetwork
         let downlink: NowhereNetwork
+        let hops: UInt8
+
+        init(
+            role: FlowRole,
+            flowID: UInt32,
+            kind: FlowKind,
+            uplink: NowhereNetwork,
+            downlink: NowhereNetwork,
+            hops: UInt8 = 0
+        ) {
+            self.role = role
+            self.flowID = flowID
+            self.kind = kind
+            self.uplink = uplink
+            self.downlink = downlink
+            self.hops = hops
+        }
 
         var carriesTarget: Bool { role != .attach }
 
         func validate(on carrier: NowhereNetwork? = nil) throws {
+            guard hops <= maxPortalHops else {
+                throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Hop budget exceeds \(maxPortalHops)"))
+            }
             guard flowID != 0 else {
                 throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Invalid zero flow ID"))
             }
@@ -85,9 +105,7 @@ nonisolated enum NowhereProtocol {
                     throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Duplex carrier mismatch"))
                 }
             case .open, .attach:
-                guard uplink != downlink else {
-                    throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Split carriers must differ"))
-                }
+                break
             }
             if let carrier {
                 let expected = role == .attach ? downlink : uplink
@@ -247,6 +265,7 @@ nonisolated enum NowhereProtocol {
         var flags = header.role.rawValue | (header.kind.rawValue << 2)
         if header.uplink == .udp { flags |= 1 << 3 }
         if header.downlink == .udp { flags |= 1 << 4 }
+        flags |= header.hops << 5
         output.append(flags)
         output.appendUInt32(header.flowID)
         return output
@@ -255,14 +274,14 @@ nonisolated enum NowhereProtocol {
     static func decodeFlowHeader(_ data: Data) -> FlowHeader? {
         guard data.count == flowHeaderSize else { return nil }
         let flags = data.byte(at: 0)
-        guard flags & 0xe0 == 0,
-              let role = FlowRole(rawValue: flags & 0x03) else { return nil }
+        guard let role = FlowRole(rawValue: flags & 0x03) else { return nil }
         let header = FlowHeader(
             role: role,
             flowID: data.uint32(at: 1),
             kind: (flags & 0x04) == 0 ? .tcp : .udp,
             uplink: (flags & 0x08) == 0 ? .tcp : .udp,
-            downlink: (flags & 0x10) == 0 ? .tcp : .udp
+            downlink: (flags & 0x10) == 0 ? .tcp : .udp,
+            hops: flags >> 5
         )
         return (try? header.validate()) == nil ? nil : header
     }
@@ -387,8 +406,6 @@ nonisolated enum NowhereProtocol {
         }
     }
 
-    /// Validates only the common header so unknown or pre-READY routes can be dropped
-    /// before the callback-backed payload is copied.
     static func decodeUDPEnvelope(_ data: Data) -> (type: UDPType, flowID: UInt32)? {
         guard data.count >= udpHeaderSize else { return nil }
         let flags = data.byte(at: 0)

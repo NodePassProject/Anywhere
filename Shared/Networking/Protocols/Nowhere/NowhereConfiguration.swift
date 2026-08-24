@@ -9,34 +9,29 @@ import Foundation
 import Security
 import Synchronization
 
-nonisolated enum NowhereNetwork: String, Codable, CaseIterable {
+nonisolated enum NowhereNetwork: String, Codable, CaseIterable, Sendable {
     case udp
     case tcp
 }
 
-nonisolated enum NowherePool {
-    static let validRange = 0...9
-    static let sliderRange = 1...9
-    static let enabledDefault = 5
-}
-
-nonisolated struct NowhereTransportIdentityKey: Hashable {
+nonisolated struct NowhereTransportIdentityKey: Hashable, Sendable {
     let configurationID: UUID
     let proxyHost: String
     let proxyPort: UInt16
     let key: String
     let uplink: NowhereNetwork
     let downlink: NowhereNetwork
+    let multiplex: Bool
     let tls: TLSConfiguration
 }
 
-nonisolated struct NowhereConfiguration: Hashable {
+nonisolated struct NowhereConfiguration: Hashable, Sendable {
     let proxyHost: String
     let proxyPort: UInt16
     let key: String
     let uplink: NowhereNetwork
     let downlink: NowhereNetwork
-    let pool: Int
+    let multiplex: Bool
     let sessionID: Data
     let tls: TLSConfiguration
     let alpn: String
@@ -48,15 +43,10 @@ nonisolated struct NowhereConfiguration: Hashable {
         key: String,
         uplink: NowhereNetwork,
         downlink: NowhereNetwork,
-        pool: Int,
+        multiplex: Bool,
         sessionID: Data,
         tls: TLSConfiguration
     ) throws {
-        let supportsPool = uplink == .tcp && downlink == .tcp
-        guard (!supportsPool && pool == 0)
-                || (supportsPool && NowherePool.validRange.contains(pool)) else {
-            throw AnywhereError.proxy(.nowhere, .protocolViolation(detail: "Invalid Nowhere pool value"))
-        }
         guard sessionID.count == 16 else {
             throw AnywhereError.proxy(.nowhere, .protocolViolation(detail: "Invalid Nowhere session ID"))
         }
@@ -69,11 +59,28 @@ nonisolated struct NowhereConfiguration: Hashable {
         self.key = key
         self.uplink = uplink
         self.downlink = downlink
-        self.pool = pool
+        self.multiplex = multiplex && (uplink == .tcp || downlink == .tcp)
         self.sessionID = sessionID
         self.tls = tls
         self.alpn = alpn
         self.authKey = try NowhereProtocol.deriveAuthKey(sharedKey: key)
+    }
+
+    var tcpTLSConfiguration: TLSConfiguration {
+        TLSConfiguration(
+            serverName: tls.serverName,
+            alpn: [alpn],
+            minVersion: .tls13,
+            maxVersion: .tls13,
+            echEnabled: tls.echEnabled,
+            echConfig: tls.echConfig,
+            fingerprint: tls.fingerprint,
+            insecureSkipVerify: tls.insecureSkipVerify
+        )
+    }
+
+    func acceptsNegotiatedALPN(_ negotiated: String) -> Bool {
+        negotiated.utf8.elementsEqual(alpn.utf8)
     }
 }
 

@@ -46,7 +46,7 @@ extension ProxyConfiguration {
     }
 
     private func toNowhereURL() -> String {
-        guard case .nowhere(let key, let uplink, let downlink, let pool, let securityLayer) = outbound,
+        guard case .nowhere(let key, let uplink, let downlink, let multiplex, let securityLayer) = outbound,
               let tls = securityLayer.tlsConfiguration else {
             return ""
         }
@@ -54,8 +54,8 @@ extension ProxyConfiguration {
         let encodedKey = key.addingPercentEncoding(withAllowedCharacters: usernameCharacters) ?? ""
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
         var parameters: [String] = ["up=\(uplink.rawValue)", "down=\(downlink.rawValue)"]
-        if uplink == .tcp && downlink == .tcp {
-            parameters.append("pool=\(pool)")
+        if (uplink == .tcp || downlink == .tcp) && multiplex {
+            parameters.append("mux=1")
         }
         if tls.serverName != serverAddress {
             parameters.append("sni=\(encodedQueryValue(tls.serverName))")

@@ -22,8 +22,7 @@ class TVProxyEditorViewController: UITableViewController {
     private var nowhereKey = ""
     private var nowhereUplink: NowhereNetwork = .udp
     private var nowhereDownlink: NowhereNetwork = .udp
-    private var nowherePreconnectEnabled = true
-    private var nowherePoolValue = NowherePool.enabledDefault
+    private var nowhereMultiplex = false
     private var nowhereSNI = ""
     private var nowhereALPN = ""
 
@@ -143,7 +142,7 @@ class TVProxyEditorViewController: UITableViewController {
     private enum FieldKey {
         case name, address, port
         case outboundProtocol
-        case nowhereKey, nowhereUplink, nowhereDownlink, nowherePreconnect, nowherePool, nowhereSNI, nowhereALPN
+        case nowhereKey, nowhereUplink, nowhereDownlink, nowhereMultiplex, nowhereSNI, nowhereALPN
         case vlessUUID, vlessEncryption, vlessTransport, vlessFlow, vlessSecurity
         case vlessWebSocketHost, vlessWebSocketPath
         case vlessHTTPUpgradeHost, vlessHTTPUpgradePath
@@ -269,20 +268,12 @@ class TVProxyEditorViewController: UITableViewController {
                     key: .nowhereDownlink
                 ),
             ]
-            if nowhereUplink == .tcp && nowhereDownlink == .tcp {
+            if nowhereUplink == .tcp || nowhereDownlink == .tcp {
                 transportRows.append(.toggle(
-                    label: String(localized: "Preconnect"),
-                    isOn: nowherePreconnectEnabled,
-                    key: .nowherePreconnect
+                    label: String(localized: "Multiplex"),
+                    isOn: nowhereMultiplex,
+                    key: .nowhereMultiplex
                 ))
-                if nowherePreconnectEnabled {
-                    transportRows.append(.selection(
-                        label: String(localized: "Connections"),
-                        value: String(nowherePoolValue),
-                        options: NowherePool.sliderRange.map { (String($0), String($0)) },
-                        key: .nowherePool
-                    ))
-                }
             }
             sections.append((String(localized: "Network"), transportRows))
         } else if isVLESS {
@@ -739,11 +730,7 @@ class TVProxyEditorViewController: UITableViewController {
             if let network = NowhereNetwork(rawValue: value) { nowhereUplink = network }
         case .nowhereDownlink:
             if let network = NowhereNetwork(rawValue: value) { nowhereDownlink = network }
-        case .nowherePreconnect: nowherePreconnectEnabled = value == "true"
-        case .nowherePool:
-            if let count = Int(value), NowherePool.sliderRange.contains(count) {
-                nowherePoolValue = count
-            }
+        case .nowhereMultiplex: nowhereMultiplex = value == "true"
         case .nowhereSNI: nowhereSNI = value
         case .nowhereALPN: nowhereALPN = value
         case .vlessUUID: vlessUUID = value
@@ -841,13 +828,12 @@ class TVProxyEditorViewController: UITableViewController {
         name = configuration.name
         serverAddress = configuration.serverAddress
         serverPort = String(configuration.serverPort)
-        if case .nowhere(let key, let uplink, let downlink, let pool, let securityLayer) = configuration.outbound {
+        if case .nowhere(let key, let uplink, let downlink, let multiplex, let securityLayer) = configuration.outbound {
             let tls = securityLayer.tlsConfiguration ?? TLSConfiguration(serverName: "")
             nowhereKey = key
             nowhereUplink = uplink
             nowhereDownlink = downlink
-            nowherePreconnectEnabled = uplink == .tcp && downlink == .tcp && pool > 0
-            nowherePoolValue = pool > 0 ? pool : NowherePool.enabledDefault
+            nowhereMultiplex = (uplink == .tcp || downlink == .tcp) && multiplex
             nowhereSNI = tls.serverName
             nowhereALPN = tls.alpn?.first ?? ""
         }
@@ -1103,19 +1089,13 @@ class TVProxyEditorViewController: UITableViewController {
         let outbound: Outbound
         switch selectedProtocol {
         case .nowhere:
-            let pool = nowhereUplink == .tcp && nowhereDownlink == .tcp && nowherePreconnectEnabled
-                ? min(
-                    NowherePool.sliderRange.upperBound,
-                    max(NowherePool.sliderRange.lowerBound, nowherePoolValue)
-                )
-                : 0
             let sni = nowhereSNI.isEmpty ? bareAddress : nowhereSNI
             let alpn: [String]? = nowhereALPN.isEmpty ? nil : [nowhereALPN]
             outbound = .nowhere(
                 key: nowhereKey,
                 uplink: nowhereUplink,
                 downlink: nowhereDownlink,
-                pool: pool,
+                multiplex: (nowhereUplink == .tcp || nowhereDownlink == .tcp) && nowhereMultiplex,
                 securityLayer: .tls(TLSConfiguration(serverName: sni, alpn: alpn))
             )
         case .vless:

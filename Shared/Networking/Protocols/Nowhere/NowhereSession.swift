@@ -163,8 +163,6 @@ nonisolated final class NowhereSession: Sendable {
         self.authTask = Task { for try await _ in authStream {} }
     }
 
-    /// Establishes QUIC/TLS and the exporter. Authentication is deliberately deferred until
-    /// the first business flow supplies bytes for the pre-auth stream.
     func ensureReady() async throws {
         let begin: Bool = state.withLock { $0.transition(to: .connecting) }
         if begin { startConnection() }
@@ -193,8 +191,6 @@ nonisolated final class NowhereSession: Sendable {
             }
         }
 
-        // Strong `self`: the connect task owns the session until the transport settles, so it
-        // can't deallocate mid-handshake and leak the ngtcp2 state.
         Task { [self] in
             do {
                 try await quic.connect()
@@ -325,8 +321,6 @@ nonisolated final class NowhereSession: Sendable {
         }
     }
 
-    /// Reserves `payloadLength` UDP-budget units (min 1), returning a reservation whose deinit
-    /// releases them. Must be called with `state` held.
     private func reserveUDPBudget(_ payloadLength: Int, _ session: inout State) -> NowhereUDPBudgetReservation? {
         let units = max(payloadLength, 1)
         guard units <= Self.udpBudgetLimit - session.udpBudgetUsed else { return nil }
@@ -336,15 +330,12 @@ nonisolated final class NowhereSession: Sendable {
         }
     }
 
-    /// Fired from a reservation's deinit — possibly while a holder of `state` is dropping the slot
-    /// that owns it — so it defers the mutation onto a fresh task to avoid re-entering `state`.
     private func releaseUDPBudget(_ units: Int) {
         Task { [weak self] in
             self?.state.withLock { $0.udpBudgetUsed = max(0, $0.udpBudgetUsed - units) }
         }
     }
 
-    /// Must be called with `state` held.
     private func acceptFragment(_ message: NowhereProtocol.UDPMessage, _ session: inout State) -> NowhereQueuedDatagram? {
         expireReassembly(now: .now, &session)
         let key = ReassemblyKey(flowID: message.flowID, packetID: message.packetID)
@@ -403,20 +394,17 @@ nonisolated final class NowhereSession: Sendable {
         return NowhereQueuedDatagram(payload: payload, reservation: slot.reservation)
     }
 
-    /// Must be called with `state` held.
     private func removeReassembly(flowID: UInt32, _ session: inout State) {
         session.reassembly = session.reassembly.filter { $0.key.flowID != flowID }
         scheduleReassemblyExpiry(&session)
     }
 
-    /// Must be called with `state` held.
     private func expireReassembly(now: ContinuousClock.Instant, _ session: inout State) {
         session.reassembly = session.reassembly.filter {
             $0.value.createdAt.duration(to: now) <= Self.reassemblyTTL
         }
     }
 
-    /// Must be called with `state` held.
     private func scheduleReassemblyExpiry(_ session: inout State) {
         session.reassemblyExpiryTask?.cancel()
         session.reassemblyExpiryTask = nil
@@ -447,7 +435,6 @@ nonisolated final class NowhereSession: Sendable {
     ) async throws -> Int64 {
         try await ensureReady()
 
-        // Bootstrap branch: the first business stream carries AUTH + this FLOW request.
         enum Bootstrap { case notBootstrap; case failed; case ok(sid: Int64, authFrame: Data) }
         let bootstrap: Bootstrap = await quic.run { () -> Bootstrap in
             guard self.state.withLock({ $0.phase == .transportReady }) else { return .notBootstrap }
@@ -489,10 +476,8 @@ nonisolated final class NowhereSession: Sendable {
             break
         }
 
-        // Steady state: wait for auth to finish, then open a normal stream.
         try await authTask.value
         guard state.withLock({ $0.phase == .ready }) else { throw AnywhereError.proxy(.nowhere, .streamClosed) }
-        // Honor cancellation before spending a stream ID (the write below also surfaces it).
         try Task.checkCancellation()
 
         let sid = try await openBidiStreamWhenCreditAvailable(registerUnderLock: registerUnderLock)

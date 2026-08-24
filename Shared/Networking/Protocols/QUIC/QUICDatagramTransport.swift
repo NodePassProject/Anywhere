@@ -89,9 +89,6 @@ nonisolated final class ProxyConnectionDatagramTransport: QUICDatagramTransport,
             }
         }
         if case AnywhereError.proxy(.nowhere, let failure) = error {
-            // Conservatively allowlist only errors that describe a transient
-            // per-datagram/session window. New protocol errors remain terminal
-            // without coupling this transport adapter to every Nowhere case.
             if case .notReady = failure { return true }
             if case .connectionClosed = failure { return true }
             return false
