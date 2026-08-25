@@ -150,10 +150,12 @@ actor TunnelStack {
 
     let byteCounts = Mutex(TrafficByteCounts())
     nonisolated func addBytesIn(_ n: Int64, target: RouteTarget) {
-        byteCounts.withLock { $0.add(bytesIn: n, target: target) }
+        let resolved = target.resolved(against: udpConfig().defaultRouteTarget)
+        byteCounts.withLock { $0.add(bytesIn: n, target: resolved) }
     }
     nonisolated func addBytesOut(_ n: Int64, target: RouteTarget) {
-        byteCounts.withLock { $0.add(bytesOut: n, target: target) }
+        let resolved = target.resolved(against: udpConfig().defaultRouteTarget)
+        byteCounts.withLock { $0.add(bytesOut: n, target: resolved) }
     }
 
     // MARK: - Log Buffer
