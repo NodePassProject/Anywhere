@@ -135,7 +135,7 @@ nonisolated enum CloudBlobSync {
         guard AWCore.getICloudSyncEnabled() else { return }
         debounce?.cancel()
         debounce = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(500))
+            try? await Task.sleep(for: .milliseconds(2000))
             guard !Task.isCancelled else { return }
             logger.info("[iCloud] Store changed remotely; reloading synced stores")
             await Task.detached(priority: .utility) {
