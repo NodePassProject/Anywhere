@@ -16,7 +16,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         container.start()
         let operations = Operations(container: container)
-        CloudBlobSync.start { await operations.reloadAll() }
+        Task { await CloudSync.shared.start { keys in await operations.reload(keys) } }
         window?.rootViewController = TVTabBarController(container: container)
         return true
     }

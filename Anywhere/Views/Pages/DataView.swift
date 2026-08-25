@@ -9,9 +9,7 @@ import SwiftUI
 
 struct DataView: View {
     @Environment(AppSettings.self) private var appSettings
-    
-    @State private var showICloudRestartAlert = false
-    
+
     var body: some View {
         @Bindable var appSettings = appSettings
         List {
@@ -20,13 +18,5 @@ struct DataView: View {
             }
         }
         .navigationTitle("Data")
-        .alert("Restart Required", isPresented: $showICloudRestartAlert) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text("Restart Anywhere for the change to take effect.")
-        }
-        .onChange(of: appSettings.iCloudSyncEnabled) { _, newValue in
-            showICloudRestartAlert = newValue != SyncStore.shared.usesCloudKit
-        }
     }
 }

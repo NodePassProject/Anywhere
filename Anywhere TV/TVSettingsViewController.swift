@@ -236,15 +236,7 @@ class TVSettingsViewController: UIViewController {
 
     @objc private func iCloudSyncTapped() {
         iCloudSyncEnabled.toggle()
-        if iCloudSyncEnabled != SyncStore.shared.usesCloudKit {
-            let alert = UIAlertController(
-                title: String(localized: "Restart Required"),
-                message: String(localized: "Restart Anywhere for the change to take effect."),
-                preferredStyle: .alert
-            )
-            alert.addAction(UIAlertAction(title: String(localized: "OK"), style: .cancel))
-            present(alert, animated: true)
-        }
+        Task { await CloudSync.shared.syncEnabledDidChange() }
     }
 
     // MARK: - Focus

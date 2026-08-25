@@ -20,7 +20,10 @@ final class AppSettings {
     }
 
     var iCloudSyncEnabled: Bool {
-        didSet { AWCore.setICloudSyncEnabled(iCloudSyncEnabled) }
+        didSet {
+            AWCore.setICloudSyncEnabled(iCloudSyncEnabled)
+            Task { await CloudSync.shared.syncEnabledDidChange() }
+        }
     }
 
     var homeColorScheme: HomeColorScheme {

@@ -6,9 +6,6 @@
 //
 
 import Foundation
-import CoreData
-
-nonisolated private let logger = AnywhereLogger(category: "BlobSync")
 
 nonisolated enum BlobMerge {
     static func prevails<T: Codable & SoftDeletable>(_ challenger: T, over incumbent: T) -> Bool {
@@ -19,7 +16,8 @@ nonisolated enum BlobMerge {
         case (false, true): return false
         default: break
         }
-        guard let challengerData = encode(challenger), let incumbentData = encode(incumbent),
+        guard let challengerData = encode(challenger),
+              let incumbentData = encode(incumbent),
               challengerData != incumbentData else { return false }
         if challengerData.count != incumbentData.count {
             return incumbentData.count < challengerData.count
@@ -107,43 +105,5 @@ nonisolated enum LegacyBlobBridge {
     ) where T.ID == UUID {
         let order = SyncCodec.order(of: merged.filter { $0.deletedAt == nil })
         store.applyImported(key, items: SyncCodec.encodeItems(merged), order: order, orderStamp: stamp)
-    }
-}
-
-nonisolated enum CloudBlobSync {
-    @MainActor private static var remoteChangeObserver: (any NSObjectProtocol)?
-    @MainActor private static var debounce: Task<Void, Never>?
-    @MainActor private static var onRemoteChange: (@MainActor () async -> Void)?
-
-    @MainActor
-    static func start(onRemoteChange: @escaping @MainActor () async -> Void) {
-        Self.onRemoteChange = onRemoteChange
-        guard remoteChangeObserver == nil else { return }
-        remoteChangeObserver = NotificationCenter.default.addObserver(
-            forName: .NSPersistentStoreRemoteChange, object: nil, queue: nil
-        ) { _ in
-            Task { @MainActor in scheduleRefresh() }
-        }
-        Task.detached(priority: .utility) {
-            SyncStore.shared.reconcile()
-            SyncStore.shared.resumeLegacyExports()
-        }
-    }
-
-    @MainActor
-    private static func scheduleRefresh() {
-        guard AWCore.getICloudSyncEnabled() else { return }
-        debounce?.cancel()
-        debounce = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(2000))
-            guard !Task.isCancelled else { return }
-            logger.info("[iCloud] Store changed remotely; reloading synced stores")
-            await Task.detached(priority: .utility) {
-                LegacyBlobBridge.importAll(into: .shared)
-                SyncStore.shared.reconcile()
-            }.value
-            guard !Task.isCancelled else { return }
-            await onRemoteChange?()
-        }
     }
 }

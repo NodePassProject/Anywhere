@@ -70,17 +70,17 @@ final class Operations {
         )
     }
     
-    func reloadAll() async {
-        await ReloadOperation(
-            stores: [
-                container.groupStore,
-                container.subscriptionStore,
-                container.chainStore,
-                container.configurationStore,
-                container.routingRuleSetStore,
-                container.mitmRuleSetStore,
-            ],
-            reaction: container.mutationReaction
-        ).run()
+    func reload(_ keys: Set<SyncStore.Key>) async {
+        let stores: [(SyncStore.Key, any Reloadable)] = [
+            (.groups, container.groupStore),
+            (.subscriptions, container.subscriptionStore),
+            (.chains, container.chainStore),
+            (.configurations, container.configurationStore),
+            (.customRuleSets, container.routingRuleSetStore),
+            (.mitm, container.mitmRuleSetStore),
+        ]
+        let affected = stores.filter { keys.contains($0.0) }.map(\.1)
+        guard !affected.isEmpty else { return }
+        await ReloadOperation(stores: affected, reaction: container.mutationReaction).run()
     }
 }

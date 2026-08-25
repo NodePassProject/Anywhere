@@ -37,7 +37,7 @@ struct AnywhereApp: App {
         )
         watchSession.start()
 
-        CloudBlobSync.start { await operations.reloadAll() }
+        Task { await CloudSync.shared.start { keys in await operations.reload(keys) } }
 
         _container = State(initialValue: container)
         _operations = State(initialValue: operations)

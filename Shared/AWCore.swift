@@ -96,7 +96,6 @@ nonisolated final class AWCore {
         static let subscriptionDNSDoHURL = "subscriptionDNSDoHURL"
         static let subscriptionDNSMode = "subscriptionDNSMode"
         static let subscriptionDNSPlainServer = "subscriptionDNSPlainServer"
-        static let syncDeviceID = "syncDeviceID"
         static let trustedCertificateSHA256s = "trustedCertificateSHA256s"
         static let trustedSSIDs = "trustedSSIDs"
         static let tunnelExcludeAPNs = "tunnelExcludeAPNs"
@@ -157,13 +156,6 @@ nonisolated final class AWCore {
         userDefaults.set(value, forKey: UserDefaultsKey.iCloudSyncEnabled)
     }
     
-    static func getSyncDeviceID() -> String {
-        if let id = userDefaults.string(forKey: UserDefaultsKey.syncDeviceID) { return id }
-        let id = UUID().uuidString
-        userDefaults.set(id, forKey: UserDefaultsKey.syncDeviceID)
-        return id
-    }
-
     // Voyager
     static func getVoyagerMembership() -> Bool {
         userDefaults.bool(forKey: UserDefaultsKey.voyagerMembership)
