@@ -15,7 +15,7 @@ nonisolated enum NowhereMultiplexerConstants {
     static let streamWindowBytes = 512 * 1024
     static let connectionWindowBytes = 512 * 1024
     static let maximumStreams = 256
-    static let maximumActiveFlowsPerMultiplexer = 12
+    static let maximumActiveFlowsPerMultiplexer = 4
     static let outboundFrameLimit = 512
     static let inboundFrameLimit = 512
     static let windowUpdateThreshold = 4 * 1024
