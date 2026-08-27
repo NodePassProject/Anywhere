@@ -21,7 +21,7 @@ class TVProxyListViewController: UITableViewController {
     private var hasApplied = false
 
     private var collapsedSubscriptions = Set<UUID>()
-    private var updatingSubscription: Subscription?
+    private var updatingSubscriptionIds = Set<UUID>()
 
     init(container: AppContainer) {
         self.container = container
@@ -52,8 +52,11 @@ class TVProxyListViewController: UITableViewController {
         let addButton = UIBarButtonItem(barButtonSystemItem: .add, target: self, action: #selector(addTapped))
         addButton.tintColor = .label
 
-        let testAllButton = UIBarButtonItem(title: String(localized: "Test All"), style: .plain, target: self, action: #selector(testAllTapped))
+        let testAllImageConfiguration = UIImage.SymbolConfiguration(pointSize: 40, weight: .medium)
+        let testAllImage = UIImage(systemName: "gauge.with.dots.needle.67percent", withConfiguration: testAllImageConfiguration)
+        let testAllButton = UIBarButtonItem(image: testAllImage, style: .plain, target: self, action: #selector(testAllTapped))
         testAllButton.tintColor = .label
+        testAllButton.accessibilityLabel = String(localized: "Test Latency")
 
         navigationItem.rightBarButtonItems = [addButton, testAllButton]
 
@@ -119,12 +122,13 @@ class TVProxyListViewController: UITableViewController {
 
     private func configureHeader(_ header: TVSubscriptionHeaderView, subscription: Subscription) {
         header.onCollapse = { [weak self] in self?.toggleCollapse(subscription) }
-        header.onUpdate = { [weak self] in self?.updateSubscription(subscription) }
+        header.onEdit = { [weak self] in self?.presentRenameAlert(for: subscription) }
+        header.onUpdate = { [weak self] in self?.updateSubscriptions([subscription]) }
+        header.onDelete = { [weak self] in self?.operations.subscriptions.delete(subscription) }
         header.configure(
             name: subscription.name,
             isCollapsed: collapsedSubscriptions.contains(subscription.id),
-            isUpdating: updatingSubscription?.id == subscription.id,
-            menu: subscriptionMenu(for: subscription)
+            isUpdating: updatingSubscriptionIds.contains(subscription.id)
         )
     }
     
@@ -191,24 +195,6 @@ class TVProxyListViewController: UITableViewController {
         }
     }
 
-    private func subscriptionMenu(for subscription: Subscription) -> UIMenu {
-        UIMenu(children: [
-            UIAction(title: String(localized: "Test Latency"), image: UIImage(systemName: "gauge.with.dots.needle.67percent")) { [weak self] _ in
-                guard let self else { return }
-                self.operations.latency.testAll(self.container.configurationStore.configurations(for: subscription))
-            },
-            UIAction(title: String(localized: "Rename"), image: UIImage(systemName: "pencil")) { [weak self] _ in
-                self?.presentRenameAlert(for: subscription)
-            },
-            UIAction(title: String(localized: "Update"), image: UIImage(systemName: "arrow.clockwise")) { [weak self] _ in
-                self?.updateSubscription(subscription)
-            },
-            UIAction(title: String(localized: "Delete"), image: UIImage(systemName: "trash"), attributes: .destructive) { [weak self] _ in
-                self?.operations.subscriptions.delete(subscription)
-            },
-        ])
-    }
-
     // MARK: - Actions
 
     @objc private func addTapped() {
@@ -247,20 +233,31 @@ class TVProxyListViewController: UITableViewController {
         present(nav, animated: true)
     }
 
-    private func updateSubscription(_ subscription: Subscription) {
-        guard updatingSubscription == nil else { return }
-        updatingSubscription = subscription
+    func updateAllSubscriptions() {
+        updateSubscriptions(container.subscriptionStore.subscriptions)
+    }
+
+    private func updateSubscriptions(_ subscriptions: [Subscription]) {
+        let pending = subscriptions.filter { !updatingSubscriptionIds.contains($0.id) }
+        guard !pending.isEmpty else { return }
+        updatingSubscriptionIds.formUnion(pending.map(\.id))
         refreshVisibleHeaders()
         Task {
-            do {
-                try await operations.subscriptions.refresh(subscription)
-            } catch {
-                let alert = UIAlertController(title: String(localized: "Update Failed"), message: error.localizedDescription, preferredStyle: .alert)
+            var failures: [String] = []
+            for subscription in pending {
+                do {
+                    try await operations.subscriptions.refresh(subscription)
+                } catch {
+                    failures.append("\(subscription.name): \(error.localizedDescription)")
+                }
+                updatingSubscriptionIds.remove(subscription.id)
+                refreshVisibleHeaders()
+            }
+            if !failures.isEmpty {
+                let alert = UIAlertController(title: String(localized: "Update Failed"), message: failures.joined(separator: "\n"), preferredStyle: .alert)
                 alert.addAction(UIAlertAction(title: String(localized: "OK"), style: .cancel))
                 present(alert, animated: true)
             }
-            updatingSubscription = nil
-            refreshVisibleHeaders()
         }
     }
 

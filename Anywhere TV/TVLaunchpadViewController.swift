@@ -1,5 +1,5 @@
 //
-//  TVHomeViewController.swift
+//  TVLaunchpadViewController.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 3/19/26.
@@ -8,7 +8,7 @@
 import UIKit
 import NetworkExtension
 
-class TVHomeViewController: UIViewController {
+class TVLaunchpadViewController: UIViewController {
 
     // MARK: - Properties
 
@@ -58,7 +58,6 @@ class TVHomeViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        navigationController?.setNavigationBarHidden(true, animated: false)
         setupGradient()
         setupPowerButton()
         setupStatusLabel()
@@ -437,8 +436,8 @@ class TVHomeViewController: UIViewController {
     }
 
     @objc private func configCardTapped() {
-        let picker = TVConfigPickerViewController(container: container)
-        let nav = UINavigationController(rootViewController: picker)
+        let proxies = TVProxiesPageViewController(container: container)
+        let nav = UINavigationController(rootViewController: proxies)
         nav.modalPresentationStyle = .fullScreen
         present(nav, animated: true)
     }

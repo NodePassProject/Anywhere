@@ -9,16 +9,28 @@ import UIKit
 
 class TVProxiesPageViewController: UIViewController {
 
-    private let segmentedControl = UISegmentedControl(items: [
-        String(localized: "Servers"),
-        String(localized: "Chains"),
-    ])
+    private let container: AppContainer
     private let containerView = UIView()
     private let proxiesViewController: TVProxyListViewController
     private let chainsViewController: TVChainListViewController
     private weak var currentChild: UIViewController?
 
+    private lazy var moreItem: UIBarButtonItem = {
+        let menu = UIMenu(children: [
+            UIDeferredMenuElement.uncached { [weak self] completion in
+                completion(self?.moreMenuElements() ?? [])
+            }
+        ])
+        let configuration = UIImage.SymbolConfiguration(pointSize: 40, weight: .medium)
+        let image = UIImage(systemName: "ellipsis", withConfiguration: configuration)
+        let item = UIBarButtonItem(image: image, menu: menu)
+        item.tintColor = .label
+        item.accessibilityLabel = String(localized: "More")
+        return item
+    }()
+
     init(container: AppContainer) {
+        self.container = container
         self.proxiesViewController = TVProxyListViewController(container: container)
         self.chainsViewController = TVChainListViewController(container: container)
         super.init(nibName: nil, bundle: nil)
@@ -33,33 +45,65 @@ class TVProxiesPageViewController: UIViewController {
         super.viewDidLoad()
         title = String(localized: "Proxies")
 
-        segmentedControl.selectedSegmentIndex = 0
-        segmentedControl.addTarget(self, action: #selector(segmentChanged), for: .valueChanged)
-        segmentedControl.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(segmentedControl)
+        navigationItem.leftBarButtonItem = UIBarButtonItem(
+            barButtonSystemItem: .cancel, target: self, action: #selector(cancelTapped)
+        )
 
         containerView.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(containerView)
 
         NSLayoutConstraint.activate([
-            segmentedControl.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 20),
-            segmentedControl.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-
-            containerView.topAnchor.constraint(equalTo: segmentedControl.bottomAnchor, constant: 20),
+            containerView.topAnchor.constraint(equalTo: view.topAnchor),
             containerView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             containerView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             containerView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
 
-        show(proxiesViewController)
+        show(AWCore.getProxiesPageProxyType() == "chains" ? chainsViewController : proxiesViewController)
     }
 
-    @objc private func segmentChanged() {
-        show(segmentedControl.selectedSegmentIndex == 0 ? proxiesViewController : chainsViewController)
+    @objc private func cancelTapped() {
+        dismiss(animated: true)
     }
+
+    // MARK: - More Menu
+
+    private func moreMenuElements() -> [UIMenuElement] {
+        let showingServers = currentChild === proxiesViewController
+
+        let typePicker = UIMenu(options: [.displayInline, .singleSelection], children: [
+            UIAction(
+                title: String(localized: "Servers"),
+                image: UIImage(systemName: "server.rack"),
+                state: showingServers ? .on : .off
+            ) { [weak self] _ in
+                guard let self else { return }
+                self.show(self.proxiesViewController)
+            },
+            UIAction(
+                title: String(localized: "Chains"),
+                image: UIImage(systemName: "point.bottomleft.forward.to.point.topright.scurvepath.fill"),
+                state: showingServers ? .off : .on
+            ) { [weak self] _ in
+                guard let self else { return }
+                self.show(self.chainsViewController)
+            },
+        ])
+
+        var elements: [UIMenuElement] = [typePicker]
+        if showingServers, !container.subscriptionStore.subscriptions.isEmpty {
+            elements.append(UIMenu(options: .displayInline, children: [
+                UIAction(title: String(localized: "Update Subscriptions"), image: UIImage(systemName: "arrow.clockwise")) { [weak self] _ in
+                    self?.proxiesViewController.updateAllSubscriptions()
+                }
+            ]))
+        }
+        return elements
+    }
+
+    // MARK: - Children
 
     private func show(_ child: UIViewController) {
-        // Selection follows focus on tvOS, so this fires on every focus scrub.
         guard child !== currentChild else { return }
 
         if let current = currentChild {
@@ -76,8 +120,8 @@ class TVProxiesPageViewController: UIViewController {
         child.didMove(toParent: self)
         currentChild = child
 
-        navigationItem.rightBarButtonItems = child.navigationItem.rightBarButtonItems
-        // Data may have changed while the child was detached from the window.
+        navigationItem.rightBarButtonItems = [moreItem] + (child.navigationItem.rightBarButtonItems ?? [])
+        AWCore.setProxiesPageProxyType(child === proxiesViewController ? "servers" : "chains")
         child.setNeedsUpdateProperties()
     }
 }

@@ -43,8 +43,11 @@ class TVChainListViewController: UITableViewController {
         let addButton = UIBarButtonItem(barButtonSystemItem: .add, target: self, action: #selector(addTapped))
         addButton.tintColor = .label
 
-        let testAllButton = UIBarButtonItem(title: String(localized: "Test All"), style: .plain, target: self, action: #selector(testAllTapped))
+        let testAllImageConfiguration = UIImage.SymbolConfiguration(pointSize: 40, weight: .medium)
+        let testAllImage = UIImage(systemName: "gauge.with.dots.needle.67percent", withConfiguration: testAllImageConfiguration)
+        let testAllButton = UIBarButtonItem(image: testAllImage, style: .plain, target: self, action: #selector(testAllTapped))
         testAllButton.tintColor = .label
+        testAllButton.accessibilityLabel = String(localized: "Test Latency")
 
         navigationItem.rightBarButtonItems = [addButton, testAllButton]
 
