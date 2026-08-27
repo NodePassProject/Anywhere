@@ -386,6 +386,9 @@ actor TLSClient {
             )
 
         case .tls12(let cipherSuite, let serverRandom, let version, let extendedMasterSecret):
+            if echContext != nil {
+                throw AnywhereError.tls(.ech(.tls12Negotiated))
+            }
             self.serverRandom = serverRandom
             self.tls12CipherSuite = cipherSuite
             self.negotiatedVersion = version

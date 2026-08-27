@@ -109,17 +109,17 @@ nonisolated enum ECHEncryption {
 
     static func encodeInnerClientHello(_ innerMessage: Data, serverName: String, maxNameLength: Int) throws -> Data {
         guard innerMessage.count >= 4 else { throw AnywhereError.tls(.ech(.malformedInnerHello)) }
-
-        // Drop the 4-byte handshake header (type + uint24 length).
+        
         var encodedHelloBody = Data(innerMessage.dropFirst(4))
-
-        let base: Int
+        
+        var paddingLength: Int
         if !serverName.isEmpty {
-            base = max(0, maxNameLength - serverName.utf8.count)
+            paddingLength = max(0, maxNameLength - serverName.utf8.count)
         } else {
-            base = maxNameLength + 9
+            paddingLength = maxNameLength + 9
         }
-        let paddingLength = 31 - ((encodedHelloBody.count + base - 1) % 32)
+        let offset = (encodedHelloBody.count + paddingLength - 1) % 32
+        paddingLength += 31 - (offset < 0 ? offset + 32 : offset)
         if paddingLength > 0 {
             encodedHelloBody.append(Data(repeating: 0, count: paddingLength))
         }

@@ -121,6 +121,7 @@ nonisolated enum AnywhereError: Error {
             case hpkeSetupFailed
             case sealFailed
             case rejected(retryConfigList: Data?)
+            case tls12Negotiated
         }
 
         enum Reality: Sendable, Equatable {
@@ -443,6 +444,7 @@ nonisolated extension AnywhereError.TLS.ECH {
         case .sealFailed: "HPKE seal failed"
         case .rejected(let retry):
             "ECH rejected by server" + (retry != nil ? " (retry configs provided)" : "")
+        case .tls12Negotiated: "server negotiated TLS 1.2, so ECH did not apply"
         }
     }
 }
