@@ -76,7 +76,7 @@ nonisolated enum OutboundConnector {
         switch route.resolved(against: context?.defaultRouteTarget ?? .direct) {
         case .reject:
             throw AnywhereError.routing(.rejectedByRule(host: host))
-        case .default, .direct:
+        case .default, .defaultProxy, .direct:
             return try await dialDirect(host: host, port: port)
         case .proxy(let id):
             guard let context,

@@ -250,9 +250,10 @@ actor TCPConnection: MITMSessionHost {
 
         let router = stack.domainRouter
         switch match.action {
-        case .default:
+        case .default, .defaultProxy:
             ruleMatched = true
             ruleSetName = match.ruleSetName
+            routeTarget = match.action
         case .direct:
             ruleMatched = true
             ruleSetName = match.ruleSetName
@@ -394,10 +395,10 @@ actor TCPConnection: MITMSessionHost {
         }
 
         switch match.action {
-        case .default:
+        case .default, .defaultProxy:
             ruleMatched = true
             ruleSetName = match.ruleSetName
-            routeTarget = .default
+            routeTarget = match.action
             if let defaultConfiguration = stack.udpConfig().configuration {
                 configuration = defaultConfiguration
             }
@@ -1086,8 +1087,8 @@ actor TCPConnection: MITMSessionHost {
 
     private func upstreamRoute(applying match: DomainRouter.Match, dialHost host: String) -> (route: UpstreamRoute, ruleSetName: String?)? {
         switch match.action {
-        case .default:
-            return (defaultUpstreamRoute(), match.ruleSetName)
+        case .default, .defaultProxy:
+            return (defaultUpstreamRoute(as: match.action), match.ruleSetName)
         case .direct:
             return (.route(target: .direct, configuration: nil), match.ruleSetName)
         case .reject:
@@ -1121,11 +1122,11 @@ actor TCPConnection: MITMSessionHost {
         return nil
     }
 
-    private func defaultUpstreamRoute() -> UpstreamRoute {
+    private func defaultUpstreamRoute(as target: RouteTarget = .default) -> UpstreamRoute {
         guard let config = stack?.udpConfig(), case .proxy = config.defaultRouteTarget else {
-            return .route(target: .default, configuration: nil)
+            return .route(target: target, configuration: nil)
         }
-        return .route(target: .default, configuration: config.configuration)
+        return .route(target: target, configuration: config.configuration)
     }
 
     // MARK: - Close / abort / teardown

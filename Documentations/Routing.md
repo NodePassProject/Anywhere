@@ -7,11 +7,11 @@ authoring, the `.arrs` import format, and the exact matching semantics. It
 assumes familiarity with domain names and CIDR notation.
 
 > **The proxy target is not in the file.** A rule set's rules say *which*
-> destinations it matches; the action — Default, DIRECT, REJECT, or a specific
-> proxy / chain — is assigned per set in the app, under **Routing**. A file
-> may request an initial **Default / Direct / Reject** action through the
-> optional `routing` header, but that seeds the assignment **only when the set
-> is first created** — a subscription refresh never changes the action you
+> destinations it matches; the action — Default, PROXY, DIRECT, REJECT, or a
+> specific proxy / chain — is assigned per set in the app, under **Routing**.
+> A file may request an initial **Default / Direct / Reject** action through
+> the optional `routing` header, but that seeds the assignment **only when the
+> set is first created** — a subscription refresh never changes the action you
 > chose locally.
 
 ## Contents
@@ -83,15 +83,14 @@ one **assigned action** that applies to every rule in the set.
 | ADBlock           | no             | bundled rules database                   |
 | Custom            | yes            | authored in-app, imported, or subscribed |
 
-The action is one of **Default**, **DIRECT**, **REJECT**, or a specific proxy
-configuration / chain:
+The action is one of **Default**, **PROXY**, **DIRECT**, **REJECT**, or a
+specific proxy configuration / chain:
 
 - **Default** places the set in the lowest authored priority tier
   (**Neutral** — see below). A neutral match routes to the default route
-  target, the same destination an unmatched connection takes; its observable
-  effects are log attribution and shadowing the Country Bypass tier beneath
-  it. A set on Default never overrides a set with an explicit action.
-  **ADBlock** on Default is excluded from matching entirely.
+  target. A set on Default never overrides a set with an explicit action.
+- **PROXY** routes to the default route target, but as an explicit action.
+  No proxy is pinned into the payload — the target is resolved at match time.
 - The action is per-*set*: a single set cannot both reject some hosts and
   proxy others. Split divergent policy across multiple sets.
 - An assignment pointing at a deleted proxy or chain deactivates the set; the
@@ -160,7 +159,8 @@ decides, and lower tiers are not consulted.
 | 5     | Country Bypass | direct-routes the selected region (implicit)   |
 
 A set loads into the tier matching its origin only while it carries an
-explicit action; on **Default** it drops into Neutral instead. Cross-tier
+explicit action — **PROXY** included, even though it routes to the same target
+Neutral does; on **Default** it drops into Neutral instead. Cross-tier
 priority is by **tier, not specificity**: an ADBlock rule beats a
 more-specific User rule for the same host. Country Bypass is driven by the
 selected country code (bundled per-country rules, always **direct**) and is
@@ -357,7 +357,8 @@ deeper suffix wins within the tier regardless of set order.
   longest CIDR prefix; suffix before keyword; identical patterns go to the
   later-inserted rule (the set higher in the Routing list).
 - **Action is per set.** Every rule shares the set's assigned target; a set on
-  Default matches from the Neutral tier and routes to the default target.
+  Default matches from the Neutral tier and routes to the default target, and
+  one on PROXY routes to that same default target from its own tier.
 - **No-match fall-through.** Unmatched destinations take the default route:
   selected chain, else selected configuration, else the tunnel's
   configuration.

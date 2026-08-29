@@ -587,6 +587,7 @@ struct AnywhereRingGaugeStyle: GaugeStyle {
                 case .default: return "Default"
                 case .direct: return "Direct"
                 case .reject: return "Reject"
+                case .defaultProxy: return "Proxy"
                 case .proxy(let id): return names[id] ?? "Proxy"
                 }
             }

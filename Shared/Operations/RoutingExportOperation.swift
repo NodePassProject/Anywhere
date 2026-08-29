@@ -87,7 +87,9 @@ struct RoutingExportOperation {
                 let action: RoutingBinaryFormat.Action
                 var configId: UUID?
                 if explicitId == nil {
-                    action = .default
+                    action = .fallback
+                } else if explicitId == "PROXY" {
+                    action = .defaultProxy
                 } else if explicitId == "DIRECT" {
                     action = .direct
                 } else if explicitId == "REJECT" {

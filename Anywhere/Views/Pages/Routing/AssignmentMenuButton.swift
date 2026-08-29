@@ -15,58 +15,63 @@ struct AssignmentMenuButton: View {
     @Environment(GroupStore.self) private var groupStore
     @Environment(SubscriptionStore.self) private var subscriptionStore
 
-    private var picker: PickerQuery {
-        PickerQuery(
-            configurations: configurationStore.configurations,
-            chains: chainStore.chains,
-            subscriptions: subscriptionStore.subscriptions
-        )
-    }
-
     var body: some View {
         Menu {
             Picker("Policies", selection: $selection) {
-                Text("Default").tag(nil as String?)
-                Text("DIRECT").tag("DIRECT" as String?)
-                Text("REJECT").tag("REJECT" as String?)
+                Label("Default", systemImage: "diamond").tag(nil as String?)
+                Label("PROXY", systemImage: "circle.grid.2x1.right.filled").tag("PROXY" as String?)
+                Label("DIRECT", systemImage: "arrow.right").tag("DIRECT" as String?)
+                Label("REJECT", systemImage: "slash.circle").tag("REJECT" as String?)
             }
-            Menu("Servers") {
+            Menu {
                 Picker("Servers", selection: $selection) {
                     ForEach(ungroupedProxyItems) { item in
                         Text(item.name).tag(item.id.uuidString as String?)
                     }
                 }
+            } label: {
+                Label("Servers", systemImage: "server.rack")
             }
-            if !picker.chainItems.isEmpty {
-                Menu("Chains") {
+            let chains = chainItems
+            if !chains.isEmpty {
+                Menu {
                     Picker("Chains", selection: $selection) {
-                        ForEach(picker.chainItems) { item in
+                        ForEach(chains) { item in
                             Text(item.name).tag(item.id.uuidString as String?)
                         }
                     }
+                } label: {
+                    Label("Chains", systemImage:  "point.bottomleft.forward.to.point.topright.scurvepath.fill")
                 }
             }
             Section("Groups") {
                 ForEach(serverGroups) { group in
                     let members = memberItems(of: group)
                     if !members.isEmpty {
-                        Menu(group.name) {
+                        Menu {
                             Picker(group.name, selection: $selection) {
                                 ForEach(members) { item in
                                     Text(item.name).tag(item.id.uuidString as String?)
                                 }
                             }
+                        } label: {
+                            Label(group.name, systemImage: "folder")
                         }
                     }
                 }
             }
             Section("Subscriptions") {
-                ForEach(picker.subscriptionSections) { section in
-                    Menu(section.header ?? "") {
-                        Picker(section.header ?? "", selection: $selection) {
-                            ForEach(section.items) { item in
-                                Text(item.name).tag(item.id.uuidString as String?)
+                ForEach(subscriptionStore.subscriptions) { subscription in
+                    let members = memberItems(of: subscription)
+                    if !members.isEmpty {
+                        Menu {
+                            Picker(subscription.name, selection: $selection) {
+                                ForEach(members) { item in
+                                    Text(item.name).tag(item.id.uuidString as String?)
+                                }
                             }
+                        } label: {
+                            Label(subscription.name, systemImage: "globe")
                         }
                     }
                 }
@@ -81,14 +86,24 @@ struct AssignmentMenuButton: View {
         }
         .buttonStyle(.plain)
     }
-
+    
     private var serverGroups: [ProxyGroup] {
         groupStore.groups(of: .servers)
     }
-
+    
     private var ungroupedProxyItems: [PickerItem] {
         let grouped = Set(serverGroups.flatMap(\.memberIds))
-        return picker.standaloneItems.filter { !grouped.contains($0.id) }
+        return configurationStore.configurations
+            .filter { $0.subscriptionId == nil && !grouped.contains($0.id) }
+            .map { PickerItem(id: $0.id, name: $0.name) }
+    }
+
+    private var chainItems: [PickerItem] {
+        chainStore.chains.compactMap { chain in
+            let proxies = chain.resolveProxies(from: configurationStore.configurations)
+            guard proxies.count == chain.proxyIds.count, proxies.count >= 2 else { return nil }
+            return PickerItem(id: chain.id, name: chain.name)
+        }
     }
 
     private func memberItems(of group: ProxyGroup) -> [PickerItem] {
@@ -97,6 +112,12 @@ struct AssignmentMenuButton: View {
                 .first { $0.id == id }
                 .map { PickerItem(id: $0.id, name: $0.name) }
         }
+    }
+
+    private func memberItems(of subscription: Subscription) -> [PickerItem] {
+        configurationStore.configurations
+            .filter { $0.subscriptionId == subscription.id }
+            .map { PickerItem(id: $0.id, name: $0.name) }
     }
 }
 
@@ -109,7 +130,9 @@ struct AssignmentLabel: View {
     var body: some View {
         HStack {
             if let assignedId = assignedConfigurationId {
-                if assignedId == "DIRECT" {
+                if assignedId == "PROXY" {
+                    Text("PROXY")
+                } else if assignedId == "DIRECT" {
                     Text("DIRECT")
                 } else if assignedId == "REJECT" {
                     Text("REJECT")

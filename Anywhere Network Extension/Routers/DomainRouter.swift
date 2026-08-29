@@ -222,7 +222,8 @@ nonisolated final class DomainRouter: Sendable {
 
         private mutating func readAction() throws(AnywhereError) -> RouteTarget {
             switch RoutingBinaryFormat.Action(rawValue: try u8()) {
-            case .default: return .default
+            case .fallback: return .default
+            case .defaultProxy: return .defaultProxy
             case .direct: return .direct
             case .reject: return .reject
             case .proxy: return .proxy(try readUUID())
@@ -303,7 +304,7 @@ nonisolated final class DomainRouter: Sendable {
 
     func resolveConfiguration(action: RouteTarget) -> ProxyConfiguration? {
         switch action {
-        case .default, .direct, .reject:
+        case .default, .defaultProxy, .direct, .reject:
             return nil
         case .proxy(let id):
             return routingState.withLock { $0.configurationMap[id] }

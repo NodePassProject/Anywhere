@@ -11,6 +11,7 @@ struct RequestsView: View {
     @State private var requestsModel = RequestsModel()
     @Environment(ConfigurationStore.self) private var configStore
     @Environment(ChainStore.self) private var chainStore
+    @Environment(ProxySelection.self) private var proxySelection: ProxySelection?
     @State private var selection = Set<UUID>()
     @State private var editMode: EditMode = .inactive
 
@@ -107,7 +108,7 @@ struct RequestsView: View {
         case .default: "info.circle.fill"
         case .direct: "arrow.right.circle.fill"
         case .reject: "xmark.bin.circle.fill"
-        case .proxy: "arrow.trianglehead.turn.up.right.circle.fill"
+        case .defaultProxy, .proxy: "arrow.trianglehead.turn.up.right.circle.fill"
         }
     }
     
@@ -123,15 +124,19 @@ struct RequestsView: View {
     private func label(for entry: RequestsModel.Entry) -> String {
         switch entry.routeTarget {
         case .default: String(localized: "Default")
-        case .direct: String(localized: "DIRECT")
-        case .reject: String(localized: "REJECT")
-        case .proxy: String(localized: "Proxy")
+        case .direct: String(localized: "Direct")
+        case .reject: String(localized: "Reject")
+        case .defaultProxy, .proxy: String(localized: "Proxy")
         }
     }
     
     private func routeName(for entry: RequestsModel.Entry) -> String? {
-        guard case .proxy = entry.routeTarget else { return nil }
-        return entry.routeTarget.displayName(configStore: configStore, chainStore: chainStore)
+        switch entry.routeTarget {
+        case .defaultProxy, .proxy:
+            entry.routeTarget.displayName(configStore: configStore, chainStore: chainStore, selection: proxySelection)
+        case .default, .direct, .reject:
+            nil
+        }
     }
 
     private func labelColor(for entry: RequestsModel.Entry) -> Color {
@@ -139,7 +144,7 @@ struct RequestsView: View {
         case .default: .blue
         case .direct: .green
         case .reject: .red
-        case .proxy: .purple
+        case .defaultProxy, .proxy: .purple
         }
     }
     

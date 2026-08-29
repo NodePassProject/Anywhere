@@ -8,10 +8,12 @@
 import Foundation
 
 extension RouteTarget {
-    func displayName(configStore: ConfigurationStore, chainStore: ChainStore) -> String {
+    func displayName(configStore: ConfigurationStore, chainStore: ChainStore, selection: ProxySelection? = nil) -> String {
         switch self {
         case .default:
             return String(localized: "Default")
+        case .defaultProxy:
+            return selection?.selectedConfiguration?.name ?? String(localized: "Proxy")
         case .direct:
             return String(localized: "DIRECT")
         case .reject:

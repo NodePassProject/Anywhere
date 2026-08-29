@@ -8,7 +8,8 @@
 import Foundation
 
 nonisolated enum RouteTarget: Hashable, Sendable {
-    case `default`
+    case `default`       // nothing decided: the default route applies because no rule claimed the connection
+    case defaultProxy    // a rule claimed the connection and sent it to the default route
     case direct
     case reject
     case proxy(UUID)
@@ -19,8 +20,10 @@ nonisolated enum RouteTarget: Hashable, Sendable {
     }
     
     func resolved(against defaultTarget: RouteTarget) -> RouteTarget {
-        if case .default = self { return defaultTarget }
-        return self
+        switch self {
+        case .default, .defaultProxy: return defaultTarget
+        case .direct, .reject, .proxy: return self
+        }
     }
 }
 
@@ -31,6 +34,7 @@ nonisolated extension RouteTarget: Codable {
         let raw = try decoder.singleValueContainer().decode(String.self)
         switch raw {
         case "default": self = .default
+        case "default-proxy": self = .defaultProxy
         case "direct": self = .direct
         case "reject": self = .reject
         default:
@@ -53,6 +57,7 @@ nonisolated extension RouteTarget: Codable {
     var storageKey: String {
         switch self {
         case .default: return "default"
+        case .defaultProxy: return "default-proxy"
         case .direct: return "direct"
         case .reject: return "reject"
         case .proxy(let id): return "proxy:\(id.uuidString)"

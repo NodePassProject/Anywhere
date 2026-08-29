@@ -12,7 +12,7 @@ import SwiftUI
 nonisolated struct RoutingRuleSet: Identifiable, Equatable {
     let id: String   // built-in: name, custom: UUID string
     let name: String
-    var assignedConfigurationId: String?  // nil = default, "DIRECT" = bypass, "REJECT" = block, UUID string = proxy
+    var assignedConfigurationId: String?  // nil = default, "PROXY" = default proxy, "DIRECT" = bypass, "REJECT" = block, UUID string = proxy
     var isCustom: Bool = false
 }
 
@@ -188,6 +188,7 @@ class RoutingRuleSetStore {
         var affected: [String] = []
         for (index, ruleSet) in ruleSets.enumerated() {
             guard let assignedId = ruleSet.assignedConfigurationId,
+                  assignedId != "PROXY",
                   assignedId != "DIRECT",
                   assignedId != "REJECT",
                   !availableIds.contains(assignedId) else { continue }

@@ -77,7 +77,7 @@ nonisolated struct RoutingRule: Codable, Equatable, Identifiable {
 ///
 /// Entry:
 ///   tier      UInt8               0 adBlock · 1 builtIn · 2 user · 3 neutral · 4 bypass
-///   action    UInt8               0 default · 1 direct · 2 reject · 3 proxy
+///   action    UInt8               0 fallback · 1 defaultProxy · 2 direct · 3 reject · 4 proxy
 ///   configId  [16]                raw UUID bytes — present iff action == proxy
 ///   ruleCount UInt32
 ///   rules     ruleCount × Rule
@@ -87,9 +87,16 @@ nonisolated struct RoutingRule: Codable, Equatable, Identifiable {
 ///   valueLen  UInt16              UTF-8 byte length
 ///   value     [valueLen]          UTF-8 domain/CIDR (folded to lowercase on read)
 /// ```
+///
 nonisolated enum RoutingBinaryFormat {
     static let magic: [UInt8] = [0x41, 0x52, 0x42, 0x32]  // "ARB2"
 
     enum Tier: UInt8 { case adBlock = 0, builtIn = 1, user = 2, neutral = 3, bypass = 4 }
-    enum Action: UInt8 { case `default` = 0, direct = 1, reject = 2, proxy = 3 }
+    enum Action: UInt8 {
+        case fallback = 0
+        case defaultProxy = 1
+        case direct = 2
+        case reject = 3
+        case proxy = 4
+    }
 }
