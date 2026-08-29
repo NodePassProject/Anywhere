@@ -12,6 +12,7 @@ struct HomeView: View {
     private enum Page: Hashable {
         case launchpad
         case missionControl
+        case toolbox
         case data
         case personalization
         case tunnel
@@ -24,6 +25,7 @@ struct HomeView: View {
         case about
     }
     
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(AppSettings.self) private var appSettings
     @Environment(TunnelController.self) private var tunnelController
 
@@ -35,6 +37,18 @@ struct HomeView: View {
     }
 
     var body: some View {
+        switch horizontalSizeClass {
+        case .regular:
+            splitView
+        case .compact:
+            tabView
+        default:
+            EmptyView()
+        }
+    }
+    
+    @ViewBuilder
+    private var splitView: some View {
         NavigationSplitView(preferredCompactColumn: $preferredColumn) {
             List(selection: $selectedPage) {
                 Section {
@@ -83,6 +97,8 @@ struct HomeView: View {
                 LaunchpadView()
             case .missionControl:
                 MissionControlView()
+            case .toolbox:
+                ToolboxView()
             case .data:
                 DataView()
             case .personalization:
@@ -108,6 +124,37 @@ struct HomeView: View {
             }
         }
         .navigationSplitViewStyle(.balanced)
+    }
+    
+    @ViewBuilder
+    private var tabView: some View {
+        TabView(selection: $selectedPage) {
+            Tab(value: .launchpad) {
+                LaunchpadView()
+            } label: {
+                Image("anywhere")
+            }
+            if isConnected {
+                Tab(value: .missionControl) {
+                    MissionControlView()
+                } label: {
+                    Image(systemName: "rectangle.3.group.fill")
+                }
+            }
+            if #available(iOS 27.0, *) {
+                Tab(value: .toolbox, role: .prominent) {
+                    ToolboxView()
+                } label: {
+                    Image(systemName: "latch.2.case.fill")
+                }
+            } else {
+                Tab(value: .toolbox, role: .search) {
+                    ToolboxView()
+                } label: {
+                    Image(systemName: "latch.2.case.fill")
+                }
+            }
+        }
     }
 }
 

@@ -41,18 +41,23 @@ struct LaunchpadView: View {
     private var isTransitioning: Bool { tunnelController.rawStatus.isTransitioning }
 
     var body: some View {
-        ZStack {
-            BackgroundGradient(isConnected: isConnected)
-                .ignoresSafeArea()
-            
-            ScrollView {
-                VStack(spacing: 100) {
+        NavigationStack {
+            ZStack {
+                BackgroundGradient(isConnected: isConnected)
+                    .ignoresSafeArea()
+                
+                VStack(spacing: 0) {
                     VStack(spacing: 20) {
                         powerButton
                         statusLabel
                     }
+                    .layoutPriority(1)
+                    Rectangle()
+                        .fill(.clear)
+                        .frame(idealHeight: 100, maxHeight: 100)
                     configurationCard
                         .frame(maxWidth: Self.maxControlWidth)
+                        .layoutPriority(1)
                 }
                 .padding()
                 .animation(connectionEffectsEnabled ? Animation.bouncy : nil, value: isConnected)
@@ -61,43 +66,43 @@ struct LaunchpadView: View {
                     return .impact
                 }
             }
-        }
-        .colorScheme(appSettings.homeColorScheme.colorScheme)
-        .navigationTitle("Anywhere")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbarColorScheme(appSettings.homeColorScheme.colorScheme, for: .navigationBar)
-        .sheet(isPresented: $showingProxiesView) {
-            ProxiesView()
-                .environment(operations)
-                .environment(proxySelection)
-                .environment(latencyCenter)
-                .environment(configurationStore)
-                .environment(chainStore)
-                .environment(groupStore)
-                .environment(subscriptionStore)
-        }
-        .sheet(isPresented: $showingAddSheet) {
-            DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
-                AddProxyView(showingManualAddSheet: $showingManualAddSheet)
+            .colorScheme(appSettings.homeColorScheme.colorScheme)
+            .navigationTitle("Anywhere")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarColorScheme(appSettings.homeColorScheme.colorScheme, for: .navigationBar)
+            .sheet(isPresented: $showingProxiesView) {
+                ProxiesView()
                     .environment(operations)
+                    .environment(proxySelection)
+                    .environment(latencyCenter)
+                    .environment(configurationStore)
+                    .environment(chainStore)
+                    .environment(groupStore)
+                    .environment(subscriptionStore)
             }
-        }
-        .sheet(isPresented: $showingManualAddSheet) {
-            ProxyEditorView { configuration in
-                operations.configurations.add(configuration); operations.selection.selectIfNone(configuration)
+            .sheet(isPresented: $showingAddSheet) {
+                DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
+                    AddProxyView(showingManualAddSheet: $showingManualAddSheet)
+                        .environment(operations)
+                }
             }
-        }
-        .alert("VPN Error", isPresented: Binding(
-            get: { tunnelController.startError != nil },
-            set: { if !$0 { tunnelController.startError = nil } }
-        )) {
-            Button("OK") { tunnelController.startError = nil }
-        } message: {
-            Text(tunnelController.startError ?? "")
-        }
-        .onChange(of: tunnelController.isManagerReady, initial: true) { _, ready in
-            guard ready, !connectionEffectsEnabled else { return }
-            Task { @MainActor in connectionEffectsEnabled = true }
+            .sheet(isPresented: $showingManualAddSheet) {
+                ProxyEditorView { configuration in
+                    operations.configurations.add(configuration); operations.selection.selectIfNone(configuration)
+                }
+            }
+            .alert("VPN Error", isPresented: Binding(
+                get: { tunnelController.startError != nil },
+                set: { if !$0 { tunnelController.startError = nil } }
+            )) {
+                Button("OK") { tunnelController.startError = nil }
+            } message: {
+                Text(tunnelController.startError ?? "")
+            }
+            .onChange(of: tunnelController.isManagerReady, initial: true) { _, ready in
+                guard ready, !connectionEffectsEnabled else { return }
+                Task { @MainActor in connectionEffectsEnabled = true }
+            }
         }
     }
 
