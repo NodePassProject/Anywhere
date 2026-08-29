@@ -6,7 +6,6 @@
 //
 
 import Foundation
-import NetworkExtension
 import WatchConnectivity
 
 nonisolated private let logger = AnywhereLogger(category: "WatchSessionManager")
@@ -17,18 +16,22 @@ final class WatchSessionManager: NSObject {
     private let selection: ProxySelection
     private let configurationStore: ConfigurationStore
     private let chainStore: ChainStore
+    private let groupStore: GroupStore
     private let subscriptionStore: SubscriptionStore
     private let operations: Operations
 
     private var session: WCSession?
     
-    private var lastPushedSnapshotData: Data?
+    private var mirrored: WatchBridge.Snapshot?
+    
+    private var readyWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
 
     init(
         tunnel: TunnelController,
         selection: ProxySelection,
         configurationStore: ConfigurationStore,
         chainStore: ChainStore,
+        groupStore: GroupStore,
         subscriptionStore: SubscriptionStore,
         operations: Operations
     ) {
@@ -36,110 +39,84 @@ final class WatchSessionManager: NSObject {
         self.selection = selection
         self.configurationStore = configurationStore
         self.chainStore = chainStore
+        self.groupStore = groupStore
         self.subscriptionStore = subscriptionStore
         self.operations = operations
         super.init()
     }
-    
+
     func start() {
         guard WCSession.isSupported() else { return }
         let session = WCSession.default
         self.session = session
         session.delegate = self
         session.activate()
-        observeAndPush()
+        observeMirroredState()
+        observeReadiness()
     }
 
-    // MARK: - State Mirroring
+    // MARK: - Snapshot
     
-    private func observeAndPush() {
-        withObservationTracking {
-            _ = buildSnapshot()
-        } onChange: { [weak self] in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.pushSnapshot()
-                self.observeAndPush()
-            }
-        }
-    }
-
-    private func buildSnapshot() -> WatchBridge.Snapshot {
-        var sections: [WatchBridge.Section] = []
-        let picker = PickerQuery(
-            configurations: configurationStore.configurations,
-            chains: chainStore.chains,
-            subscriptions: subscriptionStore.subscriptions
-        )
-        let standalone = picker.standaloneItems
-        if !standalone.isEmpty {
-            sections.append(WatchBridge.Section(
-                id: WatchBridge.standaloneSectionId,
-                header: nil,
-                items: standalone.map { WatchBridge.Item(id: $0.id, name: $0.name) }
-            ))
-        }
-        let chains = picker.chainItems
-        if !chains.isEmpty {
-            sections.append(WatchBridge.Section(
-                id: WatchBridge.chainsSectionId,
-                header: String(localized: "Chains"),
-                items: chains.map { WatchBridge.Item(id: $0.id, name: $0.name) }
-            ))
-        }
-        for section in picker.subscriptionSections {
-            sections.append(WatchBridge.Section(
-                id: section.id,
-                header: section.header,
-                items: section.items.map { WatchBridge.Item(id: $0.id, name: $0.name) }
-            ))
-        }
-
-        return WatchBridge.Snapshot(
+    private var currentSnapshot: WatchBridge.Snapshot {
+        WatchSnapshotBuilder(
             status: tunnel.status,
             selectedId: selection.selectedChainId ?? selection.selectedConfiguration?.id,
             selectedName: selection.selectedConfiguration?.name,
-            sections: sections
-        )
+            configurations: configurationStore.configurations,
+            chains: chainStore.chains,
+            groups: groupStore.groups,
+            subscriptions: subscriptionStore.subscriptions
+        ).snapshot
     }
 
-    private func pushSnapshot() {
+    // MARK: - Mirroring
+
+    private func observeMirroredState() {
+        withObservationTracking {
+            _ = tunnel.status
+            _ = selection.selectedConfiguration
+            _ = selection.selectedChainId
+            _ = configurationStore.configurations
+            _ = chainStore.chains
+            _ = groupStore.groups
+            _ = subscriptionStore.subscriptions
+        } onChange: { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.observeMirroredState()
+                self.mirror()
+            }
+        }
+    }
+    
+    private func mirror() {
         guard let session,
               session.activationState == .activated,
               session.isPaired,
               session.isWatchAppInstalled else { return }
-        guard let data = Self.encodeSnapshot(buildSnapshot()), data != lastPushedSnapshotData else { return }
+        let snapshot = currentSnapshot
+        guard snapshot != mirrored, let payload = snapshot.payload else { return }
         do {
-            try session.updateApplicationContext([
-                WatchBridge.snapshotKey: data,
-                WatchBridge.snapshotDateKey: Date.now,
-            ])
-            lastPushedSnapshotData = data
+            try session.updateApplicationContext(payload)
+            mirrored = snapshot
         } catch {
             logger.warning("Failed to push watch context: \(error.localizedDescription)")
         }
     }
-    
-    nonisolated private static func encodeSnapshot(_ snapshot: WatchBridge.Snapshot) -> Data? {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = .sortedKeys
-        return try? encoder.encode(snapshot)
-    }
 
     // MARK: - Requests
-
-    private func handle(_ request: WatchBridge.Request) async -> [String: Any] {
+    
+    private func serve(_ request: WatchBridge.Request) async -> [String: Any] {
+        await waitUntilReady()
         switch request {
         case .state:
-            await waitUntilReady()
+            break
         case .toggleVPN:
-            await waitUntilReady()
             operations.tunnel.toggle()
         case .select(let id):
-            await waitUntilReady()
             select(id: id)
         }
-        return buildSnapshot().payload ?? [:]
+        return currentSnapshot.payload ?? [:]
     }
     
     private func select(id: UUID) {
@@ -150,15 +127,39 @@ final class WatchSessionManager: NSObject {
             operations.selection.select(configuration)
         }
     }
+
+    // MARK: - Readiness
+    
+    private var isReady: Bool { tunnel.isManagerReady && configurationStore.isLoaded }
+
+    private func observeReadiness() {
+        guard !isReady else {
+            let waiters = Array(readyWaiters.values)
+            readyWaiters.removeAll()
+            for continuation in waiters { continuation.resume() }
+            return
+        }
+        withObservationTracking {
+            _ = tunnel.isManagerReady
+            _ = configurationStore.isLoaded
+        } onChange: { [weak self] in
+            Task { @MainActor [weak self] in self?.observeReadiness() }
+        }
+    }
     
     private func waitUntilReady(timeout: Duration = .seconds(5)) async {
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: timeout)
-        while clock.now < deadline {
-            if tunnel.isManagerReady, configurationStore.isLoaded { return }
-            try? await Task.sleep(for: .milliseconds(50))
+        guard !isReady else { return }
+        let id = UUID()
+        let expiry = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: timeout)
+            guard !Task.isCancelled, let self else { return }
+            logger.warning("Timed out waiting for stores before serving watch request")
+            self.readyWaiters.removeValue(forKey: id)?.resume()
         }
-        logger.warning("Timed out waiting for stores before serving watch request")
+        defer { expiry.cancel() }
+        await withCheckedContinuation { continuation in
+            readyWaiters[id] = continuation
+        }
     }
 }
 
@@ -170,18 +171,23 @@ extension WatchSessionManager: WCSessionDelegate {
             logger.warning("Watch session activation failed: \(error.localizedDescription)")
             return
         }
-        Task { @MainActor in self.pushSnapshot() }
+        Task { @MainActor in
+            self.mirrored = nil
+            self.mirror()
+        }
     }
 
     nonisolated func sessionDidBecomeInactive(_ session: WCSession) {}
 
     nonisolated func sessionDidDeactivate(_ session: WCSession) {
-        // Re-activate so a newly paired watch keeps working.
         session.activate()
     }
 
     nonisolated func sessionWatchStateDidChange(_ session: WCSession) {
-        Task { @MainActor in self.pushSnapshot() }
+        Task { @MainActor in
+            self.mirrored = nil
+            self.mirror()
+        }
     }
 
     nonisolated func session(_ session: WCSession, didReceiveMessage message: [String: Any], replyHandler: @escaping ([String: Any]) -> Void) {
@@ -191,14 +197,14 @@ extension WatchSessionManager: WCSessionDelegate {
         }
         let reply = WatchConnectivityConcurrencyBridge.ReplyHandler(replyHandler)
         Task { @MainActor in
-            reply(await self.handle(request))
+            reply(await self.serve(request))
         }
     }
 
     nonisolated func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
         guard let request = WatchBridge.Request(payload: message) else { return }
         Task { @MainActor in
-            _ = await self.handle(request)
+            _ = await self.serve(request)
         }
     }
 }

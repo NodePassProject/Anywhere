@@ -32,6 +32,7 @@ struct AnywhereApp: App {
             selection: container.selection,
             configurationStore: container.configurationStore,
             chainStore: container.chainStore,
+            groupStore: container.groupStore,
             subscriptionStore: container.subscriptionStore,
             operations: operations
         )
