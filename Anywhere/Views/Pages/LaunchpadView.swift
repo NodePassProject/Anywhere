@@ -45,7 +45,7 @@ struct LaunchpadView: View {
             BackgroundGradient(isConnected: isConnected)
                 .ignoresSafeArea()
             
-            ViewThatFits {
+            ScrollView {
                 VStack(spacing: 100) {
                     VStack(spacing: 20) {
                         powerButton
@@ -54,24 +54,17 @@ struct LaunchpadView: View {
                     configurationCard
                         .frame(maxWidth: Self.maxControlWidth)
                 }
-                HStack(spacing: 50) {
-                    VStack(spacing: 20) {
-                        powerButton
-                        statusLabel
-                    }
-                    configurationCard
-                        .frame(maxWidth: Self.maxControlWidth)
+                .padding()
+                .animation(connectionEffectsEnabled ? Animation.bouncy : nil, value: isConnected)
+                .sensoryFeedback(trigger: isConnected) { _, _ in
+                    guard connectionEffectsEnabled else { return nil }
+                    return .impact
                 }
-            }
-            .padding()
-            .animation(connectionEffectsEnabled ? Animation.bouncy : nil, value: isConnected)
-            .sensoryFeedback(trigger: isConnected) { _, _ in
-                guard connectionEffectsEnabled else { return nil }
-                return .impact
             }
         }
         .colorScheme(appSettings.homeColorScheme.colorScheme)
-        .toolbar(removing: .title)
+        .navigationTitle("Anywhere")
+        .navigationBarTitleDisplayMode(.inline)
         .toolbarColorScheme(appSettings.homeColorScheme.colorScheme, for: .navigationBar)
         .sheet(isPresented: $showingProxiesView) {
             ProxiesView()

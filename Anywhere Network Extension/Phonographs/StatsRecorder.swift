@@ -44,6 +44,17 @@ nonisolated final class StatsRecorder: Sendable {
         ConnectionMetrics.shared.reset()
     }
     
+    func reset() {
+        state.withLock { state in
+            guard state.startedAt != nil else { return }
+            let now = MonotonicClock.now
+            state.startedAt = now
+            state.sleepSecondsAccumulated = 0
+            if state.sleepBeganAt != nil { state.sleepBeganAt = now }
+        }
+        ConnectionMetrics.shared.reset()
+    }
+    
     func noteSleep() {
         state.withLock { state in
             guard state.sleepBeganAt == nil else { return }

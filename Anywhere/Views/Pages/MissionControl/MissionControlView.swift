@@ -11,6 +11,7 @@ import NetworkExtension
 struct MissionControlView: View {
     @Environment(AppSettings.self) private var appSettings
     @Environment(TunnelController.self) private var tunnelController
+    @Environment(ConnectionStatsModel.self) private var stats
 
     private static let horizontalPadding: CGFloat = 20
 
@@ -49,6 +50,15 @@ struct MissionControlView: View {
         .colorScheme(appSettings.homeColorScheme.colorScheme)
         .navigationTitle("Mission Control")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem {
+                Button {
+                    Task { await stats.resetStats() }
+                } label: {
+                    Label("Reset", systemImage: "arrow.clockwise")
+                }
+            }
+        }
         .toolbarColorScheme(appSettings.homeColorScheme.colorScheme, for: .navigationBar)
         .onGeometryChange(for: CGFloat.self) { proxy in
             proxy.size.height

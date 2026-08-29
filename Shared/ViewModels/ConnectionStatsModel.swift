@@ -37,6 +37,7 @@ class ConnectionStatsModel {
     @ObservationIgnored private var statsTask: Task<Void, Never>?
     @ObservationIgnored private var send: (@Sendable (Data) async -> Data?)?
     @ObservationIgnored private var lastRateSample: (bytesIn: Int64, bytesOut: Int64, at: ContinuousClock.Instant)?
+    @ObservationIgnored private var generation: UInt64 = 0
     
     func startPolling(send: @escaping @Sendable (Data) async -> Data?) {
         self.send = send
@@ -58,6 +59,7 @@ class ConnectionStatsModel {
     }
 
     func reset() {
+        generation &+= 1
         bytesIn = 0
         bytesOut = 0
         routes = []
@@ -74,17 +76,37 @@ class ConnectionStatsModel {
         downloadBytesPerSecond = nil
         lastRateSample = nil
     }
+    
+    func resetStats() async {
+        reset()
+        guard let send,
+              let data = try? JSONEncoder().encode(TunnelMessage.resetStats) else { return }
+
+        let generation = self.generation
+        let response = await send(data)
+
+        guard generation == self.generation else { return }
+
+        guard let response,
+              let stats = try? JSONDecoder().decode(StatsResponse.self, from: response) else { return }
+        apply(stats)
+    }
 
     private func pollStats() async {
         guard let send else { return }
         guard let data = try? JSONEncoder().encode(TunnelMessage.fetchStats) else { return }
 
+        let generation = self.generation
         let response = await send(data)
 
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled, generation == self.generation else { return }
 
         guard let response,
               let stats = try? JSONDecoder().decode(StatsResponse.self, from: response) else { return }
+        apply(stats)
+    }
+
+    private func apply(_ stats: StatsResponse) {
         updateRates(bytesIn: stats.bytesIn, bytesOut: stats.bytesOut)
         self.bytesIn = stats.bytesIn
         self.bytesOut = stats.bytesOut

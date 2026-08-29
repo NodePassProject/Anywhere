@@ -157,6 +157,9 @@ actor TunnelStack {
         let resolved = target.resolved(against: udpConfig().defaultRouteTarget)
         byteCounts.withLock { $0.add(bytesOut: n, target: resolved) }
     }
+    nonisolated func resetByteCounts() {
+        byteCounts.withLock { $0 = TrafficByteCounts() }
+    }
 
     // MARK: - Log Buffer
 

@@ -13,6 +13,7 @@ nonisolated enum TunnelMessage: Codable, Sendable {
     case setConfiguration(ProxyConfiguration)
     case testLatency(ProxyConfiguration)
     case fetchStats
+    case resetStats
     case fetchLogs
     case fetchRequests
 }

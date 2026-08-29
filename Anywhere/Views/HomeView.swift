@@ -104,7 +104,7 @@ struct HomeView: View {
             case .about:
                 AboutView()
             case .none:
-                LaunchpadView()
+                EmptyView()
             }
         }
         .navigationSplitViewStyle(.balanced)

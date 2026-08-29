@@ -363,6 +363,11 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
         case .fetchStats:
             return encodeReply(statsRecorder.snapshot())
 
+        case .resetStats:
+            tunnelStack.resetByteCounts()
+            statsRecorder.reset()
+            return encodeReply(statsRecorder.snapshot())
+
         case .fetchLogs:
             return encodeReply(LogsResponse(logs: tunnelStack.fetchLogs()))
 
