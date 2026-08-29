@@ -12,6 +12,9 @@ nonisolated enum WatchBridge {
     static let snapshotKey = "watchSnapshot"
     static let snapshotDateKey = "watchSnapshotDate"
 
+    static let standaloneSectionId = UUID(uuidString: "6B9C1A34-0A61-4E7A-9A20-000000000001")!
+    static let chainsSectionId = UUID(uuidString: "6B9C1A34-0A61-4E7A-9A20-000000000002")!
+
     // MARK: - Watch → iPhone
 
     enum Request: Codable {
