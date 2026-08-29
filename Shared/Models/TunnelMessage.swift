@@ -147,6 +147,7 @@ nonisolated struct TunnelRequestEntry: Codable, Sendable, Hashable {
     var port: UInt16
     var routeTarget: RouteTarget
     var ruleSetName: String? = nil
+    var defaultRouteTarget: RouteTarget? = nil
 }
 
 nonisolated enum TunnelRequestProtocol: String, Codable, Sendable, Hashable {

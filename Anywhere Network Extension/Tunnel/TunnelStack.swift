@@ -357,6 +357,7 @@ actor TunnelStack {
             ?? AWCore.getSelectedConfigurationId().map(RouteTarget.proxy)
             ?? .proxy(configuration.id)
         }
+        requestLog.setDefaultRouteTarget(defaultRouteTarget)
 
         loadMITMSetting()
 

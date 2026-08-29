@@ -27,6 +27,7 @@ class RequestsModel {
         let port: UInt16
         let routeTarget: RouteTarget
         let ruleSetName: String?
+        let defaultRouteTarget: RouteTarget?
     }
 
     private(set) var requests: [Entry] = []
@@ -74,7 +75,8 @@ class RequestsModel {
                 host: entry.host,
                 port: entry.port,
                 routeTarget: entry.routeTarget,
-                ruleSetName: entry.ruleSetName
+                ruleSetName: entry.ruleSetName,
+                defaultRouteTarget: entry.defaultRouteTarget
             )
         }
     }

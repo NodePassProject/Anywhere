@@ -132,9 +132,13 @@ struct RequestsView: View {
     
     private func routeName(for entry: RequestsModel.Entry) -> String? {
         switch entry.routeTarget {
-        case .defaultProxy, .proxy:
+        case .default:
+            entry.defaultRouteTarget?.displayName(configStore: configStore, chainStore: chainStore, selection: proxySelection)
+        case .defaultProxy:
+            (entry.defaultRouteTarget ?? .defaultProxy).displayName(configStore: configStore, chainStore: chainStore, selection: proxySelection)
+        case .proxy:
             entry.routeTarget.displayName(configStore: configStore, chainStore: chainStore, selection: proxySelection)
-        case .default, .direct, .reject:
+        case .direct, .reject:
             nil
         }
     }
