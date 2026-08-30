@@ -11,6 +11,8 @@ import Synchronization
 nonisolated private let logger = AnywhereLogger(category: "UDPFlow")
 
 actor UDPFlow {
+    nonisolated private var flowID: ObjectIdentifier { ObjectIdentifier(self) }
+    
     private weak var stack: TunnelStack?
 
     private weak var plane: UDPPlane?
@@ -91,11 +93,8 @@ actor UDPFlow {
     }
 
     private var pendingData: [Data] = []
-    private var pendingBufferSize = 0
-    private var didWarnPendingOverflow = false
-
-    private var queuedSendBytes = 0
-    private var didWarnQueueOverflow = false
+    private let ledger: UDPBufferLedger
+    private var didWarnBufferDrop = false
 
     private enum Job: Sendable {
         case send(Data)
@@ -108,6 +107,7 @@ actor UDPFlow {
 
     init(stack: TunnelStack,
          plane: UDPPlane,
+         ledger: UDPBufferLedger,
          flowKey: TunnelStack.UDPFlowKey,
          srcHost: String, srcPort: UInt16,
          dstHost: String, dstPort: UInt16,
@@ -117,6 +117,7 @@ actor UDPFlow {
          routeTarget: RouteTarget) {
         self.stack = stack
         self.plane = plane
+        self.ledger = ledger
         self.flowKey = flowKey
         self.srcHost = srcHost
         self.srcPort = srcPort
@@ -201,6 +202,7 @@ actor UDPFlow {
         switch phase {
         case .idle:
             bufferPayload(data: data, payloadLength: payloadLength)
+            guard phase != .closed else { return }
             transition(to: .dialing)
             rootTask = Task { await self.run() }
         case .dialing:
@@ -213,35 +215,47 @@ actor UDPFlow {
     }
 
     private func enqueueSend(_ payload: Data) {
-        guard queuedSendBytes + payload.count <= TunnelConstants.udpMaxBufferSize else {
-            if !didWarnQueueOverflow {
-                didWarnQueueOverflow = true
-                logger.warning("[UDP] Send queue overflow for \(flowKey); dropping datagrams until the outbound drains")
-            }
-            return
-        }
-        queuedSendBytes += payload.count
+        guard admit(bytes: payload.count) else { return }
         jobContinuation.yield(.send(payload))
     }
 
     private func bufferPayload(data: Data, payloadLength: Int) {
-        if pendingBufferSize + payloadLength > TunnelConstants.udpMaxBufferSize {
-            if !didWarnPendingOverflow {
-                didWarnPendingOverflow = true
-                logger.warning("[UDP] Pending buffer overflow for \(flowKey); dropping datagrams until proxy connects")
-            }
-            return
-        }
+        guard admit(bytes: payloadLength) else { return }
         pendingData.append(data.prefix(payloadLength))
-        pendingBufferSize += payloadLength
+    }
+
+    /// Reserves bytes against the global uplink budget. Closes the victim
+    /// flows the ledger picked; when this flow is itself the largest holder,
+    /// closes it and returns false so the datagram is dropped.
+    private func admit(bytes: Int) -> Bool {
+        switch ledger.reserve(flow: flowID, handle: flowKey, bytes: bytes) {
+        case .admitted(let victims):
+            evictOthers(victims)
+            return true
+        case .selfEvicted(let victims):
+            evictOthers(victims)
+            logger.warning("[UDP] Global uplink budget full and \(flowKey) holds the largest backlog; evicting flow")
+            close()
+            Task { [plane] in await plane?.remove(self) }
+            return false
+        case .dropped:
+            if !didWarnBufferDrop {
+                didWarnBufferDrop = true
+                logger.warning("[UDP] Dropping datagrams for \(flowKey); global uplink budget exhausted")
+            }
+            return false
+        }
+    }
+
+    private func evictOthers(_ victims: [UDPBufferLedger.Victim]) {
+        guard !victims.isEmpty else { return }
+        Task { [plane] in await plane?.evictForBufferPressure(victims) }
     }
 
     private func flushBuffered() {
         guard !pendingData.isEmpty else { return }
         let buffered = pendingData
         pendingData.removeAll()
-        queuedSendBytes += pendingBufferSize
-        pendingBufferSize = 0
         jobContinuation.yield(.drain(buffered))
     }
 
@@ -259,11 +273,11 @@ actor UDPFlow {
             switch job {
             case .send(let payload):
                 await runSend(payload)
-                queuedSendBytes = max(0, queuedSendBytes - payload.count)
+                ledger.release(flow: flowID, bytes: payload.count)
             case .drain(let payloads):
                 for payload in payloads {
                     await runSend(payload)
-                    queuedSendBytes = max(0, queuedSendBytes - payload.count)
+                    ledger.release(flow: flowID, bytes: payload.count)
                 }
             }
         }
@@ -557,8 +571,7 @@ actor UDPFlow {
         let client = proxyClient
         proxyClient = nil
         pendingData.removeAll()
-        pendingBufferSize = 0
-        queuedSendBytes = 0
+        ledger.releaseAll(flow: flowID)
 
         switch doomed {
         case .direct(let transport):

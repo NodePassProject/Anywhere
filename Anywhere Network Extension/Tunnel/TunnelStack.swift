@@ -271,6 +271,8 @@ actor TunnelStack {
     nonisolated let domainRouter: DomainRouter
 
     nonisolated let requestLog = RequestLog()
+    
+    nonisolated let tcpBufferLedger = TCPBufferLedger(budget: TunnelConstants.tcpGlobalBufferBudget)
 
     nonisolated let fakeIPPool: FakeIPPool
 

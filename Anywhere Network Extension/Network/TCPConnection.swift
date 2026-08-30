@@ -11,6 +11,8 @@ import Synchronization
 nonisolated private let logger = AnywhereLogger(category: "TCPConnection")
 
 actor TCPConnection: MITMSessionHost {
+    nonisolated private var connectionID: ObjectIdentifier { ObjectIdentifier(self) }
+    
     nonisolated var unownedExecutor: UnownedSerialExecutor {
         bridge.executor.asUnownedSerialExecutor()
     }
@@ -42,7 +44,10 @@ actor TCPConnection: MITMSessionHost {
         return false
     }
 
-    private var pendingData = Data()
+    private var pendingData = Data() {
+        didSet { syncBufferLedger() }
+    }
+    private let bufferLedger: TCPBufferLedger
 
     private enum Phase: PhaseTransitionable {
         case establishing
@@ -136,14 +141,18 @@ actor TCPConnection: MITMSessionHost {
 
     init(
         stack: TunnelStack,
-        pcb: LWIPPCBHandle, dstHost: String, dstPort: UInt16,
-        configuration: ProxyConfiguration, routeTarget: RouteTarget,
+        pcb: LWIPPCBHandle,
+        dstHost: String,
+        dstPort: UInt16,
+        configuration: ProxyConfiguration,
+        routeTarget: RouteTarget,
         ruleSetName: String? = nil,
         sniffSNI: Bool = false,
         hostIsResolvedDomain: Bool = false,
         bridge: LWIPConcurrencyBridge
     ) {
         self.stack = stack
+        self.bufferLedger = stack.tcpBufferLedger
         self.pcb = pcb.raw
         self.dstHost = dstHost
         self.dstPort = dstPort
@@ -718,20 +727,23 @@ actor TCPConnection: MITMSessionHost {
             return
         }
 
-        guard appendPendingData(bytes: bytePtr, count: count) else { return }
+        pendingData.append(bytePtr, count: count)
         establishInbox.yield(())
     }
-
-    @discardableResult
-    private func appendPendingData(bytes ptr: UnsafePointer<UInt8>, count: Int) -> Bool {
-        if pendingData.count + count > TunnelConstants.tcpMaxPendingDataSize {
-            logger.warning("[TCP] pendingData cap exceeded for \(dstHost):\(dstPort) (\(pendingData.count) + \(count) > \(TunnelConstants.tcpMaxPendingDataSize)), aborting")
-            failureReporter.markReported()
-            abort()
-            return false
+    
+    private func syncBufferLedger() {
+        guard phase != .closed else { return }
+        let victims = bufferLedger.set(flow: connectionID, handle: self, bytes: pendingData.count)
+        for victim in victims {
+            Task { await victim.handle.abortForBufferPressure(bytesHeld: victim.bytes) }
         }
-        pendingData.append(ptr, count: count)
-        return true
+    }
+
+    func abortForBufferPressure(bytesHeld: Int) {
+        guard phase != .closed else { return }
+        logger.warning("[TCP] Global pending-buffer budget full; aborting \(endpointDescription) holding \(bytesHeld) buffered bytes")
+        failureReporter.markReported()
+        abort()
     }
 
     func handleSent(len: UInt16) {
@@ -1262,6 +1274,7 @@ actor TCPConnection: MITMSessionHost {
         sniffer = nil
         httpSniffer = nil
         pendingData = Data()
+        bufferLedger.releaseAll(flow: connectionID)
         closePending = false
 
         session?.assumeIsolated { $0.cancel(error: nil) }

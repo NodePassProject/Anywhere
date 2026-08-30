@@ -23,6 +23,8 @@ actor UDPPlane {
     private var flows: [TunnelStack.UDPFlowKey: UDPFlow] = [:] {
         didSet { FlowGauge.publishUDPTable(flows.count) }
     }
+    
+    nonisolated private let bufferLedger = UDPBufferLedger(budget: TunnelConstants.udpGlobalBufferBudget)
 
     private struct PendingDatagrams {
         var datagrams: [UDPPacket.Inbound] = []
@@ -205,6 +207,7 @@ actor UDPPlane {
         let flow = UDPFlow(
             stack: stack,
             plane: self,
+            ledger: bufferLedger,
             flowKey: flowKey,
             srcHost: srcHost,
             srcPort: datagram.srcPort,
@@ -226,6 +229,15 @@ actor UDPPlane {
     func remove(_ flow: UDPFlow) {
         if flows[flow.flowKey] === flow {
             flows.removeValue(forKey: flow.flowKey)
+        }
+    }
+    
+    func evictForBufferPressure(_ victims: [UDPBufferLedger.Victim]) {
+        for victim in victims {
+            guard let flow = flows[victim.handle], ObjectIdentifier(flow) == victim.id else { continue }
+            flows.removeValue(forKey: victim.handle)
+            logger.warning("[UDP] Global uplink budget full; evicting \(victim.handle) holding \(victim.bytes) buffered bytes")
+            Task { await flow.close() }
         }
     }
 
@@ -425,6 +437,7 @@ actor UDPPlane {
         let flow = UDPFlow(
             stack: stack,
             plane: self,
+            ledger: bufferLedger,
             flowKey: flowKey,
             srcHost: TunnelStack.ipAddrToString(datagram.srcIP, isIPv6: datagram.isIPv6),
             srcPort: datagram.srcPort,

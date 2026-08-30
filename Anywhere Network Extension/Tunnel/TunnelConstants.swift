@@ -32,27 +32,22 @@ nonisolated enum TunnelConstants {
     static let sniffDeadline: TimeInterval = 0.5
 
     // MARK: - TCP Buffer Sizes
+    
+    static let tcpGlobalBufferBudget = 16 * 1024 * 1024
 
     /// One lwIP window: mirrors `TCP_WND`/`TCP_SND_BUF` in `port/lwipopts.h`.
     static let tcpWindowSize = 64 * 1460
     /// Max bytes per `tcp_write` call: lwIP's `len` is `u16_t`.
     static let tcpMaxWriteSize = Int(UInt16.max)
-    /// Safety cap on per-connection pendingData.
-    static let tcpMaxPendingDataSize = 2 * tcpWindowSize
-
-    /// Downlink backlog watermark.
     static let drainLowWaterMark = 2 * tcpWindowSize
 
     // MARK: - UDP Settings
-
-    static let udpMaxBufferSize = 256 * 1024
+    
+    static let udpGlobalBufferBudget = 16 * 1024 * 1024
+    
     static let udpPendingResolutionMaxBytes = 32 * 1024
-    /// Idle timeout for unreplied UDP flows; mirrors Linux conntrack's `nf_conntrack_udp_timeout` (30s) so probe storms are reaped fast.
     static let udpIdleTimeoutUnreplied: TimeInterval = 30
-    /// Idle timeout for established UDP flows; matches Linux conntrack's `nf_conntrack_udp_timeout_stream` (120s).
     static let udpIdleTimeoutStream: TimeInterval = 120
-    /// Downlink datagrams before a flow earns the longer stream timeout; one
-    /// reply is not enough since STUN and one-shot DNS get exactly one answer.
     static let udpStreamMinReplies = 4
 
     // MARK: - Log Buffer
