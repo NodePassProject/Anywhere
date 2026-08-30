@@ -12,6 +12,12 @@ struct ToolboxView: View {
         NavigationStack {
             List {
                 Section {
+                    VoyagerMemberCard()
+                        .listRowInsets(EdgeInsets())
+                        .listRowBackground(VoyagerCardBackground())
+                }
+                
+                Section {
                     NavigationLink {
                         DataView()
                     } label: {

@@ -66,10 +66,11 @@ struct LaunchpadView: View {
                     return .impact
                 }
             }
-            .colorScheme(appSettings.homeColorScheme.colorScheme)
             .navigationTitle("Anywhere")
             .navigationBarTitleDisplayMode(.inline)
+            .colorScheme(appSettings.homeColorScheme.colorScheme)
             .toolbarColorScheme(appSettings.homeColorScheme.colorScheme, for: .navigationBar)
+            .toolbarColorScheme(appSettings.homeColorScheme.colorScheme, for: .tabBar)
             .sheet(isPresented: $showingProxiesView) {
                 ProxiesView()
                     .environment(operations)

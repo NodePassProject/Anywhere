@@ -29,41 +29,44 @@ struct MissionControlView: View {
     }
 
     var body: some View {
-        ZStack {
-            BackgroundGradient(isConnected: isConnected)
-                .ignoresSafeArea()
-
-            if isConnected {
-                ScrollView {
-                    ConnectionStatsView()
-                        .frame(maxWidth: maxGridWidth)
-                        .padding(.vertical, 16)
-                        .padding(.horizontal, Self.horizontalPadding)
-                        .frame(maxWidth: .infinity, minHeight: viewportHeight)
-                }
-                .scrollBounceBehavior(.basedOnSize, axes: .vertical)
-                .transition(.blurReplace)
-            } else {
-                ContentUnavailableView("Not Connected", systemImage: "power")
-            }
-        }
-        .colorScheme(appSettings.homeColorScheme.colorScheme)
-        .navigationTitle("Mission Control")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem {
-                Button {
-                    Task { await stats.resetStats() }
-                } label: {
-                    Label("Reset", systemImage: "arrow.clockwise")
+        NavigationStack {
+            ZStack {
+                BackgroundGradient(isConnected: isConnected)
+                    .ignoresSafeArea()
+                
+                if isConnected {
+                    ScrollView {
+                        ConnectionStatsView()
+                            .frame(maxWidth: maxGridWidth)
+                            .padding(.vertical, 16)
+                            .padding(.horizontal, Self.horizontalPadding)
+                            .frame(maxWidth: .infinity, minHeight: viewportHeight)
+                    }
+                    .scrollBounceBehavior(.basedOnSize, axes: .vertical)
+                    .transition(.blurReplace)
+                } else {
+                    ContentUnavailableView("Not Connected", systemImage: "power")
                 }
             }
-        }
-        .toolbarColorScheme(appSettings.homeColorScheme.colorScheme, for: .navigationBar)
-        .onGeometryChange(for: CGFloat.self) { proxy in
-            proxy.size.height
-        } action: { height in
-            viewportHeight = height
+            .navigationTitle("Mission Control")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem {
+                    Button {
+                        Task { await stats.resetStats() }
+                    } label: {
+                        Label("Reset", systemImage: "arrow.clockwise")
+                    }
+                }
+            }
+            .colorScheme(appSettings.homeColorScheme.colorScheme)
+            .toolbarColorScheme(appSettings.homeColorScheme.colorScheme, for: .navigationBar)
+            .toolbarColorScheme(appSettings.homeColorScheme.colorScheme, for: .tabBar)
+            .onGeometryChange(for: CGFloat.self) { proxy in
+                proxy.size.height
+            } action: { height in
+                viewportHeight = height
+            }
         }
     }
 }
