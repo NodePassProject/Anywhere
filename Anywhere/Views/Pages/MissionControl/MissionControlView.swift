@@ -52,10 +52,12 @@ struct MissionControlView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem {
-                    Button {
-                        Task { await stats.resetStats() }
-                    } label: {
-                        Label("Reset", systemImage: "arrow.clockwise")
+                    Menu("More", systemImage: "ellipsis") {
+                        Button {
+                            Task { await stats.resetStats() }
+                        } label: {
+                            Label("Reset", systemImage: "arrow.clockwise")
+                        }
                     }
                 }
             }

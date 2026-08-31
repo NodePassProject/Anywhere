@@ -37,13 +37,20 @@ struct HomeView: View {
     }
 
     var body: some View {
-        switch horizontalSizeClass {
-        case .regular:
-            splitView
-        case .compact:
-            tabView
-        default:
-            EmptyView()
+        Group {
+            switch horizontalSizeClass {
+            case .regular:
+                splitView
+            case .compact:
+                tabView
+            default:
+                splitView
+            }
+        }
+        .onChange(of: horizontalSizeClass) { _, newValue in
+            if newValue == .regular && selectedPage == .toolbox {
+                selectedPage = .launchpad
+            }
         }
     }
     
@@ -141,20 +148,7 @@ struct HomeView: View {
                     Image(systemName: "rectangle.3.group.fill")
                 }
             }
-//            if #available(iOS 27.0, *) {
-//                Tab(value: .toolbox, role: .prominent) {
-//                    ToolboxView()
-//                } label: {
-//                    Image(systemName: "latch.2.case.fill")
-//                }
-//            } else {
-//                Tab(value: .toolbox, role: .search) {
-//                    ToolboxView()
-//                } label: {
-//                    Image(systemName: "latch.2.case.fill")
-//                }
-//            }
-            Tab(value: .toolbox, role: .search) {
+            Tab(value: .toolbox) {
                 ToolboxView()
             } label: {
                 Image(systemName: "latch.2.case.fill")

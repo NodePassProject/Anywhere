@@ -59,7 +59,7 @@ struct LaunchpadView: View {
                         .frame(maxWidth: Self.maxControlWidth)
                         .layoutPriority(1)
                 }
-                .padding()
+                .padding(.horizontal)
                 .animation(connectionEffectsEnabled ? Animation.bouncy : nil, value: isConnected)
                 .sensoryFeedback(trigger: isConnected) { _, _ in
                     guard connectionEffectsEnabled else { return nil }
