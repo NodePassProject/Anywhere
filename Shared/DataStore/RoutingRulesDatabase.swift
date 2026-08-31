@@ -24,7 +24,7 @@ nonisolated final class RoutingRulesDatabase: Sendable {
             return
         }
         var handle: OpaquePointer?
-        if sqlite3_open_v2(url.path, &handle, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) != SQLITE_OK {
+        if sqlite3_open_v2("\(url.absoluteString)?immutable=1", &handle, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI | SQLITE_OPEN_FULLMUTEX, nil) != SQLITE_OK {
             logger.error("[RoutingRulesDatabase] Failed to open Rules.db")
             handle = nil
         }

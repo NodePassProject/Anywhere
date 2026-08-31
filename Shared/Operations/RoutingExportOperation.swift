@@ -39,6 +39,9 @@ struct RoutingExportOperation {
     let snapshot: RoutingSnapshot
 
     func run() async {
+        let activity = BackgroundActivity(reason: "RoutingExport")
+        defer { activity.end() }
+
         let ruleSets = snapshot.ruleSets
         let customRuleSets = snapshot.customRuleSets
         let configurations = snapshot.configurations
