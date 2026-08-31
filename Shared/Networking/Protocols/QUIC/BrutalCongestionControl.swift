@@ -195,7 +195,7 @@ nonisolated private func brutalForCC(_ cc: OpaquePointer?) -> BrutalCongestionCo
 // header; Brutal only bumps counters, so OpaquePointer is sufficient.
 
 @_cdecl("ngtcp2_swift_brutal_on_pkt_acked")
-func ngtcp2_swift_brutal_on_pkt_acked(
+nonisolated func ngtcp2_swift_brutal_on_pkt_acked(
     cc: OpaquePointer?,
     cstat: UnsafeMutablePointer<ngtcp2_conn_stat>?,
     pkt: OpaquePointer?,
@@ -207,7 +207,7 @@ func ngtcp2_swift_brutal_on_pkt_acked(
 }
 
 @_cdecl("ngtcp2_swift_brutal_on_pkt_lost")
-func ngtcp2_swift_brutal_on_pkt_lost(
+nonisolated func ngtcp2_swift_brutal_on_pkt_lost(
     cc: OpaquePointer?,
     cstat: UnsafeMutablePointer<ngtcp2_conn_stat>?,
     pkt: OpaquePointer?,
@@ -219,7 +219,7 @@ func ngtcp2_swift_brutal_on_pkt_lost(
 }
 
 @_cdecl("ngtcp2_swift_brutal_on_ack_recv")
-func ngtcp2_swift_brutal_on_ack_recv(
+nonisolated func ngtcp2_swift_brutal_on_ack_recv(
     cc: OpaquePointer?,
     cstat: UnsafeMutablePointer<ngtcp2_conn_stat>?,
     ack: OpaquePointer?,
@@ -231,7 +231,7 @@ func ngtcp2_swift_brutal_on_ack_recv(
 }
 
 @_cdecl("ngtcp2_swift_brutal_on_pkt_sent")
-func ngtcp2_swift_brutal_on_pkt_sent(
+nonisolated func ngtcp2_swift_brutal_on_pkt_sent(
     cc: OpaquePointer?,
     cstat: UnsafeMutablePointer<ngtcp2_conn_stat>?,
     pkt: OpaquePointer?
@@ -243,7 +243,7 @@ func ngtcp2_swift_brutal_on_pkt_sent(
 }
 
 @_cdecl("ngtcp2_swift_brutal_reset")
-func ngtcp2_swift_brutal_reset(
+nonisolated func ngtcp2_swift_brutal_reset(
     cc: OpaquePointer?,
     cstat: UnsafeMutablePointer<ngtcp2_conn_stat>?,
     ts: UInt64
