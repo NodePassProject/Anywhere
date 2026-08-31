@@ -15,6 +15,14 @@ struct PersonalizationView: View {
         @Bindable var settings = settings
         NavigationStack {
             List {
+                if voyagerStore.isMember {
+                    Section {
+                        Toggle(isOn: $settings.showVoyagerCard) {
+                            TextWithColorfulIcon(title: "Voyager Member Card", systemName: "creditcard.rewards.fill", foregroundStyle: .white, backgroundStyle: .indigo.gradient)
+                        }
+                    }
+                }
+
                 Section {
                     NavigationLink {
                         CustomizeAppIconView()

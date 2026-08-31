@@ -8,13 +8,17 @@
 import SwiftUI
 
 struct ToolboxView: View {
+    @Environment(AppSettings.self) private var settings
+
     var body: some View {
         NavigationStack {
             List {
-                Section {
-                    VoyagerMemberCard()
-                        .listRowInsets(EdgeInsets())
-                        .listRowBackground(VoyagerCardBackground())
+                if settings.showVoyagerCard {
+                    Section {
+                        VoyagerMemberCard()
+                            .listRowInsets(EdgeInsets())
+                            .listRowBackground(VoyagerCardBackground())
+                    }
                 }
                 
                 Section {
