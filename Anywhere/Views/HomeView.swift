@@ -141,18 +141,23 @@ struct HomeView: View {
                     Image(systemName: "rectangle.3.group.fill")
                 }
             }
-            if #available(iOS 27.0, *) {
-                Tab(value: .toolbox, role: .prominent) {
-                    ToolboxView()
-                } label: {
-                    Image(systemName: "latch.2.case.fill")
-                }
-            } else {
-                Tab(value: .toolbox, role: .search) {
-                    ToolboxView()
-                } label: {
-                    Image(systemName: "latch.2.case.fill")
-                }
+//            if #available(iOS 27.0, *) {
+//                Tab(value: .toolbox, role: .prominent) {
+//                    ToolboxView()
+//                } label: {
+//                    Image(systemName: "latch.2.case.fill")
+//                }
+//            } else {
+//                Tab(value: .toolbox, role: .search) {
+//                    ToolboxView()
+//                } label: {
+//                    Image(systemName: "latch.2.case.fill")
+//                }
+//            }
+            Tab(value: .toolbox, role: .search) {
+                ToolboxView()
+            } label: {
+                Image(systemName: "latch.2.case.fill")
             }
         }
     }
