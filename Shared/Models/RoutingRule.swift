@@ -86,11 +86,19 @@ nonisolated struct RoutingRule: Codable, Equatable, Identifiable {
 ///   type      UInt8               RoutingRuleType raw value
 ///   valueLen  UInt16              UTF-8 byte length
 ///   value     [valueLen]          UTF-8 domain/CIDR (folded to lowercase on read)
+///
+/// nameCount   UInt32              equals entryCount
+/// names       nameCount × Name
+///
+/// Name:
+///   valueLen  UInt16              UTF-8 byte length
+///   value     [valueLen]          rule set name, truncated to 64 characters
 /// ```
 ///
 nonisolated enum RoutingBinaryFormat {
-    static let magic: [UInt8] = [0x41, 0x52, 0x42, 0x32]  // "ARB2"
+    enum Version { case v1, v2 }
 
+    static let magic: [UInt8] = [0x41, 0x52, 0x42, 0x32]  // "ARB2"
     enum Tier: UInt8 { case adBlock = 0, builtIn = 1, user = 2, neutral = 3, bypass = 4 }
     enum Action: UInt8 {
         case fallback = 0
@@ -98,5 +106,22 @@ nonisolated enum RoutingBinaryFormat {
         case direct = 2
         case reject = 3
         case proxy = 4
+    }
+    
+    static let legacyMagic: [UInt8] = [0x41, 0x52, 0x42, 0x31]  // "ARB1"
+    enum LegacyTier: UInt8 {
+        case user = 0, adBlock = 1, builtIn = 2, bypass = 3
+
+        var current: Tier {
+            switch self {
+            case .user: .user
+            case .adBlock: .adBlock
+            case .builtIn: .builtIn
+            case .bypass: .bypass
+            }
+        }
+    }
+    enum LegacyAction: UInt8 {
+        case direct = 0, reject = 1, proxy = 2
     }
 }

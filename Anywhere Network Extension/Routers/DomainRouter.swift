@@ -153,6 +153,9 @@ nonisolated final class DomainRouter: Sendable {
         let data: Data
         private var cursor = 0
         private var count: Int { bytes.count }
+        
+        private var version: RoutingBinaryFormat.Version = .v2
+        private var legacyDefaultTargetId: UUID?
 
         init(bytes: UnsafeBufferPointer<UInt8>, data: Data) {
             self.bytes = bytes
@@ -160,7 +163,10 @@ nonisolated final class DomainRouter: Sendable {
         }
 
         mutating func run(state: inout RoutingState) throws(AnywhereError) {
-            try expectMagic()
+            version = try readMagic()
+            if version == .v1 {
+                legacyDefaultTargetId = AWCore.getSelectedChainId() ?? AWCore.getSelectedConfigurationId()
+            }
 
             let configLength = Int(try u32())
             let configStart = cursor
@@ -174,7 +180,11 @@ nonisolated final class DomainRouter: Sendable {
                 try readEntry(state: &state, entryIndex: UInt16(clamping: entryIndex))
             }
             
-            state.ruleSetNames = try readNames(expectedCount: entryCount)
+            if version == .v1 {
+                state.ruleSetNames = []
+            } else {
+                state.ruleSetNames = try readNames(expectedCount: entryCount)
+            }
         }
 
         private mutating func readNames(expectedCount: UInt32) throws(AnywhereError) -> [String] {
@@ -192,8 +202,8 @@ nonisolated final class DomainRouter: Sendable {
         }
 
         private mutating func readEntry(state: inout RoutingState, entryIndex: UInt16) throws(AnywhereError) {
-            guard let tier = RoutingBinaryFormat.Tier(rawValue: try u8()) else { throw AnywhereError.routing(.payloadCorrupted(.malformed)) }
-            let action = try readAction()
+            let tier = try readTier()
+            let action = try readAction(configurations: state.configurationMap)
             let payload = RulePayload(action: action, entryIndex: entryIndex)
 
             var remainingRules = try u32()
@@ -220,7 +230,24 @@ nonisolated final class DomainRouter: Sendable {
             }
         }
 
-        private mutating func readAction() throws(AnywhereError) -> RouteTarget {
+        private mutating func readTier() throws(AnywhereError) -> RoutingBinaryFormat.Tier {
+            let raw = try u8()
+            let tier: RoutingBinaryFormat.Tier? = switch version {
+            case .v1: RoutingBinaryFormat.LegacyTier(rawValue: raw)?.current
+            case .v2: RoutingBinaryFormat.Tier(rawValue: raw)
+            }
+            guard let tier else { throw AnywhereError.routing(.payloadCorrupted(.malformed)) }
+            return tier
+        }
+
+        private mutating func readAction(configurations: [UUID: ProxyConfiguration]) throws(AnywhereError) -> RouteTarget {
+            switch version {
+            case .v1: return try readLegacyAction(configurations: configurations)
+            case .v2: return try readCurrentAction()
+            }
+        }
+
+        private mutating func readCurrentAction() throws(AnywhereError) -> RouteTarget {
             switch RoutingBinaryFormat.Action(rawValue: try u8()) {
             case .fallback: return .default
             case .defaultProxy: return .defaultProxy
@@ -230,14 +257,37 @@ nonisolated final class DomainRouter: Sendable {
             case nil: throw AnywhereError.routing(.payloadCorrupted(.malformed))
             }
         }
+        
+        private mutating func readLegacyAction(configurations: [UUID: ProxyConfiguration]) throws(AnywhereError) -> RouteTarget {
+            guard let action = RoutingBinaryFormat.LegacyAction(rawValue: try u8()) else {
+                throw AnywhereError.routing(.payloadCorrupted(.malformed))
+            }
+            switch action {
+            case .direct: return .direct
+            case .reject: return .reject
+            case .proxy:
+                let id = try readUUID()
+                guard configurations[id] != nil, id != legacyDefaultTargetId else { return .default }
+                return .proxy(id)
+            }
+        }
 
         // MARK: Primitives
 
-        private mutating func expectMagic() throws(AnywhereError) {
+        private mutating func readMagic() throws(AnywhereError) -> RoutingBinaryFormat.Version {
             let magic = RoutingBinaryFormat.magic
             guard cursor + magic.count <= count else { throw AnywhereError.routing(.payloadCorrupted(.truncated)) }
-            for k in 0..<magic.count where bytes[cursor + k] != magic[k] { throw AnywhereError.routing(.payloadCorrupted(.badMagic)) }
+            let head = bytes[cursor..<cursor + magic.count]
+            let version: RoutingBinaryFormat.Version
+            if head.elementsEqual(magic) {
+                version = .v2
+            } else if head.elementsEqual(RoutingBinaryFormat.legacyMagic) {
+                version = .v1
+            } else {
+                throw AnywhereError.routing(.payloadCorrupted(.badMagic))
+            }
             cursor += magic.count
+            return version
         }
 
         private mutating func u8() throws(AnywhereError) -> UInt8 {
