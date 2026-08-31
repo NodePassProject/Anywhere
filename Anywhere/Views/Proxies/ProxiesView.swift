@@ -98,50 +98,52 @@ struct ProxiesView: View {
     
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(spacing: 10) {
-                    if proxyType == .servers {
-                        ForEach(standaloneItems) { item in
-                            proxyRow(item)
-                                .padding(.horizontal, 12)
-                        }
-                        ForEach(serverGroups) { group in
-                            groupView(group) {
-                                ForEach(serverMembers(of: group)) { item in
-                                    proxyRow(item, group: group)
-                                }
-                            }
-                        }
-                        ForEach(subscriptionStore.subscriptions) { subscription in
-                            subscriptionView(subscription) {
-                                ForEach(items(for: subscription)) { item in
+            Group {
+                if proxyType == .servers, configurationStore.configurations.isEmpty, serverGroups.isEmpty {
+                    ContentUnavailableView("No Proxies", systemImage: "network")
+                } else if proxyType == .chains, chainCoordinator.models.isEmpty, chainGroups.isEmpty {
+                    ContentUnavailableView("No Chains", systemImage: "point.bottomleft.forward.to.point.topright.scurvepath.fill")
+                } else {
+                    ScrollView {
+                        VStack(spacing: 10) {
+                            if proxyType == .servers {
+                                ForEach(standaloneItems) { item in
                                     proxyRow(item)
+                                        .padding(.horizontal, 12)
                                 }
-                            }
-                        }
-                    } else {
-                        ForEach(ungroupedChainItems) { item in
-                            chainRow(item)
-                                .padding(.horizontal, 12)
-                        }
-                        ForEach(chainGroups) { group in
-                            groupView(group) {
-                                ForEach(chainMembers(of: group)) { item in
-                                    chainRow(item, group: group)
+                                ForEach(serverGroups) { group in
+                                    groupView(group) {
+                                        ForEach(serverMembers(of: group)) { item in
+                                            proxyRow(item, group: group)
+                                        }
+                                    }
+                                }
+                                ForEach(subscriptionStore.subscriptions) { subscription in
+                                    subscriptionView(subscription) {
+                                        ForEach(items(for: subscription)) { item in
+                                            proxyRow(item)
+                                        }
+                                    }
+                                }
+                            } else {
+                                ForEach(ungroupedChainItems) { item in
+                                    chainRow(item)
+                                        .padding(.horizontal, 12)
+                                }
+                                ForEach(chainGroups) { group in
+                                    groupView(group) {
+                                        ForEach(chainMembers(of: group)) { item in
+                                            chainRow(item, group: group)
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
-            .overlay {
-                if proxyType == .servers, configurationStore.configurations.isEmpty, serverGroups.isEmpty {
-                    ContentUnavailableView("No Proxies", systemImage: "network")
-                } else if proxyType == .chains, chainCoordinator.models.isEmpty, chainGroups.isEmpty {
-                    ContentUnavailableView("No Chains", systemImage: "point.bottomleft.forward.to.point.topright.scurvepath.fill")
-                }
-            }
-            .navigationTitle("Proxies")
+            .navigationTitle(title)
+            .toolbar(removing: .title)
             .toolbar { toolbar }
             .containerBackground(Color(.systemGroupedBackground), for: .navigation)
         }
@@ -204,6 +206,16 @@ struct ProxiesView: View {
         }
         .onAppear {
             unfoldSelectedProxyContainer()
+        }
+    }
+    
+    // MARK: - Title
+    private var title: Text {
+        switch proxyType {
+        case .servers:
+            Text("Servers")
+        case .chains:
+            Text("Chains")
         }
     }
     
