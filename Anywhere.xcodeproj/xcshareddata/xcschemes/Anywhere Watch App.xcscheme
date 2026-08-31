@@ -47,6 +47,7 @@
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "7870E4192FF88ED5006C0F14"
             BuildableName = "Anywhere Watch App.app"
+            BlueprintName = "Anywhere Watch App"
             ReferencedContainer = "container:Anywhere.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
@@ -63,6 +64,7 @@
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "7870E4192FF88ED5006C0F14"
             BuildableName = "Anywhere Watch App.app"
+            BlueprintName = "Anywhere Watch App"
             ReferencedContainer = "container:Anywhere.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>

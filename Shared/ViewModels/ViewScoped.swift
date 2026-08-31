@@ -17,4 +17,6 @@ final class ViewScoped<Value> {
         value = made
         return made
     }
+    
+    nonisolated deinit {}
 }
