@@ -562,10 +562,12 @@ struct AnywhereRingGaugeStyle: GaugeStyle {
 #Preview("Route Breakdown") {
     let us = UUID(), jp = UUID(), de = UUID(), fr = UUID(), sg = UUID()
     let names: [UUID: String] = [
-        us: "US · Los Angeles", jp: "JP · Tokyo", de: "DE · Frankfurt",
-        fr: "FR · Paris", sg: "SG · Singapore",
+        us: "🇺🇸 Los Angeles",
+        jp: "🇯🇵 Tokyo",
+        de: "🇩🇪 Frankfurt",
+        fr: "🇫🇷 Paris",
+        sg: "🇸🇬 Singapore",
     ]
-    // Five proxies + direct → exercises the 4-row cap and the "Other" bucket.
     return ZStack {
         LinearGradient(
             colors: [Color.connectedBackgroundStart, Color.connectedBackgroundEnd],
