@@ -29,7 +29,7 @@ class TVProxyEditorViewController: UITableViewController {
     private var vlessUUID = ""
     private var vlessEncryption = "none"
     private var vlessFlow = ""
-    private var vlessTransport = "tcp"
+    private var vlessTransport = "raw"
 
     private var vlessWebSocketHost = ""
     private var vlessWebSocketPath = "/"
@@ -279,7 +279,7 @@ class TVProxyEditorViewController: UITableViewController {
         } else if isVLESS {
             var transportRows: [RowType] = [
                 .selection(label: String(localized: "Transport", comment: "Transport for VLESS protocol"), value: transportDisplayValue, options: [
-                    ("TCP", "tcp"), ("WebSocket", "ws"), ("HTTPUpgrade", "httpupgrade"), ("gRPC", "grpc"), ("XHTTP", "xhttp"),
+                    ("TCP", "raw"), ("WebSocket", "ws"), ("HTTPUpgrade", "httpupgrade"), ("gRPC", "grpc"), ("XHTTP", "xhttp"),
                 ], key: .vlessTransport),
             ]
             if vlessTransport == "ws" {
@@ -464,7 +464,7 @@ class TVProxyEditorViewController: UITableViewController {
 
     private var transportDisplayValue: String {
         switch vlessTransport {
-        case "tcp": "TCP"
+        case "raw": "TCP"
         case "ws": "WebSocket"
         case "httpupgrade": "HTTPUpgrade"
         case "grpc": "gRPC"

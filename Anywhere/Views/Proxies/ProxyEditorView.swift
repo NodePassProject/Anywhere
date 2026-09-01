@@ -28,7 +28,7 @@ struct ProxyEditorView: View {
     @State private var vlessUUID = ""
     @State private var vlessEncryption = "none"
     @State private var vlessFlow = ""
-    @State private var vlessTransport = "tcp"
+    @State private var vlessTransport = "raw"
     
     @State private var vlessWebSocketHost = ""
     @State private var vlessWebSocketPath = "/"
@@ -486,7 +486,7 @@ struct ProxyEditorView: View {
             
             Section("Transport") {
                 Picker(selection: $vlessTransport) {
-                    Text("TCP").tag("tcp")
+                    Text("TCP").tag("raw")
                     Text("WebSocket").tag("ws")
                     Text("HTTPUpgrade").tag("httpupgrade")
                     Text("gRPC").tag("grpc")
