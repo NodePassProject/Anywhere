@@ -25,6 +25,18 @@ struct LWIPReleaseAction: @unchecked Sendable {
     func run() { fn(ctx) }
 }
 
+// MARK: - SYN-gate pressure sweep scratch
+
+private struct PressureSweep {
+    var now: TimeInterval = 0
+    var establishing: Unmanaged<TCPConnection>?
+    var establishingIdle: TimeInterval = -1
+    var established: Unmanaged<TCPConnection>?
+    var establishedIdle: TimeInterval = -1
+}
+
+nonisolated private let pressureSweepBox = Mutex(PressureSweep())
+
 extension TunnelStack {
 
     // MARK: - Callback Installation
@@ -131,16 +143,52 @@ extension TunnelStack {
             kickOutputDrain()
         }
     }
-
+    
     func lwipSynVerdict() -> Int32 {
-        let activeTCP = Int(lwip_bridge_active_tcp_count())
-        if activeTCP >= TunnelLimits.tcpMaxConnections {
-            logger.warning("[TCP] Connection cap reached (\(activeTCP)/\(TunnelLimits.tcpMaxConnections))")
-            lwipAbortContext.store(.pressureFlush, ordering: .relaxed)
-            lwip_bridge_discard_all_tcp()
-            lwipAbortContext.store(.none, ordering: .relaxed)
+        guard Int(lwip_bridge_active_tcp_count()) >= TunnelLimits.tcpMaxConnections else {
+            return Int32(LWIP_BRIDGE_SYN_PASS)
         }
+        let now = MonotonicClock.now
+        guard let victim = findPressureVictim(now: now) else {
+            tcpPressureLog.noteDropped(now: now, logger: logger)
+            return Int32(LWIP_BRIDGE_SYN_DROP)
+        }
+        victim.connection.assumeIsolated { $0.evictForConnectionPressure(idleFor: victim.idleFor) }
+        tcpPressureLog.noteEvicted(now: now, logger: logger)
         return Int32(LWIP_BRIDGE_SYN_PASS)
+    }
+    
+    private func findPressureVictim(now: TimeInterval) -> (connection: TCPConnection, idleFor: TimeInterval)? {
+        pressureSweepBox.withLock { $0 = PressureSweep(now: now) }
+        lwip_bridge_for_each_tcp { arg in
+            guard let arg else { return }
+            let connection = BridgeContext.unretained(arg, as: TCPConnection.self)
+            let now = pressureSweepBox.withLock { $0.now }
+            guard let tier = connection.assumeIsolated({ $0.connectionPressureCandidate(now: now) }) else { return }
+            pressureSweepBox.withLock { sweep in
+                switch tier {
+                case .establishing(let idleFor):
+                    if idleFor > sweep.establishingIdle {
+                        sweep.establishing = .passUnretained(connection)
+                        sweep.establishingIdle = idleFor
+                    }
+                case .established(let idleFor):
+                    if idleFor > sweep.establishedIdle {
+                        sweep.established = .passUnretained(connection)
+                        sweep.establishedIdle = idleFor
+                    }
+                }
+            }
+        }
+        return pressureSweepBox.withLock { sweep in
+            if let victim = sweep.establishing {
+                return (victim.takeUnretainedValue(), sweep.establishingIdle)
+            }
+            if let victim = sweep.established {
+                return (victim.takeUnretainedValue(), sweep.establishedIdle)
+            }
+            return nil
+        }
     }
 
     enum AcceptVerdict {

@@ -26,6 +26,8 @@ actor UDPPlane {
     
     nonisolated private let bufferLedger = UDPBufferLedger(budget: TunnelConstants.udpGlobalBufferBudget)
 
+    private var udpPressureLog = PressureEventThrottle(label: "UDP", cap: TunnelLimits.udpMaxFlows)
+
     private struct PendingDatagrams {
         var datagrams: [UDPPacket.Inbound] = []
         var byteCount = 0
@@ -202,6 +204,8 @@ actor UDPPlane {
             return
         }
 
+        guard makeRoomForNewFlow() else { return }
+
         stack.requestLog.record(protocol: .udp, host: dstHost, port: datagram.dstPort, routeTarget: routeTarget, ruleSetName: ruleSetName)
 
         let flow = UDPFlow(
@@ -219,7 +223,6 @@ actor UDPPlane {
             configuration: flowConfiguration,
             routeTarget: routeTarget
         )
-        flushAllFlowsIfAtCap()
         flows[flowKey] = flow
         await flow.handleReceivedData(payload, payloadLength: payload.count)
     }
@@ -240,18 +243,33 @@ actor UDPPlane {
             Task { await flow.close() }
         }
     }
-
-    private func flushAllFlowsIfAtCap() {
-        guard flows.count >= TunnelLimits.udpMaxFlows else { return }
-        logger.warning("[UDP] Flow cap reached (\(flows.count)/\(TunnelLimits.udpMaxFlows)); silently flushing all UDP flows, clients will retry")
-        let all = Array(flows.values)
-        flows.removeAll()
-        for flow in all {
-            Task { await flow.close() }
+    
+    private func makeRoomForNewFlow() -> Bool {
+        guard flows.count >= TunnelLimits.udpMaxFlows else { return true }
+        let now = MonotonicClock.now
+        var unassured: (key: TunnelStack.UDPFlowKey, idleFor: TimeInterval)?
+        var assured: (key: TunnelStack.UDPFlowKey, idleFor: TimeInterval)?
+        for (key, flow) in flows {
+            if flow.isClosed {
+                flows.removeValue(forKey: key)
+                return true
+            }
+            let snapshot = flow.pressureSnapshot(now: now)
+            if !snapshot.isAssured {
+                if snapshot.idleFor > (unassured?.idleFor ?? -1) { unassured = (key, snapshot.idleFor) }
+            } else if snapshot.idleFor >= TunnelConstants.pressureIdleTimeout,
+                      snapshot.idleFor > (assured?.idleFor ?? -1) {
+                assured = (key, snapshot.idleFor)
+            }
         }
-        pendingResolutions.removeAll()
-        pendingResolutionCapWarned = false
-        purgeShadowsocksUDPSessions()
+        guard let victim = unassured ?? assured, let flow = flows.removeValue(forKey: victim.key) else {
+            udpPressureLog.noteDropped(now: now, logger: logger)
+            return false
+        }
+        logger.debug("[UDP] Flow table full; evicting \(victim.key) idle \(Int(victim.idleFor))s")
+        udpPressureLog.noteEvicted(now: now, logger: logger)
+        Task { await flow.close() }
+        return true
     }
 
     // MARK: - Cleanup
@@ -428,6 +446,8 @@ actor UDPPlane {
         case .unreachable:
             return false
         }
+        
+        guard makeRoomForNewFlow() else { return true }
 
         stack.requestLog.record(
             protocol: .udp, host: upstream, port: datagram.dstPort,
@@ -449,7 +469,6 @@ actor UDPPlane {
             configuration: flowConfiguration,
             routeTarget: routeTarget
         )
-        flushAllFlowsIfAtCap()
         flows[flowKey] = flow
         logger.debug("[DNS] Forwarding qtype \(qtype) for \(domain) → \(upstream):\(datagram.dstPort) via \(flowConfiguration.name)")
         await flow.handleReceivedData(payload, payloadLength: payload.count)

@@ -167,6 +167,8 @@ actor TCPConnection: MITMSessionHost {
         if sniffSNI {
             self.sniffer = TLSClientHelloSniffer()
         }
+        
+        markActivity()
     }
 
     nonisolated func adopt() -> UnsafeMutableRawPointer {
@@ -746,6 +748,30 @@ actor TCPConnection: MITMSessionHost {
         abort()
     }
 
+    enum PressureVictimTier {
+        case establishing(idleFor: TimeInterval)
+        case established(idleFor: TimeInterval)
+    }
+    
+    func connectionPressureCandidate(now: TimeInterval) -> PressureVictimTier? {
+        let idleFor = now - lastActivityTick.load(ordering: .relaxed)
+        switch phase {
+        case .establishing:
+            return .establishing(idleFor: idleFor)
+        case .relaying:
+            return idleFor >= TunnelConstants.pressureIdleTimeout ? .established(idleFor: idleFor) : nil
+        case .closed:
+            return nil
+        }
+    }
+
+    func evictForConnectionPressure(idleFor: TimeInterval) {
+        guard phase != .closed else { return }
+        logger.debug("[TCP] Connection table full; evicting \(endpointDescription) idle \(Int(idleFor))s")
+        failureReporter.markReported()
+        abort()
+    }
+
     func handleSent(len: UInt16) {
         guard phase != .closed else { return }
         stream?.assumeIsolated { $0.deliverSendCredit() }
@@ -758,17 +784,12 @@ actor TCPConnection: MITMSessionHost {
 
     func handleError(err: Int32) {
         let reason = AnywhereError.Transport.lwipName(err)
-        if err == -15 { // ERR_CLSD — orderly close, not a failure
+        if err == -15 {
             logger.debug("[TCP] lwIP closed connection: \(endpointDescription): \(reason)")
-        } else if err == -14 { // ERR_RST — always local-app-initiated in TUN mode
+        } else if err == -14 {
             logger.debug("[TCP] lwIP peer reset: \(endpointDescription): \(reason)")
         } else if err == -13, stack?.lwipAbortContext.load(ordering: .relaxed) == .teardown {
-            // ERR_ABRT during deliberate teardown; otherwise it's an lwIP pressure abort and warns below.
             logger.debug("[TCP] lwIP aborted connection (tunnel teardown): \(endpointDescription): \(reason)")
-        } else if err == -13, stack?.lwipAbortContext.load(ordering: .relaxed) == .pressureFlush {
-            // ERR_ABRT from the pressure-cap flush: expected for every live
-            // connection at once, and already announced by one warning there.
-            logger.debug("[TCP] Connection flushed by pressure cap: \(endpointDescription)")
         } else {
             logger.warning("[TCP] lwIP aborted connection: \(endpointDescription): \(reason)")
         }

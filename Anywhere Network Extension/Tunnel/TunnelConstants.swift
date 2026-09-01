@@ -30,6 +30,10 @@ nonisolated enum TunnelConstants {
     /// Max wait for a TLS ClientHello before falling back to IP-based routing,
     /// so server-speaks-first protocols (SSH, SMTP, FTP) don't stall.
     static let sniffDeadline: TimeInterval = 0.5
+    /// When the TCP/UDP tables are at their entry cap, an established (TCP)
+    /// or assured (UDP) entry may be evicted for a newcomer only once it has
+    /// been idle this long.
+    static let pressureIdleTimeout: TimeInterval = 10
 
     // MARK: - TCP Buffer Sizes
     

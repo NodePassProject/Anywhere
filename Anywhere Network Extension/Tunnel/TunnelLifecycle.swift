@@ -49,5 +49,4 @@ nonisolated enum TunnelPhase: UInt8, AtomicRepresentable, CustomStringConvertibl
 nonisolated enum LwipAbortContext: UInt8, AtomicRepresentable {
     case none
     case teardown
-    case pressureFlush
 }

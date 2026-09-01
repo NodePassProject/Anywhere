@@ -274,6 +274,8 @@ actor TunnelStack {
     
     nonisolated let tcpBufferLedger = TCPBufferLedger(budget: TunnelConstants.tcpGlobalBufferBudget)
 
+    var tcpPressureLog = PressureEventThrottle(label: "TCP", cap: TunnelLimits.tcpMaxConnections)
+
     nonisolated let fakeIPPool: FakeIPPool
 
     nonisolated let connectionRouter: ConnectionRouter

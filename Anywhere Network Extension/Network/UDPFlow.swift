@@ -42,6 +42,20 @@ actor UDPFlow {
         }
     }
 
+    struct PressureSnapshot {
+        let idleFor: TimeInterval
+        let isAssured: Bool
+    }
+
+    nonisolated func pressureSnapshot(now: TimeInterval) -> PressureSnapshot {
+        activity.withLock { a in
+            PressureSnapshot(
+                idleFor: now - a.lastActivity,
+                isAssured: a.replyCount >= TunnelConstants.udpStreamMinReplies
+            )
+        }
+    }
+
     private enum Phase: PhaseTransitionable {
         case idle
         case dialing
