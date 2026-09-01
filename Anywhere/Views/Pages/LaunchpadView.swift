@@ -10,6 +10,7 @@ import NetworkExtension
 
 struct LaunchpadView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(AppSettings.self) private var appSettings
     @Environment(Operations.self) private var operations
     @Environment(TunnelController.self) private var tunnelController
@@ -66,8 +67,15 @@ struct LaunchpadView: View {
                     return .impact
                 }
             }
-            .navigationTitle("Anywhere")
+            .navigationTitle("Launchpad")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .title) {
+                    if horizontalSizeClass == .compact {
+                        Text("Anywhere")
+                    }
+                }
+            }
             .colorScheme(appSettings.homeColorScheme.colorScheme)
             .toolbarColorScheme(appSettings.homeColorScheme.colorScheme, for: .navigationBar)
             .toolbarColorScheme(appSettings.homeColorScheme.colorScheme, for: .tabBar)

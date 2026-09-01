@@ -143,7 +143,6 @@ struct ProxiesView: View {
                 }
             }
             .navigationTitle(title)
-            .toolbar(removing: .title)
             .toolbar { toolbar }
             .containerBackground(Color(.systemGroupedBackground), for: .navigation)
         }
