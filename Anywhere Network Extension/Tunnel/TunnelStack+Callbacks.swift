@@ -33,8 +33,14 @@ extension TunnelStack {
             },
             synFilter: { [weak self] _, destination in
                 guard let self else { return .drop }
-                if destination.address.isIPv6, !self.ipv6Enabled { return .reset }
-                return !self.isRejectMarked(destination.address) && self.ipStackSynVerdict() ? .accept : .drop
+                let verdict: AcceptVerdict
+                if destination.address.isIPv6, !self.ipv6Enabled {
+                    verdict = .reset
+                } else {
+                    verdict = !self.isRejectMarked(destination.address) && self.ipStackSynVerdict() ? .accept : .drop
+                }
+                if verdict != .accept { self.recordRejectedSYN(to: destination) }
+                return verdict
             },
             strayFilter: { [weak self] _, destination in
                 self.map { !$0.isRejectMarked(destination.address) } ?? false
@@ -47,6 +53,16 @@ extension TunnelStack {
             address.write(to: bytes.baseAddress!)
             return connectionRouter.isRejectMarkedDestination(rawIP: bytes.baseAddress!, isIPv6: address.isIPv6)
         }
+    }
+
+    nonisolated private func recordRejectedSYN(to destination: IPEndpoint) {
+        let ip = destination.address.description
+        requestLog.record(
+            protocol: .tcp,
+            host: connectionRouter.fakeIPPool.lookup(ip: ip)?.domain ?? ip,
+            port: destination.port,
+            routeTarget: .reject
+        )
     }
 
     nonisolated private func ipStackSynVerdict() -> Bool {
