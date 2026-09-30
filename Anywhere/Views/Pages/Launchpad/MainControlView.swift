@@ -19,7 +19,8 @@ struct MainControlView: View {
     @Environment(SubscriptionStore.self) private var subscriptionStore
 
     let connectionEffectsEnabled: Bool
-
+    
+    @State private var centerOffset: CGFloat = 0
     @State private var showingProxiesView = false
     @State private var showingAddSheet = false
     @State private var showingManualAddSheet = false
@@ -44,7 +45,12 @@ struct MainControlView: View {
     }
 
     var body: some View {
-        MainControlLayout(idealSpacingRatio: 0.12, maxSpacing: 100, minSpacing: 20) {
+        MainControlLayout(
+            idealSpacingRatio: 0.12,
+            maxSpacing: 100,
+            minSpacing: 20,
+            centerOffset: centerOffset
+        ) {
             VStack(spacing: 20) {
                 PowerButton(
                     isConnected: isConnected,
@@ -82,6 +88,11 @@ struct MainControlView: View {
             )
             .frame(maxWidth: 500)
         }
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            (proxy.safeAreaInsets.bottom - proxy.safeAreaInsets.top) / 2
+        } action: { offset in
+            centerOffset = offset
+        }
         .padding(.horizontal)
         .animation(connectionEffectsEnabled ? Animation.bouncy : nil, value: isConnected)
         .sheet(isPresented: $showingProxiesView) {
@@ -114,12 +125,13 @@ private struct MainControlLayout: Layout {
     let idealSpacingRatio: CGFloat
     let maxSpacing: CGFloat
     let minSpacing: CGFloat
+    let centerOffset: CGFloat
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         guard let sizes = measure(subviews, width: proposal.width) else { return .zero }
         let idealSize = CGSize(
             width: max(sizes.group.width, sizes.capsule.width),
-            height: sizes.group.height + 2 * (maxSpacing + sizes.capsule.height)
+            height: sizes.group.height + maxSpacing + sizes.capsule.height
         )
         return proposal.replacingUnspecifiedDimensions(by: idealSize)
     }
@@ -128,11 +140,12 @@ private struct MainControlLayout: Layout {
         guard let sizes = measure(subviews, width: bounds.width) else { return }
         let group = sizes.group, capsule = sizes.capsule
 
-        let centeredTop = bounds.midY - group.height / 2
-        let roomBelow = bounds.maxY - (centeredTop + group.height) - capsule.height
+        let room = bounds.height - group.height - capsule.height
         let idealSpacing = min(max(bounds.height * idealSpacingRatio, minSpacing), maxSpacing)
-        let spacing = max(min(idealSpacing, roomBelow), minSpacing)
-        let top = max(bounds.minY, min(centeredTop, bounds.maxY - capsule.height - spacing - group.height))
+        let spacing = max(min(idealSpacing, room), minSpacing)
+        let contentHeight = group.height + spacing + capsule.height
+        let centeredTop = bounds.midY + centerOffset - contentHeight / 2
+        let top = max(bounds.minY, min(centeredTop, bounds.maxY - contentHeight))
 
         subviews[0].place(at: CGPoint(x: bounds.midX, y: top), anchor: .top, proposal: ProposedViewSize(group))
         subviews[1].place(at: CGPoint(x: bounds.midX, y: top + group.height + spacing), anchor: .top, proposal: ProposedViewSize(capsule))
