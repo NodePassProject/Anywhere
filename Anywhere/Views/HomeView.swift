@@ -16,94 +16,17 @@ struct HomeView: View {
     @State private var preferredColumn = NavigationSplitViewColumn.detail
 
     var body: some View {
-        splitView
-    }
-    
-    @ViewBuilder
-    private var splitView: some View {
-        if horizontalSizeClass == .regular {
-            NavigationSplitView {
-                List(selection: $selectedPage) {
-                    Section {
-                        Label(Page.launchpad.name, image: Page.launchpad.symbol)
-                            .tag(Page.launchpad)
-                        Label(Page.toolbox.name, systemImage: Page.toolbox.symbol)
-                            .tag(Page.toolbox)
-                    }
-                    
-                    Section("App") {
-                        Label(Page.data.name, systemImage: Page.data.symbol)
-                            .tag(Page.data)
-                        Label(Page.personalization.name, systemImage: Page.personalization.symbol)
-                            .tag(Page.personalization)
-                    }
-                    
-                    Section("VPN") {
-                        Label(Page.tunnel.name, systemImage: Page.tunnel.symbol)
-                            .tag(Page.tunnel)
-                        Label(Page.purify.name, systemImage: Page.purify.symbol)
-                            .tag(Page.purify)
-                        Label(Page.routing.name, systemImage: Page.routing.symbol)
-                            .tag(Page.routing)
-                        Label(Page.mitm.name, systemImage: Page.mitm.symbol)
-                            .tag(Page.mitm)
-                    }
-                    
-                    Section("Security") {
-                        Label(Page.trustedCertificates.name, systemImage: Page.trustedCertificates.symbol)
-                            .tag(Page.trustedCertificates)
-                        Label(Page.trustedNetwork.name, systemImage: Page.trustedNetwork.symbol)
-                            .tag(Page.trustedNetwork)
-                    }
-                    
-                    Section("More") {
-                        Label(Page.diagnosis.name, systemImage: Page.diagnosis.symbol)
-                            .tag(Page.diagnosis)
-                        Label(Page.about.name, systemImage: Page.about.symbol)
-                            .tag(Page.about)
-                    }
-                }
-            } detail: {
-                switch selectedPage {
-                case .launchpad:
-                    LaunchpadView()
-                case .toolbox:
-                    ToolboxView()
-                case .data:
-                    DataView()
-                case .personalization:
-                    PersonalizationView()
-                case .tunnel:
-                    TunnelView()
-                case .purify:
-                    PurifyView()
-                case .routing:
-                    RoutingView()
-                case .mitm:
-                    MITMView()
-                case .trustedCertificates:
-                    TrustedCertificatesView()
-                case .trustedNetwork:
-                    TrustedNetworkView()
-                case .diagnosis:
-                    DiagnosisView()
-                case .about:
-                    AboutView()
-                case nil:
-                    LaunchpadView()
-                }
+        TabView(selection: $selectedPage) {
+            Tab(Page.launchpad.name, image: Page.launchpad.symbol, value: Page.launchpad) {
+                LaunchpadView()
             }
-        } else {
-            TabView(selection: $selectedPage) {
-                Tab(Page.launchpad.name, image: Page.launchpad.symbol, value: Page.launchpad) {
-                    LaunchpadView()
-                }
-                
-                Tab(Page.toolbox.name, systemImage: Page.toolbox.symbol, value: Page.toolbox) {
-                    ToolboxView()
-                }
-                
-                TabSection("App") {
+            
+            Tab(Page.toolbox.name, systemImage: Page.toolbox.symbol, value: Page.toolbox) {
+                ToolboxView()
+            }
+            
+            if horizontalSizeClass != .compact {
+                TabSection {
                     Tab(Page.data.name, systemImage: Page.data.symbol, value: Page.data) {
                         DataView()
                     }
@@ -111,11 +34,12 @@ struct HomeView: View {
                     Tab(Page.personalization.name, systemImage: Page.personalization.symbol, value: Page.personalization) {
                         PersonalizationView()
                     }
+                } header: {
+                    Text("App")
                 }
                 .tabPlacement(.sidebarOnly)
-                .hidden(horizontalSizeClass == .compact)
                 
-                TabSection("VPN") {
+                TabSection {
                     Tab(Page.tunnel.name, systemImage: Page.tunnel.symbol, value: Page.tunnel) {
                         TunnelView()
                     }
@@ -131,11 +55,12 @@ struct HomeView: View {
                     Tab(Page.mitm.name, systemImage: Page.mitm.symbol, value: Page.mitm) {
                         MITMView()
                     }
+                } header: {
+                    Text("VPN")
                 }
                 .tabPlacement(.sidebarOnly)
-                .hidden(horizontalSizeClass == .compact)
                 
-                TabSection("Security") {
+                TabSection {
                     Tab(Page.trustedCertificates.name, systemImage: Page.trustedCertificates.symbol, value: Page.trustedCertificates) {
                         TrustedCertificatesView()
                     }
@@ -143,11 +68,12 @@ struct HomeView: View {
                     Tab(Page.trustedNetwork.name, systemImage: Page.trustedNetwork.symbol, value: Page.trustedNetwork) {
                         TrustedNetworkView()
                     }
+                } header: {
+                    Text("Security")
                 }
                 .tabPlacement(.sidebarOnly)
-                .hidden(horizontalSizeClass == .compact)
                 
-                TabSection("More") {
+                TabSection {
                     Tab(Page.diagnosis.name, systemImage: Page.diagnosis.symbol, value: Page.diagnosis) {
                         DiagnosisView()
                     }
@@ -155,12 +81,13 @@ struct HomeView: View {
                     Tab(Page.about.name, systemImage: Page.about.symbol, value: Page.about) {
                         AboutView()
                     }
+                } header: {
+                    Text("More")
                 }
                 .tabPlacement(.sidebarOnly)
-                .hidden(horizontalSizeClass == .compact)
             }
-            .tabViewStyle(.sidebarAdaptable)
         }
+        .tabViewStyle(.sidebarAdaptable)
     }
     
     @ViewBuilder
