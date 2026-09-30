@@ -628,31 +628,17 @@ actor TCPConnection: MITMSessionHost {
     @concurrent
     private nonisolated func runUploadRelay(_ connection: ProxyConnection, _ stream: AnywhereIP.Stream, context: RelayContext) async {
         while let chunk = try? await uploadInbox.next() {
-            guard await forwardUpload(chunk, connection, stream, context: context) else { return }
-        }
-        do {
-            while let chunk = try await stream.receive() {
-                guard !chunk.isEmpty else { continue }
-                markActivity()
-                guard await forwardUpload(chunk, connection, stream, context: context) else { return }
+            do {
+                try await connection.send(chunk)
+            } catch {
+                await relayFailed("Send", error: error)
+                return
             }
-        } catch {
-            await inputFailed(error)
+            markActivity()
+            context.meter?.addBytesOut(chunk.count)
+            activityRecord.addBytesOut(chunk.count)
+            stream.didConsume(chunk.count)
         }
-    }
-
-    private nonisolated func forwardUpload(_ chunk: Data, _ connection: ProxyConnection, _ stream: AnywhereIP.Stream, context: RelayContext) async -> Bool {
-        do {
-            try await connection.send(chunk)
-        } catch {
-            await relayFailed("Send", error: error)
-            return false
-        }
-        markActivity()
-        context.meter?.addBytesOut(chunk.count)
-        activityRecord.addBytesOut(chunk.count)
-        stream.didConsume(chunk.count)
-        return true
     }
 
     @concurrent
@@ -714,7 +700,7 @@ actor TCPConnection: MITMSessionHost {
                 guard phase != .closed else { return }
                 handleReceivedData(data)
                 if stream != nil, mitmSession == nil {
-                    uploadInbox.finish()
+                    try await runUploadIntake()
                     return
                 }
             }
@@ -722,6 +708,16 @@ actor TCPConnection: MITMSessionHost {
         } catch {
             inputFailed(error)
         }
+    }
+    
+    @concurrent
+    private nonisolated func runUploadIntake() async throws {
+        while let data = try await connection.receive() {
+            guard !data.isEmpty else { continue }
+            markActivity()
+            uploadInbox.yield(data)
+        }
+        uploadInbox.finish()
     }
 
     private func inputFailed(_ error: Error) {
