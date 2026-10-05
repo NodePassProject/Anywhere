@@ -6,13 +6,17 @@
 //
 
 import Foundation
-import Network
-import CryptoKit
 import Synchronization
+import Network
+import AnywhereQUIC
 
 nonisolated private let logger = AnywhereLogger(category: "QUICConnection")
 
 extension QUICConnection {
+
+    enum PathValidationResult {
+        case success, failure, aborted
+    }
 
     // MARK: Migration
 
@@ -63,16 +67,15 @@ extension QUICConnection {
 
     func attemptReactiveMigration() {
         switch migration {
-        case .proactiveProbing(let target, _), .proactiveValidating(let target, _):
-            target.assumeIsolated { $0.close() }
-            setMigration(.none)
+        case .proactiveProbing, .proactiveValidating:
+            abortProactiveMigration(countAsFailure: false)
         case .none, .reactiveValidating:
             break
         }
 
         guard migrationEnabled, phase == .connected, case .none = migration,
               migrationFailures < Self.maxMigrationFailures,
-              let conn = connectionOpaquePointer else {
+              let engine else {
             close(error: AnywhereError.quic(.connectionFailed(detail: "network path lost")))
             return
         }
@@ -88,16 +91,13 @@ extension QUICConnection {
         }
 
         let newLocal = makeMigrationLocalAddr()
-        let ts = currentTimestamp()
-        let prevBusy = enterConnHeld()
-        let rv = initiateImmediateMigration(conn, localAddr: newLocal, remoteAddr: remoteAddr,
-                                            addrLen: addrLen, ts: ts)
-        exitConnHeld(prevBusy)
-        guard rv == 0 else {
-            logger.warning("[QUIC] Reactive migration rejected (ngtcp2 \(rv)); reconnecting")
+        do {
+            try engine.migrate(to: quicPath(local: newLocal), immediately: true, now: currentTimestamp())
+        } catch {
+            logger.warning("[QUIC] Reactive migration rejected (\(error)); reconnecting")
             newCarrier.assumeIsolated { $0.close() }
             migrationFailures += 1
-            close(error: AnywhereError.quic(.connectionFailed(detail: "migration rejected: \(rv)")))
+            close(error: AnywhereError.quic(.connectionFailed(detail: "migration rejected: \(error)")))
             return
         }
 
@@ -115,7 +115,7 @@ extension QUICConnection {
     func attemptProactiveMigration() {
         guard migrationEnabled, phase == .connected, case .none = migration,
               migrationFailures < Self.maxMigrationFailures,
-              connectionOpaquePointer != nil,
+              engine != nil,
               let oldType = carrier?.assumeIsolated({ $0.currentInterfaceType }) else { return }
 
         let target = QUICDatagramCarrier(bridge: bridge, obfuscator: obfuscator)
@@ -157,18 +157,15 @@ extension QUICConnection {
             self.assumeIsolated { me in
                 guard let target,
                       case .proactiveProbing(let current, let migratingLocal) = me.migration, current === target,
-                      let conn = me.connectionOpaquePointer,
+                      let engine = me.engine,
                       let newType = target.assumeIsolated({ $0.currentInterfaceType }), newType != oldType else {
                     me.abortProactiveIfNotValidating()
                     return
                 }
-                let ts = me.currentTimestamp()
-                let prevBusy = me.enterConnHeld()
-                let rv = me.initiateMigration(conn, localAddr: migratingLocal, remoteAddr: me.remoteAddr,
-                                              addrLen: me.addrLen, ts: ts)
-                me.exitConnHeld(prevBusy)
-                guard rv == 0 else {
-                    logger.warning("[QUIC] Proactive migration rejected (ngtcp2 \(rv)); staying put")
+                do {
+                    try engine.migrate(to: me.quicPath(local: migratingLocal), immediately: false, now: me.currentTimestamp())
+                } catch {
+                    logger.warning("[QUIC] Proactive migration rejected (\(error)); staying put")
                     me.abortProactiveMigration(countAsFailure: true)
                     return
                 }
@@ -192,6 +189,9 @@ extension QUICConnection {
     }
 
     func abortProactiveMigration(countAsFailure: Bool) {
+        if case .proactiveValidating = migration {
+            engine?.cancelPendingMigration(now: currentTimestamp())
+        }
         switch migration {
         case .proactiveProbing(let target, _), .proactiveValidating(let target, _):
             target.assumeIsolated { $0.close() }
@@ -207,7 +207,7 @@ extension QUICConnection {
         abortProactiveMigration(countAsFailure: false)
     }
 
-    func handlePathValidation(result: NGTCP2PathValidationResult, pathLocal: sockaddr_storage?) {
+    func handlePathValidation(result: PathValidationResult, pathLocal: QUICSocketAddress) {
         switch migration {
         case .none:
             return
@@ -252,30 +252,18 @@ extension QUICConnection {
         }
     }
 
-    private func pathBelongsToMigration(_ pathLocal: sockaddr_storage?, expected: sockaddr_storage) -> Bool {
-        guard let pathLocal else { return true }
-        return sockaddrMatches(pathLocal, expected, length: addrLen)
+    private func pathBelongsToMigration(_ pathLocal: QUICSocketAddress, expected: sockaddr_storage) -> Bool {
+        pathLocal == QUICSocketAddress(expected, length: addrLen)
     }
 
-    func carrierForOutPath(local: sockaddr_storage) -> QUICDatagramCarrier? {
+    func carrierForOutPath(local: QUICSocketAddress) -> QUICDatagramCarrier? {
         switch migration {
         case .proactiveProbing(let target, let migratingLocal),
              .proactiveValidating(let target, let migratingLocal):
-            if sockaddrMatches(local, migratingLocal, length: addrLen) { return target }
+            if local == QUICSocketAddress(migratingLocal, length: addrLen) { return target }
             return carrier
         case .none, .reactiveValidating:
             return carrier
-        }
-    }
-
-    func sockaddrMatches(_ lhs: sockaddr_storage, _ rhs: sockaddr_storage, length: Int) -> Bool {
-        var lhs = lhs
-        var rhs = rhs
-        return withUnsafeBytes(of: &lhs) { lb in
-            withUnsafeBytes(of: &rhs) { rb in
-                let n = min(length, lb.count, rb.count)
-                return memcmp(lb.baseAddress!, rb.baseAddress!, n) == 0
-            }
         }
     }
 

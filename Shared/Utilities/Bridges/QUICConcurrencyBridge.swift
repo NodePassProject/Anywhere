@@ -1,5 +1,5 @@
 //
-//  NGTCP2ConcurrencyBridge.swift
+//  QUICConcurrencyBridge.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 7/15/26.
@@ -7,11 +7,11 @@
 
 import Foundation
 
-nonisolated final class NGTCP2ConcurrencyBridge: @unchecked Sendable {
+nonisolated final class QUICConcurrencyBridge: @unchecked Sendable {
     let executor: BridgeExecutor
 
     init() {
-        self.executor = BridgeExecutor(label: "com.argsment.Anywhere.NGTCP2ConcurrencyBridge")
+        self.executor = BridgeExecutor(label: "com.argsment.Anywhere.QUICConcurrencyBridge")
     }
     
     private var queue: DispatchQueue { executor.queue }

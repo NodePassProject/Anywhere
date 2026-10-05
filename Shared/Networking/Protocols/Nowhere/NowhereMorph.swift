@@ -92,24 +92,20 @@ nonisolated enum NowhereMorph {
         }
         if input.isEmpty { return Data() }
         var output = Data(count: input.count)
-        let status = output.withUnsafeMutableBytes { destination in
+        output.withUnsafeMutableBytes { destination in
             input.withUnsafeBytes { source in
                 key.withUnsafeBytes { keyBytes in
                     nonce.withUnsafeBytes { nonceBytes in
-                        nowhere_chacha20_xor(
-                            destination.bindMemory(to: UInt8.self).baseAddress,
-                            source.bindMemory(to: UInt8.self).baseAddress,
-                            input.count,
-                            keyBytes.bindMemory(to: UInt8.self).baseAddress,
-                            nonceBytes.bindMemory(to: UInt8.self).baseAddress,
-                            offset
+                        NowhereMorphCrypto.xor(
+                            destination: destination,
+                            input: source,
+                            key: keyBytes,
+                            nonce: nonceBytes,
+                            offset: offset
                         )
                     }
                 }
             }
-        }
-        guard status == 0 else {
-            throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Morph stream limit exceeded"))
         }
         return output
     }

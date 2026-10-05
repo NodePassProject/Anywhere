@@ -243,8 +243,6 @@ nonisolated final class HTTP3Multiplexer: Multiplexer, Sendable {
     }
 
     private func startConnection() {
-        QUICCrypto.registerCallbacks()
-
         quic.handlers.withLock { handlers in
             handlers.connectionClosed = { [weak self] error in
                 self?.failSession(error)

@@ -4,10 +4,8 @@
  * libyaml only consumes the YAML_VERSION_* macros from config.h — verified that
  * no HAVE_*_H feature macros are referenced anywhere under src/. This file is
  * kept beside the sources so libyaml's quote-include `#include "config.h"`
- * resolves here via same-directory lookup, and never collides with ngtcp2's
- * angle-include `#include <config.h>` (which resolves from the header search
- * paths instead). For that isolation to hold, this directory must NOT be added
- * to HEADER_SEARCH_PATHS.
+ * resolves here via same-directory lookup. This directory does not need to be
+ * added to HEADER_SEARCH_PATHS.
  */
 #ifndef ANYWHERE_LIBYAML_CONFIG_H
 #define ANYWHERE_LIBYAML_CONFIG_H

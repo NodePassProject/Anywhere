@@ -147,7 +147,7 @@ actor NowhereUDPConnection {
         }
     }
 
-    // MARK: - Demux feed (nonisolated; driven on the ngtcp2 queue)
+    // MARK: - Demux feed (nonisolated; driven on the QUIC queue)
 
     nonisolated func handleControlStreamData(_ data: Data, fin: Bool) {
         if !data.isEmpty { controlInbox.yield(Data(data)) }

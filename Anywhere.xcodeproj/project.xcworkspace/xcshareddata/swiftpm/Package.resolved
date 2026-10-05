@@ -1,5 +1,5 @@
 {
-  "originHash" : "ac049ddc6b0d225049de12badcd0b174d9d03247401afff49c41c3260046654c",
+  "originHash" : "d40569ad96893f1ea08e8662d10eaeb43827e1ad62d5fb54c71f78ea0b4fbe7c",
   "pins" : [
     {
       "identity" : "anywhereip",
@@ -8,6 +8,15 @@
       "state" : {
         "revision" : "bd4f18494055e350e7b52476e9c64d17bf15099e",
         "version" : "3.1.0"
+      }
+    },
+    {
+      "identity" : "anywherequic",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/NodePassProject/AnywhereQUIC",
+      "state" : {
+        "revision" : "6101dc386c54ac37484432a3527ff7ab86024b4b",
+        "version" : "1.0.0"
       }
     },
     {

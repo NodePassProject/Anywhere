@@ -6,9 +6,9 @@
 //
 
 import Foundation
-import Network
-import CryptoKit
 import Synchronization
+import Network
+import AnywhereQUIC
 
 nonisolated private let logger = AnywhereLogger(category: "QUICConnection")
 
@@ -38,15 +38,9 @@ extension QUICConnection {
         }
         self.retransmitTimer?.cancel()
         self.retransmitTimer = nil
-        if let key = self.brutalCCKey {
-            BrutalCongestionControl.unregister(cc: key)
-            self.brutalCCKey = nil
-            self.brutalCC = nil
-        }
-        if let connectionOpaquePointer = self.connectionOpaquePointer {
-            self.deleteConn(connectionOpaquePointer)
-            self.connectionOpaquePointer = nil
-        }
+        self.brutalCC = nil
+        self.engine = nil
+        self.tlsHandler = nil
         self.transportSealContinuation?.finish()
         self.transportSealContinuation = nil
         self.rootTask?.cancel()

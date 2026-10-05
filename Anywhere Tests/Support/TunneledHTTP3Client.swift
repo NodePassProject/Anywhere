@@ -102,7 +102,7 @@ private nonisolated final class HTTP3GetRequest: Sendable {
         return try await resultTask.value
     }
 
-    // MARK: - Demux events (delivered synchronously on the ngtcp2 queue)
+    // MARK: - Demux events (delivered synchronously on the QUIC queue)
 
     private func handleStreamData(_ data: Data, fin: Bool) {
         if !data.isEmpty {

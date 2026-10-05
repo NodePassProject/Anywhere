@@ -6,9 +6,10 @@
 //
 
 import Foundation
+import Synchronization
 import CryptoKit
 import Security
-import Synchronization
+import AnywhereQUIC
 
 nonisolated private let logger = AnywhereLogger(category: "QUICTLSHandler")
 
@@ -65,10 +66,10 @@ nonisolated enum QUICSessionTicketCache {
 nonisolated enum QUICTLSResult {
     case success
     case needMoreData
-    case error(Int32)
+    case error
 }
 
-nonisolated class QUICTLSHandler {
+nonisolated final class QUICTLSHandler: QUICTLSProvider {
 
     // MARK: - State
 
@@ -117,8 +118,10 @@ nonisolated class QUICTLSHandler {
 
     private(set) var cipherSuite: UInt16 = TLSCipherSuite.TLS_AES_128_GCM_SHA256
     
+    private var actions: [QUICHandshakeAction] = []
+
     private var cryptoBuffer = Data()
-    private var cryptoBufferLevel: ngtcp2_encryption_level?
+    private var cryptoBufferLevel: QUICEncryptionLevel?
 
     private var serverCertificates: [SecCertificate] = []
     private var transcriptBeforeCertVerify: Data?
@@ -235,17 +238,32 @@ nonisolated class QUICTLSHandler {
         if handshakeError == nil {
             handshakeError = error ?? AnywhereError.tls(.handshakeFailed(detail: reason))
         }
-        return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+        return .error
     }
 
     // MARK: - Process Crypto Data
     
-    func processCryptoData(
-        _ data: Data, level: ngtcp2_encryption_level,
-        conn: OpaquePointer
-    ) -> QUICTLSResult {
+    func startHandshake(localTransportParameters: Data) throws -> [QUICHandshakeAction] {
+        guard let hello = buildClientHello(transportParams: localTransportParameters) else {
+            throw AnywhereError.tls(.handshakeFailed(detail: "Unable to build QUIC ClientHello"))
+        }
+        return [.sendCryptoData(hello, level: .initial)]
+    }
+
+    func receiveCryptoData(_ data: Data, at level: QUICEncryptionLevel) throws -> [QUICHandshakeAction] {
+        actions.removeAll(keepingCapacity: true)
+        if case .error = processCryptoData(data, level: level) {
+            actions.removeAll(keepingCapacity: true)
+            throw handshakeError ?? AnywhereError.tls(.handshakeFailed(detail: "QUIC TLS handshake failed"))
+        }
+        let result = actions
+        actions.removeAll(keepingCapacity: true)
+        return result
+    }
+
+    private func processCryptoData(_ data: Data, level: QUICEncryptionLevel) -> QUICTLSResult {
         if !cryptoBuffer.isEmpty, let bufferedLevel = cryptoBufferLevel, bufferedLevel != level {
-            return fail("handshake message split across encryption levels (\(bufferedLevel.rawValue) → \(level.rawValue))")
+            return fail("handshake message split across encryption levels (\(bufferedLevel) → \(level))")
         }
         cryptoBufferLevel = level
         cryptoBuffer.append(data)
@@ -258,10 +276,10 @@ nonisolated class QUICTLSHandler {
             |  Int(cryptoBuffer[startIndex + 3])
             
             guard msgLen <= 0xFFFF else {
-                return fail("handshake message too long (type \(msgType), \(msgLen) B, level \(level.rawValue))")
+                return fail("handshake message too long (type \(msgType), \(msgLen) B, level \(level))")
             }
             if let expected = QUICTLSHandler.expectedLevel(for: msgType), level != expected {
-                return fail("handshake message type \(msgType) at level \(level.rawValue), expected \(expected.rawValue)")
+                return fail("handshake message type \(msgType) at level \(level), expected \(expected)")
             }
             let totalLen = 4 + msgLen
 
@@ -282,7 +300,7 @@ nonisolated class QUICTLSHandler {
 
             let body = message.count > 4 ? Data(message[4...]) : Data()
             let result = processHandshakeMessage(msgType: msgType, body: body,
-                                                  fullMessage: message, level: level, conn: conn)
+                                                  fullMessage: message, level: level)
             if case .error = result {
                 return result
             }
@@ -291,16 +309,16 @@ nonisolated class QUICTLSHandler {
         return .success
     }
     
-    private static func expectedLevel(for msgType: UInt8) -> ngtcp2_encryption_level? {
+    private static func expectedLevel(for msgType: UInt8) -> QUICEncryptionLevel? {
         switch msgType {
         case TLSHandshakeType.serverHello:
-            return NGTCP2_ENCRYPTION_LEVEL_INITIAL
+            return .initial
         case TLSHandshakeType.encryptedExtensions, TLSHandshakeType.certificate,
              TLSHandshakeType.certificateRequest, TLSHandshakeType.certificateVerify,
              TLSHandshakeType.finished:
-            return NGTCP2_ENCRYPTION_LEVEL_HANDSHAKE
+            return .handshake
         case TLSHandshakeType.newSessionTicket:
-            return NGTCP2_ENCRYPTION_LEVEL_1RTT
+            return .application
         default:
             return nil
         }
@@ -312,15 +330,14 @@ nonisolated class QUICTLSHandler {
         msgType: UInt8,
         body: Data,
         fullMessage: Data,
-        level: ngtcp2_encryption_level,
-        conn: OpaquePointer
+        level: QUICEncryptionLevel
     ) -> QUICTLSResult {
         switch msgType {
-        case TLSHandshakeType.serverHello:         return processServerHello(body, conn: conn)
-        case TLSHandshakeType.encryptedExtensions: return processEncryptedExtensions(body, conn: conn)
+        case TLSHandshakeType.serverHello:         return processServerHello(body)
+        case TLSHandshakeType.encryptedExtensions: return processEncryptedExtensions(body)
         case TLSHandshakeType.certificate:         return processCertificate(body)
         case TLSHandshakeType.certificateVerify:   return processCertificateVerify(body)
-        case TLSHandshakeType.finished:            return processServerFinished(body, conn: conn)
+        case TLSHandshakeType.finished:            return processServerFinished(body)
         case TLSHandshakeType.newSessionTicket:    return processNewSessionTicket(body)
         default:
             logger.warning("[QUIC-TLS] Unknown message type: \(msgType)")
@@ -330,7 +347,7 @@ nonisolated class QUICTLSHandler {
 
     // MARK: - ServerHello
 
-    private func processServerHello(_ body: Data, conn: OpaquePointer) -> QUICTLSResult {
+    private func processServerHello(_ body: Data) -> QUICTLSResult {
         guard phase == .clientHelloSent else {
             return fail("ServerHello in phase \(phase)")
         }
@@ -465,8 +482,6 @@ nonisolated class QUICTLSHandler {
 
             keyDerivation = TLS13KeyDerivation(cipherSuite: cipherSuite)
 
-            ngtcp2_conn_set_tls_native_handle(conn, UnsafeMutableRawPointer(bitPattern: UInt(cipherSuite)))
-
             if !pskAccepted { activePSK = nil }
 
             let (hsSecret, hsKeys) = keyDerivation!.deriveHandshakeKeys(
@@ -477,7 +492,11 @@ nonisolated class QUICTLSHandler {
             clientHandshakeTrafficSecret = hsKeys.clientTrafficSecret
             serverHandshakeTrafficSecret = hsKeys.serverTrafficSecret
 
-            installHandshakeKeys(conn: conn, keys: hsKeys)
+            actions.append(.installHandshakeKeys(
+                cipherSuite: QUICCipherSuite(rawValue: cipherSuite)!,
+                readSecret: hsKeys.serverTrafficSecret,
+                writeSecret: hsKeys.clientTrafficSecret
+            ))
 
             transition(to: .serverHelloReceived)
         } catch {
@@ -489,7 +508,7 @@ nonisolated class QUICTLSHandler {
 
     // MARK: - EncryptedExtensions
 
-    private func processEncryptedExtensions(_ body: Data, conn: OpaquePointer) -> QUICTLSResult {
+    private func processEncryptedExtensions(_ body: Data) -> QUICTLSResult {
         guard body.count >= 2 else { return .success }
         let extLen = (Int(body[0]) << 8) | Int(body[1])
         var offset = 2
@@ -514,14 +533,7 @@ nonisolated class QUICTLSHandler {
                 let parameters = Data(body[offset..<(offset + extDataLen)])
                 peerQUICTransportParameters = parameters
 
-                _ = parameters.withUnsafeBytes { buffer -> Int32 in
-                    guard let pointer = buffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-                        return -1
-                    }
-                    return ngtcp2_conn_decode_and_set_remote_transport_params(
-                        conn, pointer, parameters.count
-                    )
-                }
+                actions.append(.setRemoteTransportParameters(parameters))
             } else if extType == TLSExtensionType.applicationLayerProtocolNegotiation {
                 if extDataLen >= 3 {
                     let listLen = (Int(body[offset]) << 8) | Int(body[offset + 1])
@@ -549,7 +561,7 @@ nonisolated class QUICTLSHandler {
 
     // MARK: - Server Finished
 
-    private func processServerFinished(_ body: Data, conn: OpaquePointer) -> QUICTLSResult {
+    private func processServerFinished(_ body: Data) -> QUICTLSResult {
         guard phase == .serverHelloReceived else {
             return fail("Finished in phase \(phase)")
         }
@@ -563,7 +575,7 @@ nonisolated class QUICTLSHandler {
             if let error = validateCertificate() {
                 logger.warning("[QUIC-TLS] Certificate validation failed: \(error.localizedDescription)")
                 handshakeError = error
-                return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+                return .error
             }
             
             if !CertificatePolicy.allowInsecure {
@@ -576,7 +588,7 @@ nonisolated class QUICTLSHandler {
                 ) {
                     logger.warning("[QUIC-TLS] CertificateVerify rejected: \(error.localizedDescription)")
                     handshakeError = error
-                    return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+                    return .error
                 }
             }
         }
@@ -596,27 +608,19 @@ nonisolated class QUICTLSHandler {
             handshakeSecret: handshakeSecret, fullTranscript: transcript
         )
         exporterMasterSecret = application.exporterMasterSecret
-        installApplicationKeys(conn: conn, keys: application.keys)
+        actions.append(.installApplicationKeys(
+            cipherSuite: QUICCipherSuite(rawValue: cipherSuite)!,
+            readSecret: application.keys.serverTrafficSecret,
+            writeSecret: application.keys.clientTrafficSecret
+        ))
 
         let verifyData = keyDerivation.finishedPayload(
             trafficSecret: clientHTS, transcript: transcript
         )
         let finishedMessage = buildFinishedMessage(verifyData: verifyData)
 
-        let rv = finishedMessage.withUnsafeBytes { buffer -> Int32 in
-            guard let pointer = buffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-                return NGTCP2_ERR_CALLBACK_FAILURE
-            }
-            return ngtcp2_conn_submit_crypto_data(
-                conn, NGTCP2_ENCRYPTION_LEVEL_HANDSHAKE, pointer, finishedMessage.count
-            )
-        }
-
-        if rv != 0 {
-            return fail("submitting client Finished failed: \(rv) (\(String(cString: ngtcp2_strerror(rv))))")
-        }
-
-        ngtcp2_conn_tls_handshake_completed(conn)
+        actions.append(.sendCryptoData(finishedMessage, level: .handshake))
+        actions.append(.handshakeComplete)
         transition(to: .completed)
 
         transcript.append(finishedMessage)
@@ -630,130 +634,6 @@ nonisolated class QUICTLSHandler {
         )
 
         return .success
-    }
-
-    // MARK: - Key Installation
-
-    private func installHandshakeKeys(conn: OpaquePointer, keys: TLS13HandshakeKeys) {
-        var context = ngtcp2_crypto_ctx()
-        ngtcp2_crypto_ctx_tls(&context, UnsafeMutableRawPointer(bitPattern: UInt(cipherSuite)))
-        ngtcp2_conn_set_crypto_ctx(conn, &context)
-
-        let kd = keyDerivation!
-        let clientKey = kd.expandLabel(
-            secret: SymmetricKey(data: keys.clientTrafficSecret),
-            label: "quic key", context: Data(), length: kd.keyLength)
-        let clientIV = kd.expandLabel(
-            secret: SymmetricKey(data: keys.clientTrafficSecret),
-            label: "quic iv", context: Data(), length: 12)
-        let clientHP = kd.expandLabel(
-            secret: SymmetricKey(data: keys.clientTrafficSecret),
-            label: "quic hp", context: Data(), length: kd.keyLength)
-
-        let serverKey = kd.expandLabel(
-            secret: SymmetricKey(data: keys.serverTrafficSecret),
-            label: "quic key", context: Data(), length: kd.keyLength)
-        let serverIV = kd.expandLabel(
-            secret: SymmetricKey(data: keys.serverTrafficSecret),
-            label: "quic iv", context: Data(), length: 12)
-        let serverHP = kd.expandLabel(
-            secret: SymmetricKey(data: keys.serverTrafficSecret),
-            label: "quic hp", context: Data(), length: kd.keyLength)
-
-        var rxAeadCtx = ngtcp2_crypto_aead_ctx()
-        var txAeadCtx = ngtcp2_crypto_aead_ctx()
-        var rxHPCtx = ngtcp2_crypto_cipher_ctx()
-        var txHPCtx = ngtcp2_crypto_cipher_ctx()
-
-        _ = serverKey.withUnsafeBytes { keyBuf in
-            ngtcp2_crypto_aead_ctx_decrypt_init(&rxAeadCtx, &context.aead,
-                keyBuf.baseAddress!.assumingMemoryBound(to: UInt8.self), 12)
-        }
-        _ = clientKey.withUnsafeBytes { keyBuf in
-            ngtcp2_crypto_aead_ctx_encrypt_init(&txAeadCtx, &context.aead,
-                keyBuf.baseAddress!.assumingMemoryBound(to: UInt8.self), 12)
-        }
-        _ = serverHP.withUnsafeBytes { keyBuf in
-            ngtcp2_crypto_cipher_ctx_encrypt_init(&rxHPCtx, &context.hp,
-                keyBuf.baseAddress!.assumingMemoryBound(to: UInt8.self))
-        }
-        _ = clientHP.withUnsafeBytes { keyBuf in
-            ngtcp2_crypto_cipher_ctx_encrypt_init(&txHPCtx, &context.hp,
-                keyBuf.baseAddress!.assumingMemoryBound(to: UInt8.self))
-        }
-        _ = serverIV.withUnsafeBytes { ivBuf in
-            ngtcp2_conn_install_rx_handshake_key(conn, &rxAeadCtx,
-                ivBuf.baseAddress!.assumingMemoryBound(to: UInt8.self), 12, &rxHPCtx)
-        }
-        _ = clientIV.withUnsafeBytes { ivBuf in
-            ngtcp2_conn_install_tx_handshake_key(conn, &txAeadCtx,
-                ivBuf.baseAddress!.assumingMemoryBound(to: UInt8.self), 12, &txHPCtx)
-        }
-    }
-
-    private func installApplicationKeys(conn: OpaquePointer, keys: TLS13ApplicationKeys) {
-        let kd = keyDerivation!
-        var context = ngtcp2_crypto_ctx()
-        ngtcp2_crypto_ctx_tls(&context, UnsafeMutableRawPointer(bitPattern: UInt(cipherSuite)))
-
-        let hsKey = SymmetricKey(data: handshakeSecret!)
-        let derivedHS = kd.deriveSecret(secret: hsKey, label: "derived", messages: Data())
-        let (_, masterKey) = kd.extract(inputKeyMaterial: Data(repeating: 0, count: kd.hashLength), salt: derivedHS)
-
-        let serverATS = kd.deriveSecret(secret: masterKey, label: "s ap traffic", messages: transcript)
-        let clientATS = kd.deriveSecret(secret: masterKey, label: "c ap traffic", messages: transcript)
-
-        let serverATSKey = SymmetricKey(data: serverATS)
-        let rxKey = kd.expandLabel(secret: serverATSKey, label: "quic key", context: Data(), length: kd.keyLength)
-        let rxIV = kd.expandLabel(secret: serverATSKey, label: "quic iv", context: Data(), length: 12)
-        let rxHP = kd.expandLabel(secret: serverATSKey, label: "quic hp", context: Data(), length: kd.keyLength)
-
-        let clientATSKey = SymmetricKey(data: clientATS)
-        let txKey = kd.expandLabel(secret: clientATSKey, label: "quic key", context: Data(), length: kd.keyLength)
-        let txIV = kd.expandLabel(secret: clientATSKey, label: "quic iv", context: Data(), length: 12)
-        let txHP = kd.expandLabel(secret: clientATSKey, label: "quic hp", context: Data(), length: kd.keyLength)
-
-        var rxAeadCtx = ngtcp2_crypto_aead_ctx()
-        var rxHPCtx = ngtcp2_crypto_cipher_ctx()
-        var txAeadCtx = ngtcp2_crypto_aead_ctx()
-        var txHPCtx = ngtcp2_crypto_cipher_ctx()
-
-        _ = rxKey.withUnsafeBytes { buffer in
-            ngtcp2_crypto_aead_ctx_decrypt_init(&rxAeadCtx, &context.aead,
-                buffer.baseAddress!.assumingMemoryBound(to: UInt8.self), 12)
-        }
-        _ = rxHP.withUnsafeBytes { buffer in
-            ngtcp2_crypto_cipher_ctx_encrypt_init(&rxHPCtx, &context.hp,
-                buffer.baseAddress!.assumingMemoryBound(to: UInt8.self))
-        }
-        _ = txKey.withUnsafeBytes { buffer in
-            ngtcp2_crypto_aead_ctx_encrypt_init(&txAeadCtx, &context.aead,
-                buffer.baseAddress!.assumingMemoryBound(to: UInt8.self), 12)
-        }
-        _ = txHP.withUnsafeBytes { buffer in
-            ngtcp2_crypto_cipher_ctx_encrypt_init(&txHPCtx, &context.hp,
-                buffer.baseAddress!.assumingMemoryBound(to: UInt8.self))
-        }
-
-        _ = serverATS.withUnsafeBytes { secretBuf in
-            rxIV.withUnsafeBytes { ivBuf in
-                ngtcp2_conn_install_rx_key(conn,
-                    secretBuf.baseAddress!.assumingMemoryBound(to: UInt8.self), kd.hashLength,
-                    &rxAeadCtx,
-                    ivBuf.baseAddress!.assumingMemoryBound(to: UInt8.self), 12,
-                    &rxHPCtx)
-            }
-        }
-
-        _ = clientATS.withUnsafeBytes { secretBuf in
-            txIV.withUnsafeBytes { ivBuf in
-                ngtcp2_conn_install_tx_key(conn,
-                    secretBuf.baseAddress!.assumingMemoryBound(to: UInt8.self), kd.hashLength,
-                    &txAeadCtx,
-                    ivBuf.baseAddress!.assumingMemoryBound(to: UInt8.self), 12,
-                    &txHPCtx)
-            }
-        }
     }
 
     // MARK: - Session Tickets

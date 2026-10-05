@@ -119,8 +119,6 @@ nonisolated final class HysteriaSession: Sendable {
     }
 
     private func startConnection() {
-        QUICCrypto.registerCallbacks()
-
         quic.handlers.withLock { handlers in
             handlers.connectionClosed = { [weak self] error in
                 self?.failSession(error)

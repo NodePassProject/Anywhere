@@ -6,9 +6,9 @@
 //
 
 import Foundation
-import Network
-import CryptoKit
 import Synchronization
+import Network
+import AnywhereQUIC
 
 nonisolated private let logger = AnywhereLogger(category: "QUICConnection")
 
@@ -81,7 +81,7 @@ actor QUICConnection {
         return true
     }
 
-    let bridge: NGTCP2ConcurrencyBridge
+    let bridge: QUICConcurrencyBridge
 
     nonisolated func enqueue(_ work: @escaping @convention(block) @Sendable () -> Void) {
         bridge.enqueue(work)
@@ -110,8 +110,7 @@ actor QUICConnection {
         _connHeld.store(previous, ordering: .relaxed)
     }
 
-    var connectionOpaquePointer: OpaquePointer?
-    var connRefStorage = ngtcp2_crypto_conn_ref()
+    var engine: AnywhereQUIC.QUICConnection?
 
     var inReadPkt = false
 
@@ -167,9 +166,6 @@ actor QUICConnection {
 
     var retransmitTimer: BridgeDeadlineTimer?
 
-    var dcid = ngtcp2_cid()
-    var scid = ngtcp2_cid()
-
     var connectContinuation: CheckedContinuation<Void, Error>?
 
     var dialAttempt: ConnectionMetrics.Attempt?
@@ -188,8 +184,7 @@ actor QUICConnection {
     }
     let handlers = Mutex(Handlers())
 
-    var brutalCC: BrutalCongestionControl?
-    var brutalCCKey: OpaquePointer?
+    var brutalCC: QUICBrutalCongestionController?
 
     let datagramsEnabled: Bool
     static let maxDatagramFrameSize: UInt64 = 65535
@@ -198,100 +193,33 @@ actor QUICConnection {
     var streamPumpCursor: Int64 = -1
 
     final class StreamSendChunk {
-        let storage: UnsafeMutableBufferPointer<UInt8>
-        let startOffset: UInt64
-        let endOffset: UInt64
+        let data: Data
         let fin: Bool
+        var offset = 0
         var continuation: CheckedContinuation<Void, Error>?
 
-        init(copying data: Data, at offset: UInt64, fin: Bool,
-             continuation: CheckedContinuation<Void, Error>?) {
-            let buffer = UnsafeMutableBufferPointer<UInt8>.allocate(capacity: max(1, data.count))
-            _ = data.copyBytes(to: buffer)
-            storage = buffer
-            startOffset = offset
-            endOffset = offset + UInt64(data.count)
+        init(data: Data, fin: Bool, continuation: CheckedContinuation<Void, Error>?) {
+            self.data = data
             self.fin = fin
             self.continuation = continuation
-        }
-
-        var isBareFin: Bool { startOffset == endOffset }
-
-        deinit { storage.deallocate() }
-
-        func withStableBase<R>(_ body: (UnsafeMutablePointer<UInt8>) -> R) -> R {
-            body(storage.baseAddress!)
         }
     }
 
     final class StreamSendQueue {
         var chunks: [StreamSendChunk] = []
-        var sentOffset: UInt64 = 0
-        var endOffset: UInt64 = 0
         var finQueued = false
-        var finSent = false
         var isFailed = false
-        var flowBlocked = false
-
-        var hasUnsent: Bool { sentOffset < endOffset || (finQueued && !finSent) }
-        var unsentBytes: Int { Int(endOffset - sentOffset) }
-        var bufferedBytes: Int { chunks.reduce(0) { $0 + Int($1.endOffset - $1.startOffset) } }
 
         func append(_ chunk: StreamSendChunk) {
             chunks.append(chunk)
-            endOffset = chunk.endOffset
             if chunk.fin { finQueued = true }
         }
 
-        func currentChunk() -> StreamSendChunk? {
-            for chunk in chunks {
-                if chunk.endOffset > sentOffset { return chunk }
-                if chunk.fin, chunk.isBareFin, !finSent, chunk.endOffset == sentOffset {
-                    return chunk
-                }
-            }
-            return nil
-        }
-
-        func advance(accepted: Int, regionLength: Int, finFlagged: Bool) -> [CheckedContinuation<Void, Error>] {
-            sentOffset &+= UInt64(accepted)
-            if finFlagged && accepted == regionLength { finSent = true }
-            var resumed: [CheckedContinuation<Void, Error>] = []
-            for chunk in chunks {
-                if chunk.endOffset > sentOffset { break }
-                guard let continuation = chunk.continuation, !chunk.fin || finSent else { continue }
-                chunk.continuation = nil
-                resumed.append(continuation)
-            }
-            return resumed
-        }
-
-        func trimAcked(upTo ackedOffset: UInt64) {
-            var drop = 0
-            while drop < chunks.count {
-                let chunk = chunks[drop]
-                guard chunk.endOffset <= ackedOffset, chunk.continuation == nil,
-                      !chunk.fin || finSent else { break }
-                drop += 1
-            }
-            if drop > 0 { chunks.removeFirst(drop) }
-        }
-
         func fail() -> [CheckedContinuation<Void, Error>] {
-            var failed: [CheckedContinuation<Void, Error>] = []
-            for chunk in chunks {
-                if let continuation = chunk.continuation {
-                    chunk.continuation = nil
-                    failed.append(continuation)
-                }
-            }
-            while let last = chunks.last, last.startOffset >= sentOffset {
-                chunks.removeLast()
-            }
-            if let last = chunks.last, last.endOffset > sentOffset { isFailed = true }
-            endOffset = sentOffset
-            finQueued = finSent
-            return failed
+            isFailed = true
+            let continuations = chunks.compactMap(\.continuation)
+            chunks.removeAll()
+            return continuations
         }
     }
 
@@ -326,7 +254,7 @@ actor QUICConnection {
     static let maxUDPPayload = 1452
     static let chainedMaxUDPPayload = 1200
 
-    var txBuffer = [UInt8](repeating: 0, count: QUICConnection.maxUDPPayload)
+    var txBuffer: [UInt8] = []
 
     static let pmtudProbes: [UInt16] = [1350, 1400, 1452]
 
@@ -348,7 +276,7 @@ actor QUICConnection {
         self.obfuscator = obfuscator
         self.directMaxUDPPayload = directMaxUDPPayload
         self.transport = transport
-        self.bridge = NGTCP2ConcurrencyBridge()
+        self.bridge = QUICConcurrencyBridge()
     }
 
     deinit {
@@ -361,23 +289,14 @@ actor QUICConnection {
 
     // MARK: Utilities
 
-    func currentTimestamp() -> ngtcp2_tstamp {
-        ngtcp2_tstamp(DispatchTime.now().uptimeNanoseconds)
+    func currentTimestamp() -> QUICInstant {
+        .now
     }
 
-    func generateConnectionID(_ cid: inout ngtcp2_cid, length: Int) {
-        var data = [UInt8](repeating: 0, count: length)
-        _ = SecRandomCopyBytes(kSecRandomDefault, length, &data)
-        cid.datalen = length
-        withUnsafeMutableBytes(of: &cid.data) { buffer in
-            data.withUnsafeBytes { source in
-                buffer.copyMemory(
-                    from: UnsafeRawBufferPointer(
-                        start: source.baseAddress,
-                        count: min(length, buffer.count)
-                    )
-                )
-            }
-        }
+    func quicPath(local: sockaddr_storage) -> QUICPath {
+        QUICPath(
+            local: QUICSocketAddress(local, length: addrLen),
+            remote: QUICSocketAddress(remoteAddr, length: addrLen)
+        )
     }
 }

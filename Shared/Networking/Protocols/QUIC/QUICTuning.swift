@@ -6,41 +6,36 @@
 //
 
 import Foundation
+import AnywhereQUIC
 
 nonisolated struct QUICTuning {
 
     // MARK: Congestion control
 
-    /// ngtcp2-native algorithms pass through unchanged; `.brutal` initializes ngtcp2
-    /// with CUBIC and then swaps `conn->cc`'s callbacks for the Swift Brutal implementation.
     enum CongestionControl {
         case reno
         case cubic
         case bbr
-        /// Hysteria Brutal CC with an initial target send rate (bytes/sec),
-        /// typically updated post-auth from the server's Hysteria-CC-RX.
         case brutal(initialBps: UInt64)
     }
 
     var cc: CongestionControl
 
-    var ngtcp2CCAlgo: ngtcp2_cc_algo {
+    func makeCongestionController() -> any QUICCongestionController {
         switch cc {
-        case .reno:    return NGTCP2_CC_ALGO_RENO
-        case .cubic:   return NGTCP2_CC_ALGO_CUBIC
-        case .bbr:     return NGTCP2_CC_ALGO_BBR
-        case .brutal:  return NGTCP2_CC_ALGO_CUBIC
+        case .reno: QUICNewRenoCongestionController()
+        case .cubic: QUICCubicCongestionController()
+        case .bbr: QUICBBRCongestionController()
+        case .brutal(let initialBps): QUICBrutalCongestionController(bytesPerSecond: initialBps)
         }
     }
 
-    // MARK: Flow-control windows (receive side)
-
-    /// Per-stream auto-tuning upper bound.
+    // MARK: Flow-control windows
+    
     var maxStreamWindow: UInt64
-    /// Connection-level auto-tuning upper bound.
     var maxWindow: UInt64
 
-    // MARK: Initial transport parameters (what we advertise)
+    // MARK: Initial transport parameters
 
     var initialMaxData: UInt64
     var initialMaxStreamDataBidiLocal: UInt64
@@ -53,13 +48,10 @@ nonisolated struct QUICTuning {
 
     var maxIdleTimeout: UInt64
     var handshakeTimeout: UInt64
-    /// Idle period after which ngtcp2 emits a PING to keep the path alive.
     var keepAliveTimeout: UInt64
 
     // MARK: Misc
-
-    /// Advertised `disable_active_migration`. `false` lets us change local address —
-    /// the prerequisite for migration, which is only attempted on a direct carrier.
+    
     var disableActiveMigration: Bool
 }
 

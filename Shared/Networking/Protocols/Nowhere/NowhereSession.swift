@@ -185,7 +185,6 @@ nonisolated final class NowhereSession: Sendable {
     }
 
     private func startConnection() {
-        QUICCrypto.registerCallbacks()
         quic.handlers.withLock { handlers in
             handlers.connectionClosed = { [weak self] error in
                 self?.failSession(error)
@@ -244,7 +243,7 @@ nonisolated final class NowhereSession: Sendable {
         updateIdleCloseTimer()
     }
 
-    // MARK: - Stream dispatch (delivered synchronously on the ngtcp2 queue)
+    // MARK: - Stream dispatch (delivered synchronously on the QUIC queue)
 
     private func handleStreamData(sid: Int64, data: Data, fin: Bool) {
         enum Route { case tcp(NowhereConnection); case udpControl(NowhereUDPConnection); case serverReject; case orphanData; case ignore }

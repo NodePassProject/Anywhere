@@ -10,6 +10,9 @@
 		382A10E4306979F20032C2BF /* AnywhereIP in Frameworks */ = {isa = PBXBuildFile; productRef = 382A10E3306979F20032C2BF /* AnywhereIP */; };
 		382A1871306A04490032C2BF /* AnywhereIP in Frameworks */ = {isa = PBXBuildFile; productRef = 382A1870306A04490032C2BF /* AnywhereIP */; };
 		382A9FE1306823010032C2BF /* AnywhereIP in Frameworks */ = {isa = PBXBuildFile; productRef = 382A9FE0306823010032C2BF /* AnywhereIP */; };
+		38533EAD3073EF65000675B7 /* AnywhereQUIC in Frameworks */ = {isa = PBXBuildFile; productRef = 38533EAC3073EF65000675B7 /* AnywhereQUIC */; };
+		38533EAF3073EF71000675B7 /* AnywhereQUIC in Frameworks */ = {isa = PBXBuildFile; productRef = 38533EAE3073EF71000675B7 /* AnywhereQUIC */; };
+		38533EB13073EF77000675B7 /* AnywhereQUIC in Frameworks */ = {isa = PBXBuildFile; productRef = 38533EB03073EF77000675B7 /* AnywhereQUIC */; };
 		7870E4302FF89000006C0F14 /* Anywhere Watch App.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = 7870E41A2FF88ED5006C0F14 /* Anywhere Watch App.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		CB1C107A2F23B82F00B74CD8 /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CB1C10792F23B82F00B74CD8 /* NetworkExtension.framework */; };
 		CB1C10822F23B82F00B74CD8 /* Anywhere Network Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = CB1C10772F23B82F00B74CD8 /* Anywhere Network Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -208,6 +211,7 @@
 				Networking/Protocols/Nowhere/NowhereConfiguration.swift,
 				Networking/Protocols/Nowhere/NowhereConnection.swift,
 				Networking/Protocols/Nowhere/NowhereMorph.swift,
+				Networking/Protocols/Nowhere/NowhereMorphCrypto.swift,
 				Networking/Protocols/Nowhere/NowhereMultiplexer.swift,
 				Networking/Protocols/Nowhere/NowhereMultiplexerAsyncQueue.swift,
 				Networking/Protocols/Nowhere/NowhereMultiplexerConnection.swift,
@@ -218,66 +222,13 @@
 				Networking/Protocols/Nowhere/NowhereTCPConnection.swift,
 				Networking/Protocols/Nowhere/NowhereUDPConnection.swift,
 				"Networking/Protocols/Nowhere/ProxyClient+Nowhere.swift",
-				Networking/Protocols/QUIC/BrutalCongestionControl.swift,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_acktr.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_addr.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_balloc.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_bbr.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_buf.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_callbacks.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_cc.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_cid.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_conn_info.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_conn.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_conv.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_crypto_apple.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_crypto.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_dcidtr.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_err.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_fmt.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_frame_chain.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_gaptr.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_idtr.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_ksl.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_log.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_map.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_mem.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_objalloc.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_opl.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_path.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_pcg.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_pkt.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_pmtud.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_ppe.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_pq.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_pv.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_qlog.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_range.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_ratelim.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_ringbuf.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_rob.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_rst.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_rtb.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_settings.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_str.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_strm.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_swift_brutal.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_transport_params.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_unreachable.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_vec.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_version.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_wf.c,
-				Networking/Protocols/QUIC/ngtcp2/shared.c,
 				Networking/Protocols/QUIC/QUICConnection.swift,
 				"Networking/Protocols/QUIC/QUICConnection+BridgeHost.swift",
 				"Networking/Protocols/QUIC/QUICConnection+Close.swift",
 				"Networking/Protocols/QUIC/QUICConnection+Connect.swift",
 				"Networking/Protocols/QUIC/QUICConnection+IO.swift",
 				"Networking/Protocols/QUIC/QUICConnection+Migration.swift",
-				"Networking/Protocols/QUIC/QUICConnection+NGTCP2.swift",
-				"Networking/Protocols/QUIC/QUICConnection+NGTCP2Callbacks.swift",
 				"Networking/Protocols/QUIC/QUICConnection+Streams.swift",
-				Networking/Protocols/QUIC/QUICCrypto.swift,
 				Networking/Protocols/QUIC/QUICDatagramTransport.swift,
 				Networking/Protocols/QUIC/QUICTLSHandler.swift,
 				Networking/Protocols/QUIC/QUICTuning.swift,
@@ -410,7 +361,7 @@
 				Utilities/Bridges/BridgeContext.swift,
 				Utilities/Bridges/BridgeExecutor.swift,
 				Utilities/Bridges/DNSSyscallConcurrencyBridge.swift,
-				Utilities/Bridges/NGTCP2ConcurrencyBridge.swift,
+				Utilities/Bridges/QUICConcurrencyBridge.swift,
 				Utilities/Bridges/SwiftRegexConcurrencyBridge.swift,
 				"Utilities/Data+appendCompacting.swift",
 				"Utilities/Data+init.swift",
@@ -545,6 +496,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				CBFA0DE000000000000000C1 /* AnywhereRules in Frameworks */,
+				38533EAF3073EF71000675B7 /* AnywhereQUIC in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -555,6 +507,7 @@
 				382A9FE1306823010032C2BF /* AnywhereIP in Frameworks */,
 				CB1C107A2F23B82F00B74CD8 /* NetworkExtension.framework in Frameworks */,
 				382A1871306A04490032C2BF /* AnywhereIP in Frameworks */,
+				38533EAD3073EF65000675B7 /* AnywhereQUIC in Frameworks */,
 				382A10E4306979F20032C2BF /* AnywhereIP in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -564,6 +517,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				CBFA0DE000000000000000C2 /* AnywhereRules in Frameworks */,
+				38533EB13073EF77000675B7 /* AnywhereQUIC in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -689,6 +643,7 @@
 			name = Anywhere;
 			packageProductDependencies = (
 				CBFA0DE000000000000000B1 /* AnywhereRules */,
+				38533EAE3073EF71000675B7 /* AnywhereQUIC */,
 			);
 			productName = Anywhere;
 			productReference = CB1C10652F23B81500B74CD8 /* Anywhere.app */;
@@ -714,6 +669,7 @@
 				382A9FE0306823010032C2BF /* AnywhereIP */,
 				382A10E3306979F20032C2BF /* AnywhereIP */,
 				382A1870306A04490032C2BF /* AnywhereIP */,
+				38533EAC3073EF65000675B7 /* AnywhereQUIC */,
 			);
 			productName = "Network Extension";
 			productReference = CB1C10772F23B82F00B74CD8 /* Anywhere Network Extension.appex */;
@@ -740,6 +696,7 @@
 			name = "Anywhere TV";
 			packageProductDependencies = (
 				CBFA0DE000000000000000B2 /* AnywhereRules */,
+				38533EB03073EF77000675B7 /* AnywhereQUIC */,
 			);
 			productName = Anywhere;
 			productReference = CB2B549C2F6C3E2700F24AC2 /* Anywhere TV.app */;
@@ -817,6 +774,7 @@
 			packageReferences = (
 				CBFA0DE000000000000000A1 /* XCRemoteSwiftPackageReference "AnywhereRules" */,
 				382A186F306A04490032C2BF /* XCRemoteSwiftPackageReference "AnywhereIP" */,
+				38533EAB3073EF65000675B7 /* XCRemoteSwiftPackageReference "AnywhereQUIC" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = CB1C10662F23B81500B74CD8 /* Products */;
@@ -1041,7 +999,6 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
-					"$(SRCROOT)/Shared/Networking/Protocols/QUIC/ngtcp2",
 					"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2",
 					"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3",
 					"$(SRCROOT)/Shared/Utilities/YAML/libyaml/include",
@@ -1084,7 +1041,6 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
-					"$(SRCROOT)/Shared/Networking/Protocols/QUIC/ngtcp2",
 					"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2",
 					"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3",
 					"$(SRCROOT)/Shared/Utilities/YAML/libyaml/include",
@@ -1259,7 +1215,6 @@
 				);
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
-					"\"$(SRCROOT)/Shared/Networking/Protocols/QUIC/ngtcp2\"",
 					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2\"",
 					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3\"",
 					"\"$(SRCROOT)/Shared/Utilities/YAML/libyaml/include\"",
@@ -1316,7 +1271,6 @@
 				);
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
-					"\"$(SRCROOT)/Shared/Networking/Protocols/QUIC/ngtcp2\"",
 					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2\"",
 					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3\"",
 					"\"$(SRCROOT)/Shared/Utilities/YAML/libyaml/include\"",
@@ -1370,7 +1324,6 @@
 				);
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
-					"\"$(SRCROOT)/Shared/Networking/Protocols/QUIC/ngtcp2\"",
 					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2\"",
 					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3\"",
 				);
@@ -1420,7 +1373,6 @@
 				);
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
-					"\"$(SRCROOT)/Shared/Networking/Protocols/QUIC/ngtcp2\"",
 					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2\"",
 					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3\"",
 				);
@@ -1471,7 +1423,6 @@
 				);
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
-					"\"$(SRCROOT)/Shared/Networking/Protocols/QUIC/ngtcp2\"",
 					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2\"",
 					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3\"",
 					"\"$(SRCROOT)/Shared/Utilities/YAML/libyaml/include\"",
@@ -1522,7 +1473,6 @@
 				);
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
-					"\"$(SRCROOT)/Shared/Networking/Protocols/QUIC/ngtcp2\"",
 					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2\"",
 					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3\"",
 					"\"$(SRCROOT)/Shared/Utilities/YAML/libyaml/include\"",
@@ -1694,6 +1644,14 @@
 				minimumVersion = 3.1.0;
 			};
 		};
+		38533EAB3073EF65000675B7 /* XCRemoteSwiftPackageReference "AnywhereQUIC" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/NodePassProject/AnywhereQUIC";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.0.0;
+			};
+		};
 		CBFA0DE000000000000000A1 /* XCRemoteSwiftPackageReference "AnywhereRules" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/hiDandelion/AnywhereRules.git";
@@ -1717,6 +1675,21 @@
 		382A9FE0306823010032C2BF /* AnywhereIP */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = AnywhereIP;
+		};
+		38533EAC3073EF65000675B7 /* AnywhereQUIC */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 38533EAB3073EF65000675B7 /* XCRemoteSwiftPackageReference "AnywhereQUIC" */;
+			productName = AnywhereQUIC;
+		};
+		38533EAE3073EF71000675B7 /* AnywhereQUIC */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 38533EAB3073EF65000675B7 /* XCRemoteSwiftPackageReference "AnywhereQUIC" */;
+			productName = AnywhereQUIC;
+		};
+		38533EB03073EF77000675B7 /* AnywhereQUIC */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 38533EAB3073EF65000675B7 /* XCRemoteSwiftPackageReference "AnywhereQUIC" */;
+			productName = AnywhereQUIC;
 		};
 		CBFA0DE000000000000000B1 /* AnywhereRules */ = {
 			isa = XCSwiftPackageProductDependency;

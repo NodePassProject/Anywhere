@@ -17,7 +17,7 @@ nonisolated protocol QUICDatagramEngine: AnyObject, Sendable {
 }
 
 nonisolated struct QUICDatagramEngineSink: Sendable {
-    fileprivate let bridge: NGTCP2ConcurrencyBridge
+    fileprivate let bridge: QUICConcurrencyBridge
     fileprivate weak var carrier: QUICDatagramCarrier?
 
     func ready(interfaceType: NWInterface.InterfaceType?) {
@@ -58,7 +58,7 @@ actor QUICDatagramCarrier {
         bridge.executor.asUnownedSerialExecutor()
     }
 
-    private let bridge: NGTCP2ConcurrencyBridge
+    private let bridge: QUICConcurrencyBridge
 
     private let obfuscator: QUICPacketObfuscator?
 
@@ -126,7 +126,7 @@ actor QUICDatagramCarrier {
 
     private var cachedInterfaceType: NWInterface.InterfaceType?
 
-    init(bridge: NGTCP2ConcurrencyBridge, obfuscator: QUICPacketObfuscator?) {
+    init(bridge: QUICConcurrencyBridge, obfuscator: QUICPacketObfuscator?) {
         self.bridge = bridge
         self.obfuscator = obfuscator
     }
