@@ -13,7 +13,7 @@ import Network
 nonisolated private let logger = AnywhereLogger(category: "QUICDatagramCarrier")
 
 nonisolated protocol QUICDatagramEngine: AnyObject, Sendable {
-    func send(_ datagram: Data)
+    func send(_ datagrams: [Data])
     func close()
 }
 
@@ -94,7 +94,7 @@ nonisolated final class QUICDatagramCarrier: Sendable {
     func startReceiving(onPacket: @escaping @Sendable ([Data]) -> Void, onError: @escaping @Sendable (Int32) -> Void) {
         update { $0.startReceiving(onPacket: onPacket, onError: onError) }
     }
-    func send(_ datagram: Data) { update { $0.send(datagram) } }
+    func send(_ datagrams: [Data]) { update { $0.send(datagrams) } }
     func close() { update { $0.close() } }
 
     fileprivate func deliverPendingPackets() {
@@ -244,11 +244,11 @@ nonisolated final class QUICDatagramCarrierCore: QUICPublishingState {
 
     // MARK: - Send
 
-    func send(_ datagram: Data) {
-        guard !datagram.isEmpty else { return }
+    func send(_ datagrams: [Data]) {
+        guard !datagrams.isEmpty else { return }
         switch phase {
         case .connecting(let engine), .ready(let engine):
-            engine.send(datagram)
+            engine.send(datagrams)
         case .idle, .failed, .finished, .closed:
             return
         }
@@ -442,12 +442,14 @@ nonisolated final class QUICDatagramCarrierCore: QUICPublishingState {
 
 @available(iOS 26.0, macOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *)
 nonisolated final class ModernQUICDatagramEngine: QUICDatagramEngine, Sendable {
-
     private static let receiveConcurrency = 16
+    private static let maxQueuedSendBatches = 512
 
     private let connection: NetworkConnection<UDP>
     private let obfuscator: QUICPacketObfuscator?
     private let driverTask: Task<Void, Never>
+    private let sendTask: Task<Void, Never>
+    private let outbound: AsyncStream<[Data]>.Continuation
 
     init(endpoint: NWEndpoint, obfuscator: QUICPacketObfuscator?, sink: QUICDatagramEngineSink) {
         let connection = NetworkConnection(to: endpoint) { UDP() }
@@ -481,20 +483,42 @@ nonisolated final class ModernQUICDatagramEngine: QUICDatagramEngine, Sendable {
         self.driverTask = Task { [obfuscator] in
             await Self.runDriver(connection: connection, sink: sink, obfuscator: obfuscator)
         }
+        let (batches, outbound) = AsyncStream.makeStream(
+            of: [Data].self,
+            bufferingPolicy: .bufferingOldest(Self.maxQueuedSendBatches)
+        )
+        self.outbound = outbound
+        self.sendTask = Task { [obfuscator] in
+            await Self.runSendLoop(batches, over: connection, obfuscator: obfuscator)
+        }
     }
 
     deinit {
         driverTask.cancel()
+        outbound.finish()
+        sendTask.cancel()
     }
 
-    func send(_ datagram: Data) {
-        Task { [connection, obfuscator] in
-            await Self.transmit(datagram, over: connection, obfuscator: obfuscator)
-        }
+    func send(_ datagrams: [Data]) {
+        outbound.yield(datagrams)
     }
 
     func close() {
         driverTask.cancel()
+        outbound.finish()
+    }
+    
+    @concurrent
+    private static func runSendLoop(
+        _ batches: AsyncStream<[Data]>,
+        over connection: NetworkConnection<UDP>,
+        obfuscator: QUICPacketObfuscator?
+    ) async {
+        for await batch in batches {
+            for datagram in batch {
+                await transmit(datagram, over: connection, obfuscator: obfuscator)
+            }
+        }
     }
 
     @concurrent

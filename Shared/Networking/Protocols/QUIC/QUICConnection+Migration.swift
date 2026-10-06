@@ -265,22 +265,16 @@ extension QUICConnectionCore {
         }
     }
 
-    func sendTxBuf(length: Int, to carrier: QUICDatagramCarrier?) {
-        guard length > 0 else { return }
-        let datagram = txBuffer.withUnsafeBufferPointer { Data(bytes: $0.baseAddress!, count: length) }
-        sendDatagram(datagram, to: carrier)
-    }
-
-    func sendDatagram(_ datagram: Data, to carrier: QUICDatagramCarrier?) {
+    func sendDatagrams(_ datagrams: [Data], to carrier: QUICDatagramCarrier?) {
         if let transport {
             if let transportSealContinuation {
-                transportSealContinuation.yield(datagram)
+                for datagram in datagrams { transportSealContinuation.yield(datagram) }
             } else {
-                publish { transport.sendDatagram(datagram) }
+                publish { for datagram in datagrams { transport.sendDatagram(datagram) } }
             }
             return
         }
         guard let carrier else { return }
-        carrier.send(datagram)
+        carrier.send(datagrams)
     }
 }

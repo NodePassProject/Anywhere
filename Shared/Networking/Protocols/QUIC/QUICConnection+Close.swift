@@ -40,6 +40,7 @@ extension QUICConnectionCore {
             failedWriters.append(contentsOf: queue.fail())
         }
         self.streamSendQueues.removeAll()
+        self.blockedStreams.removeAll()
         let datagrams = self.pendingDatagrams
         self.pendingDatagrams.removeAll()
         let closeError: Error

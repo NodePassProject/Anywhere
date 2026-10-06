@@ -163,7 +163,7 @@ actor NowhereConnection {
     // MARK: - Demux feed
 
     nonisolated func feedStreamData(_ data: Data, fin: Bool) {
-        if !data.isEmpty { rawInbox.yield(Data(data)) }
+        if !data.isEmpty { rawInbox.yield(data) }
         if fin { rawInbox.finish() }
     }
 

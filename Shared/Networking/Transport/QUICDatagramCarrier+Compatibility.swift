@@ -55,21 +55,30 @@ nonisolated final class LegacyQUICDatagramEngine: QUICDatagramEngine, Sendable {
     deinit {
         connection.cancel()
     }
-
-    func send(_ datagram: Data) {
-        if let obfuscator {
-            let wireDatagrams = datagram.withUnsafeBytes { obfuscator.seal($0) }
-            for wire in wireDatagrams {
-                connection.send(content: wire, completion: .contentProcessed { _ in })
+    
+    func send(_ datagrams: [Data]) {
+        let connection = connection
+        let obfuscator = obfuscator
+        queue.async {
+            connection.batch {
+                for datagram in datagrams {
+                    if let obfuscator {
+                        let wireDatagrams = datagram.withUnsafeBytes { obfuscator.seal($0) }
+                        for wire in wireDatagrams {
+                            connection.send(content: wire, completion: .contentProcessed { _ in })
+                        }
+                    } else {
+                        connection.send(content: datagram, completion: .contentProcessed { _ in })
+                    }
+                }
             }
-        } else {
-            connection.send(content: datagram, completion: .contentProcessed { _ in })
         }
     }
 
     func close() {
         terminated.claim()
-        connection.cancel()
+        let connection = connection
+        queue.async { connection.cancel() }
     }
 
     private static func armReceive(

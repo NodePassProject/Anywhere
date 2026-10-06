@@ -13,7 +13,6 @@ import AnywhereQUIC
 nonisolated private let logger = AnywhereLogger(category: "QUICConnection")
 
 extension QUICConnectionCore {
-
     func openStream(bidirectional: Bool) -> Int64? {
         guard phase == .connected, let engine else { return nil }
         return try? Int64(engine.openStream(bidirectional: bidirectional).rawValue)
@@ -34,6 +33,16 @@ extension QUICConnectionCore {
                 core.writeToUDP()
             }
         }
+    }
+    
+    func enqueueDatagramsInEngine(_ datagrams: [Data]) -> Bool {
+        guard pendingDatagrams.isEmpty, let engine else { return false }
+        do {
+            try engine.sendDatagrams(datagrams)
+        } catch {
+            return false
+        }
+        return true
     }
 
     func enqueueDatagrams(_ datagrams: [PendingDatagram]) {
@@ -78,39 +87,47 @@ extension QUICConnectionCore {
                 continuation: continuation
             )
         )
+        if queue.chunks.count == 1, let engine {
+            pumpStreamQueue(streamId, queue, engine)
+        }
+        if !queue.chunks.isEmpty { blockedStreams.insert(streamId) }
         scheduleFlush()
     }
 
     func pumpStreamQueues(_ engine: AnywhereQUIC.QUICConnection) {
-        var ids = streamSendQueues.filter { !$0.value.chunks.isEmpty }.keys.sorted()
-        if let pivot = ids.firstIndex(where: { $0 > streamPumpCursor }), pivot > 0 {
-            ids = Array(ids[pivot...]) + Array(ids[..<pivot])
-        }
-        for id in ids {
-            guard let queue = streamSendQueues[id], !queue.isFailed else { continue }
-            while let chunk = queue.chunks.first {
-                do {
-                    let remaining = chunk.data.dropFirst(chunk.offset)
-                    let accepted = try engine.send(remaining, on: QUICStreamID(rawValue: UInt64(id)), fin: chunk.fin)
-                    chunk.offset += accepted
-                    guard chunk.offset == chunk.data.count else { break }
-                    queue.chunks.removeFirst()
-                    let continuation = chunk.continuation
-                    chunk.continuation = nil
-                    continuation?.resume()
-                } catch {
-                    let failure: Error
-                    switch error {
-                    case .invalidState, .streamNotFound, .streamSendClosed:
-                        failure = AnywhereError.quic(.closed(graceful: false))
-                    default:
-                        failure = AnywhereError.quic(.streamFailed(detail: String(describing: error)))
-                    }
-                    terminateStreamSendQueue(streamId: id, error: failure)
-                    break
-                }
+        for id in blockedStreams {
+            guard let queue = streamSendQueues[id] else {
+                blockedStreams.remove(id)
+                continue
             }
-            streamPumpCursor = id
+            pumpStreamQueue(id, queue, engine)
+        }
+    }
+
+    private func pumpStreamQueue(_ id: Int64, _ queue: StreamSendQueue, _ engine: AnywhereQUIC.QUICConnection) {
+        defer { if queue.chunks.isEmpty { blockedStreams.remove(id) } }
+        guard !queue.isFailed else { return }
+        while let chunk = queue.chunks.first {
+            do {
+                let remaining = chunk.data.dropFirst(chunk.offset)
+                let accepted = try engine.send(remaining, on: QUICStreamID(rawValue: UInt64(id)), fin: chunk.fin)
+                chunk.offset += accepted
+                guard chunk.offset == chunk.data.count else { break }
+                queue.chunks.removeFirst()
+                let continuation = chunk.continuation
+                chunk.continuation = nil
+                continuation?.resume()
+            } catch {
+                let failure: Error
+                switch error {
+                case .invalidState, .streamNotFound, .streamSendClosed:
+                    failure = AnywhereError.quic(.closed(graceful: false))
+                default:
+                    failure = AnywhereError.quic(.streamFailed(detail: String(describing: error)))
+                }
+                terminateStreamSendQueue(streamId: id, error: failure)
+                break
+            }
         }
     }
 
@@ -120,6 +137,7 @@ extension QUICConnectionCore {
     }
 
     func failStreamSendQueue(streamId: Int64, error: Error) {
+        blockedStreams.remove(streamId)
         guard let queue = streamSendQueues[streamId] else { return }
         for continuation in queue.fail() {
             continuation.resume(throwing: error)

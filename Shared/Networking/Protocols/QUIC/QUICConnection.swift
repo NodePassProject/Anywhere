@@ -137,6 +137,11 @@ nonisolated final class QUICConnection: Sendable {
                     return
                 }
                 if datagrams.isEmpty { continuation.resume(); return }
+                if core.enqueueDatagramsInEngine(datagrams) {
+                    continuation.resume()
+                    core.scheduleFlush()
+                    return
+                }
                 if atomically, !Self.canEnqueueDatagramBatch(
                     pendingCount: core.pendingDatagrams.count + (core.engine?.pendingDatagramCount ?? 0),
                     batchCount: datagrams.count

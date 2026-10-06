@@ -122,9 +122,21 @@ extension QUICConnectionCore {
         let now = currentTimestamp()
         pumpStreamQueues(engine)
         pumpDatagrams(engine)
+        var runs: [(carrier: QUICDatagramCarrier?, datagrams: [Data])] = []
         while let outgoing = txBuffer.withUnsafeMutableBufferPointer({ engine.write(into: $0, now: now) }) {
-            sendTxBuf(length: outgoing.count, to: carrierForOutPath(local: outgoing.path.local))
+            if outgoing.count > 0 {
+                let datagram = txBuffer.withUnsafeBufferPointer { Data(bytes: $0.baseAddress!, count: outgoing.count) }
+                let carrier = carrierForOutPath(local: outgoing.path.local)
+                if let last = runs.last, last.carrier === carrier {
+                    runs[runs.count - 1].datagrams.append(datagram)
+                } else {
+                    runs.append((carrier, [datagram]))
+                }
+            }
             pumpDatagrams(engine)
+        }
+        for run in runs {
+            sendDatagrams(run.datagrams, to: run.carrier)
         }
         engine.finishWriting(now: now)
         drainEngineEvents(engine)

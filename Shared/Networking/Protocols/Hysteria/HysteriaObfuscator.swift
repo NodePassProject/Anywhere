@@ -11,8 +11,6 @@ import Synchronization
 
 // MARK: - Salamander
 
-/// XOR obfuscation: every datagram is `salt(8) || (packet XOR keystream)`, where the keystream is
-/// BLAKE2b-256 over `password || salt` cycled to the packet length.
 nonisolated final class SalamanderObfuscator: QUICPacketObfuscator {
     static let saltLength = 8
     private static let keyLength = 32  // BLAKE2b-256 digest
@@ -32,37 +30,38 @@ nonisolated final class SalamanderObfuscator: QUICPacketObfuscator {
         _ = SecRandomCopyBytes(kSecRandomDefault, salt.count, &salt)
         let key = keystream(salt: salt)
 
-        var out = [UInt8]()
-        out.reserveCapacity(Self.saltLength + packet.count)
-        out.append(contentsOf: salt)
-        for index in 0..<packet.count {
-            out.append(packet[index] ^ key[index % Self.keyLength])
+        var out = Data(count: Self.saltLength + packet.count)
+        out.withUnsafeMutableBytes { raw in
+            salt.withUnsafeBytes { raw.copyMemory(from: $0) }
+            Self.apply(key, to: packet, into: UnsafeMutableRawBufferPointer(rebasing: raw[Self.saltLength...]))
         }
-        return [Data(out)]
+        return [out]
     }
 
     func open(_ datagram: Data) -> Data? {
         let count = datagram.count
-        // Too short to carry a salt; pass through untouched.
         guard count > Self.saltLength else { return datagram }
         return datagram.withUnsafeBytes { raw -> Data in
-            let source = raw.bindMemory(to: UInt8.self)
-            let salt = Array(UnsafeBufferPointer(start: source.baseAddress, count: Self.saltLength))
-            let key = keystream(salt: salt)
-            var out = [UInt8](repeating: 0, count: count - Self.saltLength)
-            for index in 0..<out.count {
-                out[index] = source[Self.saltLength + index] ^ key[index % Self.keyLength]
+            let key = keystream(salt: Array(raw.prefix(Self.saltLength)))
+            var out = Data(count: count - Self.saltLength)
+            out.withUnsafeMutableBytes { output in
+                Self.apply(key, to: UnsafeRawBufferPointer(rebasing: raw[Self.saltLength...]), into: output)
             }
-            return Data(out)
+            return out
+        }
+    }
+
+    private static func apply(_ key: [UInt8], to input: UnsafeRawBufferPointer, into output: UnsafeMutableRawBufferPointer) {
+        key.withUnsafeBufferPointer { key in
+            for index in 0..<input.count {
+                output[index] = input[index] ^ key[index % keyLength]
+            }
         }
     }
 }
 
 // MARK: - Gecko
 
-/// Wraps Salamander, additionally fragmenting long-header (handshake) packets into 2–8 randomly
-/// padded chunks reassembled by `msgID`. 1-RTT (short-header) packets pass through with Salamander
-/// only.
 nonisolated final class GeckoObfuscator: QUICPacketObfuscator {
     private static let fragmentFlag: UInt8 = 0x80
     private static let headerLength = 5
@@ -90,11 +89,9 @@ nonisolated final class GeckoObfuscator: QUICPacketObfuscator {
     }
 
     private struct ReassemblyTable {
-        /// Keyed by `msgID`.
         var entries: [UInt8: Reassembly] = [:]
         var lastSweep: UInt64
     }
-    /// All reassembly state; `Reassembly` instances are only ever touched under this lock.
     private let table: Mutex<ReassemblyTable>
 
     init(password: String, minPacketSize: Int, maxPacketSize: Int) {
@@ -109,7 +106,6 @@ nonisolated final class GeckoObfuscator: QUICPacketObfuscator {
 
     func seal(_ packet: UnsafeRawBufferPointer) -> [Data] {
         guard !packet.isEmpty else { return [] }
-        // Only long-header packets (high bit set) are fragmented; 1-RTT data rides Salamander alone.
         guard packet[0] & Self.fragmentFlag != 0 else { return inner.seal(packet) }
 
         let chunks = Int.random(in: Self.minChunks...Self.maxChunks)
@@ -154,7 +150,6 @@ nonisolated final class GeckoObfuscator: QUICPacketObfuscator {
 
     func open(_ datagram: Data) -> Data? {
         guard let opened = inner.open(datagram), let first = opened.first else { return nil }
-        // 1-RTT (short header) passes straight through.
         guard first & Self.fragmentFlag != 0 else { return opened }
 
         let bytes = [UInt8](opened)

@@ -147,7 +147,7 @@ actor HysteriaConnection {
             if let orphanSID {
                 session.extendStreamOffset(orphanSID, count: data.count)
             } else {
-                rawInbox.yield(Data(data))
+                rawInbox.yield(data)
             }
         }
         if fin { rawInbox.finish() }

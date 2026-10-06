@@ -147,7 +147,7 @@ nonisolated final class QUICConnectionCore: QUICPublishingState {
     static let maxDatagramFrameSize: UInt64 = 65535
 
     var streamSendQueues: [Int64: StreamSendQueue] = [:]
-    var streamPumpCursor: Int64 = -1
+    var blockedStreams: Set<Int64> = []
 
     final class StreamSendChunk {
         let data: Data
@@ -215,14 +215,18 @@ nonisolated final class QUICConnectionCore: QUICPublishingState {
 
     static let pmtudProbes: [UInt16] = [1350, 1400, 1452]
 
-    // MARK: Init
-
-    init(host: String, port: UInt16, serverName: String? = nil, alpn: [String],
-         datagramsEnabled: Bool = false, tuning: QUICTuning,
-         obfuscator: QUICPacketObfuscator? = nil,
-         directMaxUDPPayload: Int = QUICConnectionCore.maxUDPPayload,
-         transport: QUICDatagramTransport? = nil,
-         handlers: QUICHandlerStore) {
+    init(
+        host: String,
+        port: UInt16,
+        serverName: String? = nil,
+        alpn: [String],
+        datagramsEnabled: Bool = false,
+        tuning: QUICTuning,
+        obfuscator: QUICPacketObfuscator? = nil,
+        directMaxUDPPayload: Int = QUICConnectionCore.maxUDPPayload,
+        transport: QUICDatagramTransport? = nil,
+        handlers: QUICHandlerStore
+    ) {
         self.handlers = handlers
         self.host = host
         self.port = port
@@ -241,12 +245,8 @@ nonisolated final class QUICConnectionCore: QUICPublishingState {
         proactiveDeadlineTask?.cancel()
     }
 
-    // MARK: Timer state
-
     var lastScheduledExpiry: UInt64 = 0
-
-    // MARK: Utilities
-
+    
     func currentTimestamp() -> QUICInstant {
         .now
     }

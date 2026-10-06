@@ -149,7 +149,7 @@ actor NowhereUDPConnection {
     // MARK: - Demux feed
 
     nonisolated func handleControlStreamData(_ data: Data, fin: Bool) {
-        if !data.isEmpty { controlInbox.yield(Data(data)) }
+        if !data.isEmpty { controlInbox.yield(data) }
         if fin { controlInbox.finish() }
     }
 
