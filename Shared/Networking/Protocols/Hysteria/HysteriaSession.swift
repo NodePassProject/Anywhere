@@ -379,20 +379,12 @@ nonisolated final class HysteriaSession: Sendable {
 
     func openTCPStream(for connection: HysteriaConnection) async throws -> Int64 {
         enum Result { case notReady; case openFailed; case ok(Int64) }
-        let result: Result = {
-            guard self.state.withLock({ $0.phase == .ready }) else { return .notReady }
+        let result: Result = self.state.withLock { session in
+            guard session.phase == .ready else { return .notReady }
             guard let sid = self.quic.openBidiStream() else { return .openFailed }
-            let accepted: Bool = self.state.withLock { session in
-                guard session.phase == .ready else { return false }
-                session.tcpStreams[sid] = connection
-                return true
-            }
-            guard accepted else {
-                self.quic.shutdownStream(sid, appErrorCode: HysteriaProtocol.closeErrCodeOK)
-                return .notReady
-            }
+            session.tcpStreams[sid] = connection
             return .ok(sid)
-        }()
+        }
         switch result {
         case .notReady:
             throw AnywhereError.proxy(.hysteria, .notReady)

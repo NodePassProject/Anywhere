@@ -162,20 +162,15 @@ nonisolated final class HTTP3Multiplexer: Multiplexer, Sendable {
     // MARK: - Stream Creation
 
     func openStream(events: StreamEvents) async -> Int64? {
-        guard let sid = self.quic.openBidiStream() else {
-            self.markStreamBlocked()
-            return nil
-        }
-        let accepted: Bool = self.state.withLock { session in
-            guard session.phase == .ready else { return false }
+        self.state.withLock { session in
+            guard session.phase == .ready else { return nil }
+            guard let sid = self.quic.openBidiStream() else {
+                session.isStreamBlocked = true
+                return nil
+            }
             session.streams[sid] = events
-            return true
+            return sid
         }
-        guard accepted else {
-            self.quic.shutdownStream(sid, appErrorCode: HTTP3ErrorCode.requestCancelled.rawValue)
-            return nil
-        }
-        return sid
     }
 
     func releaseUnopenedStream() {

@@ -451,23 +451,15 @@ nonisolated final class NowhereSession: Sendable {
         try await ensureReady()
 
         enum Bootstrap { case notBootstrap; case failed; case ok(sid: Int64, authFrame: Data) }
-        let bootstrap: Bootstrap = { () -> Bootstrap in
-            guard self.state.withLock({ $0.phase == .transportReady }) else { return .notBootstrap }
+        let bootstrap: Bootstrap = self.state.withLock { session in
+            guard session.phase == .transportReady,
+                  let authFrame = session.authFrame else { return .notBootstrap }
             guard let sid = self.quic.openBidiStream() else { return .failed }
-            let authFrame: Data? = self.state.withLock { session in
-                guard session.phase == .transportReady,
-                      let frame = session.authFrame,
-                      session.transition(to: .authenticating) else { return nil }
-                session.firstStreamID = sid
-                registerUnderLock(&session, sid)
-                return frame
-            }
-            guard let authFrame else {
-                self.quic.shutdownStream(sid, appErrorCode: NowhereProtocol.closeErrCodeOK)
-                return .notBootstrap
-            }
+            session.transition(to: .authenticating)
+            session.firstStreamID = sid
+            registerUnderLock(&session, sid)
             return .ok(sid: sid, authFrame: authFrame)
-        }()
+        }
 
         switch bootstrap {
         case .failed:
