@@ -58,6 +58,7 @@ actor NowhereConnection {
 
     private var backlogChunks: [Data] = []
     private static let maxChunkBytes = 512 << 10
+    private static let inboxCompactionDepth = 32
 
     init(
         session: NowhereSession,
@@ -163,7 +164,9 @@ actor NowhereConnection {
     // MARK: - Demux feed
 
     nonisolated func feedStreamData(_ data: Data, fin: Bool) {
-        if !data.isEmpty { rawInbox.yield(data) }
+        if !data.isEmpty {
+            rawInbox.yield(data, compactingAbove: Self.inboxCompactionDepth) { Data($0) }
+        }
         if fin { rawInbox.finish() }
     }
 

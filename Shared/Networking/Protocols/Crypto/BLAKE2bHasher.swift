@@ -31,6 +31,11 @@ nonisolated struct BLAKE2bHasher {
             _ = blake2b_update(&state, raw.baseAddress, raw.count)
         }
     }
+
+    mutating func update(_ bytes: UnsafeRawBufferPointer) {
+        guard !bytes.isEmpty else { return }
+        _ = blake2b_update(&state, bytes.baseAddress, bytes.count)
+    }
     
     func finalize() -> [UInt8] {
         var finalState = state
@@ -44,6 +49,13 @@ nonisolated struct BLAKE2bHasher {
     // MARK: - Convenience
     
     static func hash256(_ prefix: [UInt8], _ suffix: [UInt8]) -> [UInt8] {
+        var hasher = BLAKE2bHasher(outputLength: 32)
+        hasher.update(prefix)
+        hasher.update(suffix)
+        return hasher.finalize()
+    }
+
+    static func hash256(_ prefix: [UInt8], _ suffix: UnsafeRawBufferPointer) -> [UInt8] {
         var hasher = BLAKE2bHasher(outputLength: 32)
         hasher.update(prefix)
         hasher.update(suffix)

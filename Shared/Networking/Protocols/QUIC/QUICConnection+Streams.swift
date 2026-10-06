@@ -20,8 +20,9 @@ extension QUICConnectionCore {
 
     func extendStreamOffset(_ streamId: Int64, count: Int) {
         guard let engine, streamId >= 0 else { return }
-        engine.extendReceiveWindow(for: QUICStreamID(rawValue: UInt64(streamId)), by: count)
-        scheduleFlush()
+        if engine.extendReceiveWindow(for: QUICStreamID(rawValue: UInt64(streamId)), by: count) {
+            scheduleFlush()
+        }
     }
 
     func scheduleFlush() {
@@ -57,6 +58,37 @@ extension QUICConnectionCore {
         }
         let overflowError = AnywhereError.quic(.connectionFailed(detail: "Datagram send queue overflowed"))
         for d in dropped { d.latch?.settle(overflowError) }
+    }
+
+    func writeStreamImmediately(_ streamId: Int64, data: Data, fin: Bool) -> Result<Void, Error>? {
+        guard phase == .connected, let engine else {
+            return .failure(AnywhereError.quic(.closed(graceful: false)))
+        }
+        if data.isEmpty && !fin { return .success(()) }
+        let queue = streamSendQueues[streamId]
+        guard streamId >= 0, queue?.finQueued != true, queue?.isFailed != true else {
+            return .failure(AnywhereError.quic(.closed(graceful: false)))
+        }
+        let id = QUICStreamID(rawValue: UInt64(streamId))
+        guard !data.isEmpty, queue?.chunks.isEmpty ?? true, engine.sendCapacity(on: id) >= data.count else {
+            return nil
+        }
+        do {
+            try engine.send(data, on: id, fin: fin)
+        } catch {
+            return .failure(Self.streamWriteError(error))
+        }
+        if fin {
+            if let queue {
+                queue.finQueued = true
+            } else {
+                let queue = StreamSendQueue()
+                queue.finQueued = true
+                streamSendQueues[streamId] = queue
+            }
+        }
+        scheduleFlush()
+        return .success(())
     }
 
     func appendStreamWrite(
@@ -118,16 +150,18 @@ extension QUICConnectionCore {
                 chunk.continuation = nil
                 continuation?.resume()
             } catch {
-                let failure: Error
-                switch error {
-                case .invalidState, .streamNotFound, .streamSendClosed:
-                    failure = AnywhereError.quic(.closed(graceful: false))
-                default:
-                    failure = AnywhereError.quic(.streamFailed(detail: String(describing: error)))
-                }
-                terminateStreamSendQueue(streamId: id, error: failure)
+                terminateStreamSendQueue(streamId: id, error: Self.streamWriteError(error))
                 break
             }
+        }
+    }
+
+    nonisolated static func streamWriteError(_ error: QUICError) -> Error {
+        switch error {
+        case .invalidState, .streamNotFound, .streamSendClosed:
+            return AnywhereError.quic(.closed(graceful: false))
+        default:
+            return AnywhereError.quic(.streamFailed(detail: String(describing: error)))
         }
     }
 

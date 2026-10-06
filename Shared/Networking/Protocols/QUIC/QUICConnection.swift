@@ -41,6 +41,7 @@ nonisolated final class QUICConnection: Sendable {
         usesTransport = transport != nil
         let handlers = QUICHandlerStore()
         self.handlers = handlers
+        let executor = BridgeExecutor(label: "com.argsment.Anywhere.QUICConnection")
         state = QUICState(
             QUICConnectionCore(
                 host: host,
@@ -52,8 +53,10 @@ nonisolated final class QUICConnection: Sendable {
                 obfuscator: obfuscator,
                 directMaxUDPPayload: directMaxUDPPayload,
                 transport: transport,
-                handlers: handlers
-            )
+                handlers: handlers,
+                executor: executor
+            ),
+            queue: executor.queue
         )
         state.update { $0.owner = self }
     }
@@ -107,6 +110,9 @@ nonisolated final class QUICConnection: Sendable {
         }
     }
     func writeStream(_ streamID: Int64, data: Data, fin: Bool = false) async throws {
+        if let immediate = update({ $0.writeStreamImmediately(streamID, data: data, fin: fin) }) {
+            return try immediate.get()
+        }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             update { core in
                 guard core.phase == .connected, core.engine != nil else {
@@ -130,6 +136,16 @@ nonisolated final class QUICConnection: Sendable {
         try await writeDatagrams(datagrams, atomically: true)
     }
     private func writeDatagrams(_ datagrams: [Data], atomically: Bool) async throws {
+        let immediate: Result<Void, Error>? = update { core in
+            guard core.phase == .connected, core.engine != nil else {
+                return .failure(AnywhereError.quic(.closed(graceful: false)))
+            }
+            if datagrams.isEmpty { return .success(()) }
+            guard core.enqueueDatagramsInEngine(datagrams) else { return nil }
+            core.scheduleFlush()
+            return .success(())
+        }
+        if let immediate { return try immediate.get() }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             update { core in
                 guard core.phase == .connected, core.engine != nil else {

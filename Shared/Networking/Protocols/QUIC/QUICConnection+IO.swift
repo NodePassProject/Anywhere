@@ -18,12 +18,13 @@ extension QUICConnectionCore {
         localAddr: sockaddr_storage,
         onError: @escaping @Sendable (Int32) -> Void
     ) {
+        let path = quicPath(local: localAddr)
         carrier.startReceiving(
-            onPacket: { [weak owner, weak carrier] packets in
+            onPacket: { [weak owner, weak carrier] packet in
                 guard let carrier else { return }
                 owner?.update { core in
                     guard core.isReceiving(from: carrier) else { return }
-                    core.handleReceivedPackets(packets, localAddr: localAddr)
+                    core.handleReceivedPacket(packet, path: path)
                 }
             },
             onError: onError
@@ -71,19 +72,16 @@ extension QUICConnectionCore {
     // MARK: Packet processing
 
     func handleReceivedPacket(_ packet: Data, localAddr: sockaddr_storage) {
-        handleReceivedPackets(CollectionOfOne(packet), localAddr: localAddr)
+        handleReceivedPacket(packet, path: quicPath(local: localAddr))
     }
 
-    func handleReceivedPackets(_ packets: some Sequence<Data>, localAddr: sockaddr_storage) {
-        guard let engine else { return }
+    func handleReceivedPacket(_ packet: Data, path: QUICPath) {
+        guard let engine, !packet.isEmpty else { return }
         if let dialAttempt {
             self.dialAttempt = nil
             dialAttempt.noteServerResponse()
         }
-        let path = quicPath(local: localAddr)
-        for packet in packets where !packet.isEmpty {
-            engine.receive(packet, from: path, now: currentTimestamp())
-        }
+        engine.receive(packet, from: path, now: currentTimestamp())
         drainEngineEvents(engine)
         if phase != .closed { scheduleFlush() }
     }
@@ -118,24 +116,17 @@ extension QUICConnectionCore {
     }
 
     func writeToUDP() {
-        guard let engine, phase != .closed else { return }
+        guard let engine, let outbound, phase != .closed else { return }
         let now = currentTimestamp()
         pumpStreamQueues(engine)
         pumpDatagrams(engine)
-        var runs: [(carrier: QUICDatagramCarrier?, datagrams: [Data])] = []
-        while let outgoing = txBuffer.withUnsafeMutableBufferPointer({ engine.write(into: $0, now: now) }) {
+        while let outgoing = outbound.write({ engine.write(into: $0, now: now) }) {
             if outgoing.count > 0 {
-                let datagram = txBuffer.withUnsafeBufferPointer { Data(bytes: $0.baseAddress!, count: outgoing.count) }
-                let carrier = carrierForOutPath(local: outgoing.path.local)
-                if let last = runs.last, last.carrier === carrier {
-                    runs[runs.count - 1].datagrams.append(datagram)
-                } else {
-                    runs.append((carrier, [datagram]))
-                }
+                outbound.commit(outgoing.count, to: carrierForOutPath(local: outgoing.path.local))
             }
             pumpDatagrams(engine)
         }
-        for run in runs {
+        for run in outbound.takeRuns() {
             sendDatagrams(run.datagrams, to: run.carrier)
         }
         engine.finishWriting(now: now)
@@ -146,7 +137,7 @@ extension QUICConnectionCore {
     // MARK: Timer
 
     func makeRetransmitTimer() -> BridgeDeadlineTimer {
-        BridgeDeadlineTimer(queue: .global(qos: .userInitiated)) { [weak owner] in
+        BridgeDeadlineTimer(queue: executor.queue) { [weak owner] in
             owner?.update { core in
                 guard core.phase != .closed, let engine = core.engine else { return }
                 core.lastScheduledExpiry = 0

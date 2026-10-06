@@ -80,7 +80,7 @@ extension QUICConnectionCore {
             return
         }
 
-        let newCarrier = QUICDatagramCarrier(obfuscator: obfuscator)
+        let newCarrier = QUICDatagramCarrier(obfuscator: obfuscator, executor: executor)
         var placeholder = sockaddr_storage()
         let remote = remoteAddr
         do {
@@ -118,7 +118,7 @@ extension QUICConnectionCore {
               engine != nil,
               let oldType = carrier?.currentInterfaceType else { return }
 
-        let target = QUICDatagramCarrier(obfuscator: obfuscator)
+        let target = QUICDatagramCarrier(obfuscator: obfuscator, executor: executor)
         var placeholder = sockaddr_storage()
         let remote = remoteAddr
         do {
@@ -267,6 +267,9 @@ extension QUICConnectionCore {
 
     func sendDatagrams(_ datagrams: [Data], to carrier: QUICDatagramCarrier?) {
         if let transport {
+            let datagrams = datagrams.map { datagram in
+                datagram.withUnsafeBytes { Data(bytes: $0.baseAddress!, count: $0.count) }
+            }
             if let transportSealContinuation {
                 for datagram in datagrams { transportSealContinuation.yield(datagram) }
             } else {
@@ -275,6 +278,6 @@ extension QUICConnectionCore {
             return
         }
         guard let carrier else { return }
-        carrier.send(datagrams)
+        publish { carrier.send(datagrams) }
     }
 }

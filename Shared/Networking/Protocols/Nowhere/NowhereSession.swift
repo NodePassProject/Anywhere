@@ -110,7 +110,6 @@ nonisolated final class NowhereSession: Sendable {
         var udpControlStreams: [Int64: NowhereUDPConnection] = [:]
         var reassembly: [ReassemblyKey: ReassemblySlot] = [:]
         var reassemblyExpiryTask: Task<Void, Never>?
-        var udpBudgetUsed = 0
 
         var idleSince: ContinuousClock.Instant?
         var idleSweepTask: Task<Void, Never>?
@@ -118,6 +117,7 @@ nonisolated final class NowhereSession: Sendable {
         var onClose: (@Sendable () -> Void)?
     }
     private let state = Mutex(State())
+    private let udpBudgetUsed = Atomic<Int>(0)
 
     static let maxUDPFlows = 256
     private static let maxReassemblySlots = 64
@@ -310,7 +310,7 @@ nonisolated final class NowhereSession: Sendable {
             guard let route = session.udpRoutes[envelope.flowID], route.phase == .active else { return (nil, .none) }
             switch message.type {
             case .data:
-                guard let reservation = reserveUDPBudget(message.payload.count, &session) else { return (nil, .none) }
+                guard let reservation = reserveUDPBudget(message.payload.count) else { return (nil, .none) }
                 return (route.connection, .datagram(
                     NowhereQueuedDatagram(payload: message.payload, reservation: reservation)
                 ))
@@ -335,19 +335,23 @@ nonisolated final class NowhereSession: Sendable {
         }
     }
 
-    private func reserveUDPBudget(_ payloadLength: Int, _ session: inout State) -> NowhereUDPBudgetReservation? {
+    private func reserveUDPBudget(_ payloadLength: Int) -> NowhereUDPBudgetReservation? {
         let units = max(payloadLength, 1)
-        guard units <= Self.udpBudgetLimit - session.udpBudgetUsed else { return nil }
-        session.udpBudgetUsed += units
-        return NowhereUDPBudgetReservation(units: units) { [weak self] released in
-            self?.releaseUDPBudget(released)
+        var used = udpBudgetUsed.load(ordering: .relaxed)
+        while units <= Self.udpBudgetLimit - used {
+            let (exchanged, original) = udpBudgetUsed.compareExchange(
+                expected: used,
+                desired: used + units,
+                ordering: .relaxed
+            )
+            if exchanged {
+                return NowhereUDPBudgetReservation(units: units) { [weak self] released in
+                    self?.udpBudgetUsed.subtract(released, ordering: .relaxed)
+                }
+            }
+            used = original
         }
-    }
-
-    private func releaseUDPBudget(_ units: Int) {
-        Task { [weak self] in
-            self?.state.withLock { $0.udpBudgetUsed = max(0, $0.udpBudgetUsed - units) }
-        }
+        return nil
     }
 
     private func acceptFragment(_ message: NowhereProtocol.UDPMessage, _ session: inout State) -> NowhereQueuedDatagram? {
@@ -364,7 +368,7 @@ nonisolated final class NowhereSession: Sendable {
             slot = existing
         } else {
             guard session.reassembly.count < Self.maxReassemblySlots,
-                  let reservation = reserveUDPBudget(Int(message.totalLength), &session) else { return nil }
+                  let reservation = reserveUDPBudget(Int(message.totalLength)) else { return nil }
             slot = ReassemblySlot(
                 createdAt: .now,
                 fragmentCount: message.fragmentCount,

@@ -40,7 +40,7 @@ extension QUICConnectionCore {
             guard remoteAddr.ss_family != 0 else {
                 throw AnywhereError.quic(.connectionFailed(detail: "DNS lookup failed for \(host)"))
             }
-            let carrier = QUICDatagramCarrier(obfuscator: obfuscator)
+            let carrier = QUICDatagramCarrier(obfuscator: obfuscator, executor: executor)
             let remote = remoteAddr
             var local = localAddr
             try carrier.connect(remoteAddr: remote, localAddr: &local)
@@ -317,6 +317,6 @@ extension QUICConnectionCore {
         )
         self.engine = engine
         retransmitTimer = makeRetransmitTimer()
-        txBuffer = [UInt8](repeating: 0, count: engine.settings.maxSendUDPPayloadSize)
+        outbound = DatagramStage(packetCapacity: engine.settings.maxSendUDPPayloadSize)
     }
 }

@@ -21,18 +21,15 @@ nonisolated final class SalamanderObfuscator: QUICPacketObfuscator {
         self.passwordBytes = Array(password.utf8)
     }
 
-    private func keystream(salt: [UInt8]) -> [UInt8] {
+    private func keystream(salt: UnsafeRawBufferPointer) -> [UInt8] {
         BLAKE2bHasher.hash256(passwordBytes, salt)
     }
 
     func seal(_ packet: UnsafeRawBufferPointer) -> [Data] {
-        var salt = [UInt8](repeating: 0, count: Self.saltLength)
-        _ = SecRandomCopyBytes(kSecRandomDefault, salt.count, &salt)
-        let key = keystream(salt: salt)
-
         var out = Data(count: Self.saltLength + packet.count)
         out.withUnsafeMutableBytes { raw in
-            salt.withUnsafeBytes { raw.copyMemory(from: $0) }
+            _ = SecRandomCopyBytes(kSecRandomDefault, Self.saltLength, raw.baseAddress!)
+            let key = keystream(salt: UnsafeRawBufferPointer(rebasing: raw[..<Self.saltLength]))
             Self.apply(key, to: packet, into: UnsafeMutableRawBufferPointer(rebasing: raw[Self.saltLength...]))
         }
         return [out]
@@ -42,7 +39,7 @@ nonisolated final class SalamanderObfuscator: QUICPacketObfuscator {
         let count = datagram.count
         guard count > Self.saltLength else { return datagram }
         return datagram.withUnsafeBytes { raw -> Data in
-            let key = keystream(salt: Array(raw.prefix(Self.saltLength)))
+            let key = keystream(salt: UnsafeRawBufferPointer(rebasing: raw[..<Self.saltLength]))
             var out = Data(count: count - Self.saltLength)
             out.withUnsafeMutableBytes { output in
                 Self.apply(key, to: UnsafeRawBufferPointer(rebasing: raw[Self.saltLength...]), into: output)
@@ -52,9 +49,23 @@ nonisolated final class SalamanderObfuscator: QUICPacketObfuscator {
     }
 
     private static func apply(_ key: [UInt8], to input: UnsafeRawBufferPointer, into output: UnsafeMutableRawBufferPointer) {
-        key.withUnsafeBufferPointer { key in
-            for index in 0..<input.count {
+        key.withUnsafeBytes { key in
+            let k0 = key.loadUnaligned(fromByteOffset: 0, as: UInt64.self)
+            let k1 = key.loadUnaligned(fromByteOffset: 8, as: UInt64.self)
+            let k2 = key.loadUnaligned(fromByteOffset: 16, as: UInt64.self)
+            let k3 = key.loadUnaligned(fromByteOffset: 24, as: UInt64.self)
+            let count = input.count
+            var index = 0
+            while index + keyLength <= count {
+                output.storeBytes(of: input.loadUnaligned(fromByteOffset: index, as: UInt64.self) ^ k0, toByteOffset: index, as: UInt64.self)
+                output.storeBytes(of: input.loadUnaligned(fromByteOffset: index + 8, as: UInt64.self) ^ k1, toByteOffset: index + 8, as: UInt64.self)
+                output.storeBytes(of: input.loadUnaligned(fromByteOffset: index + 16, as: UInt64.self) ^ k2, toByteOffset: index + 16, as: UInt64.self)
+                output.storeBytes(of: input.loadUnaligned(fromByteOffset: index + 24, as: UInt64.self) ^ k3, toByteOffset: index + 24, as: UInt64.self)
+                index += keyLength
+            }
+            while index < count {
                 output[index] = input[index] ^ key[index % keyLength]
+                index += 1
             }
         }
     }

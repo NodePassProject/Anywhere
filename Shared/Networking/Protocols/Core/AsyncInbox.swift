@@ -33,10 +33,14 @@ nonisolated final class AsyncInbox<Element: Sendable>: Sendable {
     }
     
     func yield(_ element: Element) {
+        yield(element, compactingAbove: .max) { $0 }
+    }
+
+    func yield(_ element: Element, compactingAbove depth: Int, _ compact: (Element) -> Element) {
         let waiter: CheckedContinuation<Void, Never>? = state.withLock { s in
             guard !s.finished else { return nil }
             if let capacity, s.buffer.count >= capacity { return nil }
-            s.buffer.append(element)
+            s.buffer.append(s.buffer.count >= depth ? compact(element) : element)
             let waiter = s.waiter
             s.waiter = nil
             return waiter

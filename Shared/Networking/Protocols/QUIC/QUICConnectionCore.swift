@@ -67,6 +67,8 @@ nonisolated final class QUICConnectionCore: QUICPublishingState {
 
     let obfuscator: QUICPacketObfuscator?
 
+    let executor: BridgeExecutor
+
     private(set) var phase: Phase = .idle
 
     @discardableResult
@@ -211,7 +213,68 @@ nonisolated final class QUICConnectionCore: QUICPublishingState {
     static let maxUDPPayload = 1452
     static let chainedMaxUDPPayload = 1200
 
-    var txBuffer: [UInt8] = []
+    final class DatagramStage {
+        typealias Run = (carrier: QUICDatagramCarrier?, datagrams: [Data])
+
+        private static let packetsPerChunk = 16
+        private let packetCapacity: Int
+        private let chunkCapacity: Int
+        private var chunk: UnsafeMutableRawPointer?
+        private var used = 0
+        private var staged: [(range: Range<Int>, carrier: QUICDatagramCarrier?)] = []
+        private var runs: [Run] = []
+
+        init(packetCapacity: Int) {
+            self.packetCapacity = packetCapacity
+            chunkCapacity = packetCapacity * Self.packetsPerChunk
+        }
+
+        deinit {
+            free(chunk)
+        }
+
+        func write(_ body: (UnsafeMutableBufferPointer<UInt8>) -> QUICOutgoingDatagram?) -> QUICOutgoingDatagram? {
+            if used + packetCapacity > chunkCapacity { seal() }
+            let base = chunk ?? allocateChunk()
+            return body(UnsafeMutableRawBufferPointer(start: base + used, count: packetCapacity).bindMemory(to: UInt8.self))
+        }
+
+        func commit(_ count: Int, to carrier: QUICDatagramCarrier?) {
+            staged.append((used..<used + count, carrier))
+            used += count
+        }
+
+        func takeRuns() -> [Run] {
+            seal()
+            let result = runs
+            runs = []
+            return result
+        }
+
+        private func allocateChunk() -> UnsafeMutableRawPointer {
+            let chunk = malloc(chunkCapacity)!
+            self.chunk = chunk
+            return chunk
+        }
+
+        private func seal() {
+            guard let chunk, !staged.isEmpty else { return }
+            let data = Data(bytesNoCopy: chunk, count: used, deallocator: .free)
+            self.chunk = nil
+            used = 0
+            for entry in staged {
+                let datagram = data[entry.range]
+                if let last = runs.last, last.carrier === entry.carrier {
+                    runs[runs.count - 1].datagrams.append(datagram)
+                } else {
+                    runs.append((entry.carrier, [datagram]))
+                }
+            }
+            staged.removeAll(keepingCapacity: true)
+        }
+    }
+
+    var outbound: DatagramStage?
 
     static let pmtudProbes: [UInt16] = [1350, 1400, 1452]
 
@@ -225,9 +288,11 @@ nonisolated final class QUICConnectionCore: QUICPublishingState {
         obfuscator: QUICPacketObfuscator? = nil,
         directMaxUDPPayload: Int = QUICConnectionCore.maxUDPPayload,
         transport: QUICDatagramTransport? = nil,
-        handlers: QUICHandlerStore
+        handlers: QUICHandlerStore,
+        executor: BridgeExecutor
     ) {
         self.handlers = handlers
+        self.executor = executor
         self.host = host
         self.port = port
         self.serverName = serverName ?? host

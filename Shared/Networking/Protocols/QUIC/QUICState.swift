@@ -5,6 +5,7 @@
 //  Created by NodePassProject on 10/5/26.
 //
 
+import Dispatch
 import Synchronization
 
 nonisolated protocol QUICPublishingState: AnyObject, SendableMetatype {
@@ -17,8 +18,12 @@ nonisolated final class QUICState<Core: QUICPublishingState>: Sendable {
         var draining = false
     }
     private let storage: Mutex<Storage>
+    private let queue: DispatchQueue
 
-    init(_ core: sending Core) { storage = Mutex(Storage(core: core)) }
+    init(_ core: sending Core, queue: DispatchQueue) {
+        storage = Mutex(Storage(core: core))
+        self.queue = queue
+    }
 
     func read<T: Sendable>(_ body: (Core) throws -> T) rethrows -> T {
         try storage.withLock { try body($0.core) }
@@ -31,7 +36,7 @@ nonisolated final class QUICState<Core: QUICPublishingState>: Sendable {
             if drain { state.draining = true }
             return (result, drain)
         }
-        if drain { Task(priority: .userInitiated) { self.drain() } }
+        if drain { queue.async { self.drain() } }
         return result
     }
 

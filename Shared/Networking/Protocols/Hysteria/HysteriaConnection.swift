@@ -50,6 +50,7 @@ actor HysteriaConnection {
     
     private nonisolated static let maxTCPResponseLength =
         1 + 8 + HysteriaProtocol.maxResponseMessageLength + 8 + HysteriaProtocol.maxPaddingLength
+    private nonisolated static let inboxCompactionDepth = 32
 
     init(session: HysteriaSession, destination: String) {
         self.session = session
@@ -147,7 +148,7 @@ actor HysteriaConnection {
             if let orphanSID {
                 session.extendStreamOffset(orphanSID, count: data.count)
             } else {
-                rawInbox.yield(data)
+                rawInbox.yield(data, compactingAbove: Self.inboxCompactionDepth) { Data($0) }
             }
         }
         if fin { rawInbox.finish() }

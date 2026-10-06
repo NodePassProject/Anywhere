@@ -40,7 +40,7 @@ nonisolated struct QUICDatagramEngineSink: Sendable {
     }
 
     func packet(_ datagram: Data) {
-        carrier?.update { $0.deliverPacket(datagram) }
+        carrier?.deliverPacket(datagram)
     }
 
     func finished() {
@@ -51,8 +51,8 @@ nonisolated struct QUICDatagramEngineSink: Sendable {
 nonisolated final class QUICDatagramCarrier: Sendable {
     private let state: QUICState<QUICDatagramCarrierCore>
 
-    init(obfuscator: QUICPacketObfuscator?) {
-        state = QUICState(QUICDatagramCarrierCore(obfuscator: obfuscator))
+    init(obfuscator: QUICPacketObfuscator?, executor: BridgeExecutor) {
+        state = QUICState(QUICDatagramCarrierCore(obfuscator: obfuscator, executor: executor), queue: executor.queue)
         state.update { $0.owner = self }
     }
 
@@ -86,16 +86,17 @@ nonisolated final class QUICDatagramCarrier: Sendable {
         }
         localAddr = try result.get()
     }
-    func startReceiving(onPacket: @escaping @Sendable ([Data]) -> Void, onError: @escaping @Sendable (Int32) -> Void) {
+    func startReceiving(onPacket: @escaping @Sendable (Data) -> Void, onError: @escaping @Sendable (Int32) -> Void) {
         update { $0.startReceiving(onPacket: onPacket, onError: onError) }
     }
-    func send(_ datagrams: [Data]) { update { $0.send(datagrams) } }
+    func send(_ datagrams: [Data]) {
+        guard !datagrams.isEmpty else { return }
+        state.read { $0.sendingEngine }?.send(datagrams)
+    }
     func close() { update { $0.close() } }
 
-    fileprivate func deliverPendingPackets() {
-        let (handler, packets) = update { $0.takePendingPackets() }
-        guard let handler, !packets.isEmpty else { return }
-        handler(packets)
+    fileprivate func deliverPacket(_ packet: Data) {
+        state.read { $0.receivingPacketHandler }?(packet)
     }
 }
 
@@ -105,6 +106,7 @@ nonisolated final class QUICDatagramCarrierCore: QUICPublishingState {
     func publish(_ action: @escaping @Sendable () -> Void) { publications.append(action) }
 
     private let obfuscator: QUICPacketObfuscator?
+    private let executor: BridgeExecutor
 
     private enum Phase: PhaseTransitionable {
         case idle
@@ -159,10 +161,8 @@ nonisolated final class QUICDatagramCarrierCore: QUICPublishingState {
     }
     private var phase: Phase = .idle
 
-    private var packetHandler: (@Sendable ([Data]) -> Void)?
+    private var packetHandler: (@Sendable (Data) -> Void)?
     private var receiveErrorHandler: (@Sendable (Int32) -> Void)?
-    private var pendingPackets: [Data] = []
-    private static let maxPacketBatch = 16
 
     var onPathDown: (@Sendable () -> Void)?
     var onBetterPath: (@Sendable () -> Void)?
@@ -172,8 +172,9 @@ nonisolated final class QUICDatagramCarrierCore: QUICPublishingState {
 
     private var cachedInterfaceType: NWInterface.InterfaceType?
 
-    init(obfuscator: QUICPacketObfuscator?) {
+    init(obfuscator: QUICPacketObfuscator?, executor: BridgeExecutor) {
         self.obfuscator = obfuscator
+        self.executor = executor
     }
 
     deinit {
@@ -193,6 +194,15 @@ nonisolated final class QUICDatagramCarrierCore: QUICPublishingState {
         }
     }
 
+    var sendingEngine: QUICDatagramEngine? { phase.engine }
+
+    var receivingPacketHandler: (@Sendable (Data) -> Void)? {
+        switch phase {
+        case .connecting, .ready: packetHandler
+        case .idle, .failed, .finished, .closed: nil
+        }
+    }
+
     // MARK: - Connect
 
     func connect(remoteAddr: sockaddr_storage, localAddr: inout sockaddr_storage) throws {
@@ -207,13 +217,16 @@ nonisolated final class QUICDatagramCarrierCore: QUICPublishingState {
         flowSlot = FlowSlot(context: "[QUIC] Datagram carrier")
 
         let sink = QUICDatagramEngineSink(carrier: owner)
-        Phase.transition(&phase, to: .connecting(QUICDatagramEngine(endpoint: endpoint, obfuscator: obfuscator, sink: sink)))
+        Phase.transition(
+            &phase,
+            to: .connecting(QUICDatagramEngine(endpoint: endpoint, obfuscator: obfuscator, executor: executor, sink: sink))
+        )
     }
 
     // MARK: - Receive
 
     func startReceiving(
-        onPacket: @escaping @Sendable ([Data]) -> Void,
+        onPacket: @escaping @Sendable (Data) -> Void,
         onError: @escaping @Sendable (Int32) -> Void
     ) {
         let deadCode: Int32?
@@ -233,18 +246,6 @@ nonisolated final class QUICDatagramCarrierCore: QUICPublishingState {
         receiveErrorHandler = onError
     }
 
-    // MARK: - Send
-
-    func send(_ datagrams: [Data]) {
-        guard !datagrams.isEmpty else { return }
-        switch phase {
-        case .connecting(let engine), .ready(let engine):
-            engine.send(datagrams)
-        case .idle, .failed, .finished, .closed:
-            return
-        }
-    }
-
     // MARK: - Close
 
     func close() {
@@ -254,7 +255,6 @@ nonisolated final class QUICDatagramCarrierCore: QUICPublishingState {
         Phase.transition(&phase, to: .closed)
         packetHandler = nil
         receiveErrorHandler = nil
-        pendingPackets = []
         onPathDown = nil
         onBetterPath = nil
         onReady = nil
@@ -322,31 +322,7 @@ nonisolated final class QUICDatagramCarrierCore: QUICPublishingState {
         }
     }
 
-    // MARK: - Delivery
-
-    fileprivate func deliverPacket(_ packet: Data) {
-        switch phase {
-        case .connecting, .ready:
-            pendingPackets.append(packet)
-            guard pendingPackets.count == 1 else { return }
-            publish { [weak owner] in owner?.deliverPendingPackets() }
-        case .idle, .failed, .finished, .closed:
-            break
-        }
-    }
-
-    fileprivate func takePendingPackets() -> ((@Sendable ([Data]) -> Void)?, [Data]) {
-        let batch: [Data]
-        if pendingPackets.count > Self.maxPacketBatch {
-            batch = Array(pendingPackets.prefix(Self.maxPacketBatch))
-            pendingPackets.removeFirst(Self.maxPacketBatch)
-            publish { [weak owner] in owner?.deliverPendingPackets() }
-        } else {
-            batch = pendingPackets
-            pendingPackets = []
-        }
-        return (packetHandler, batch)
-    }
+    // MARK: - Errors
 
     fileprivate func deliverError(_ code: Int32) {
         enterFailed(code)
@@ -361,7 +337,6 @@ nonisolated final class QUICDatagramCarrierCore: QUICPublishingState {
         }
         phase.engine?.close()
         Phase.transition(&phase, to: .failed(code))
-        pendingPackets = []
         releaseFlowSlot()
         if let handler = receiveErrorHandler {
             receiveErrorHandler = nil
@@ -436,14 +411,15 @@ nonisolated final class QUICDatagramEngine: Sendable {
 
     private let connection: NWConnection
     private let obfuscator: QUICPacketObfuscator?
-    private let queue = DispatchQueue(label: "com.argsment.Anywhere.QUICDatagramCarrier", qos: .userInitiated)
+    private let executor: BridgeExecutor
 
     private let terminated = OneShotLatch()
 
-    init(endpoint: NWEndpoint, obfuscator: QUICPacketObfuscator?, sink: QUICDatagramEngineSink) {
+    init(endpoint: NWEndpoint, obfuscator: QUICPacketObfuscator?, executor: BridgeExecutor, sink: QUICDatagramEngineSink) {
         let connection = NWConnection(to: endpoint, using: .udp)
         self.connection = connection
         self.obfuscator = obfuscator
+        self.executor = executor
 
         connection.stateUpdateHandler = { [weak connection] state in
             switch state {
@@ -469,7 +445,7 @@ nonisolated final class QUICDatagramEngine: Sendable {
             sink.pathChanged(interfaceType: path.availableInterfaces.first?.type)
         }
 
-        connection.start(queue: queue)
+        connection.start(queue: executor.queue)
         for _ in 0..<Self.receiveConcurrency {
             Self.armReceive(on: connection, obfuscator: obfuscator, sink: sink, terminated: terminated)
         }
@@ -480,19 +456,23 @@ nonisolated final class QUICDatagramEngine: Sendable {
     }
     
     func send(_ datagrams: [Data]) {
-        let connection = connection
-        let obfuscator = obfuscator
-        queue.async {
-            connection.batch {
-                for datagram in datagrams {
-                    if let obfuscator {
-                        let wireDatagrams = datagram.withUnsafeBytes { obfuscator.seal($0) }
-                        for wire in wireDatagrams {
-                            connection.send(content: wire, completion: .contentProcessed { _ in })
-                        }
-                    } else {
-                        connection.send(content: datagram, completion: .contentProcessed { _ in })
+        if executor.isOnQueue {
+            transmit(datagrams)
+        } else {
+            executor.queue.async { [self] in transmit(datagrams) }
+        }
+    }
+
+    private func transmit(_ datagrams: [Data]) {
+        connection.batch {
+            for datagram in datagrams {
+                if let obfuscator {
+                    let wireDatagrams = datagram.withUnsafeBytes { obfuscator.seal($0) }
+                    for wire in wireDatagrams {
+                        connection.send(content: wire, completion: .contentProcessed { _ in })
                     }
+                } else {
+                    connection.send(content: datagram, completion: .contentProcessed { _ in })
                 }
             }
         }
@@ -501,7 +481,7 @@ nonisolated final class QUICDatagramEngine: Sendable {
     func close() {
         terminated.claim()
         let connection = connection
-        queue.async { connection.cancel() }
+        executor.queue.async { connection.cancel() }
     }
 
     private static func armReceive(

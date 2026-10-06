@@ -86,10 +86,7 @@ nonisolated enum NowhereMorph {
     }
 
     static func apply(_ input: Data, key: Data, nonce: Data, offset: UInt64) throws -> Data {
-        guard key.count == 32, nonce.count == nonceSize,
-              offset <= byteLimit, UInt64(input.count) <= byteLimit - offset else {
-            throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Morph stream limit exceeded"))
-        }
+        try validate(count: input.count, keyCount: key.count, nonceCount: nonce.count, offset: offset)
         if input.isEmpty { return Data() }
         var output = Data(count: input.count)
         output.withUnsafeMutableBytes { destination in
@@ -108,6 +105,27 @@ nonisolated enum NowhereMorph {
             }
         }
         return output
+    }
+
+    static func apply(
+        _ input: UnsafeRawBufferPointer,
+        into output: UnsafeMutableRawBufferPointer,
+        key: UnsafeRawBufferPointer,
+        nonce: UnsafeRawBufferPointer,
+        offset: UInt64
+    ) throws {
+        try validate(count: input.count, keyCount: key.count, nonceCount: nonce.count, offset: offset)
+        guard output.count == input.count else {
+            throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Morph buffer size mismatch"))
+        }
+        NowhereMorphCrypto.xor(destination: output, input: input, key: key, nonce: nonce, offset: offset)
+    }
+
+    private static func validate(count: Int, keyCount: Int, nonceCount: Int, offset: UInt64) throws {
+        guard keyCount == 32, nonceCount == nonceSize,
+              offset <= byteLimit, UInt64(count) <= byteLimit - offset else {
+            throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Morph stream limit exceeded"))
+        }
     }
 }
 
@@ -136,19 +154,21 @@ nonisolated final class NowhereMorphNonceGenerator: Sendable {
         state = Mutex(try Self.makeState(randomBytes: randomBytes))
     }
 
-    func next() throws -> Data {
+    func next(into nonce: UnsafeMutableRawBufferPointer) throws {
         try state.withLock { state in
             if state.offset > reseedByteLimit - UInt64(NowhereMorph.nonceSize) {
                 state = try Self.makeState(randomBytes: randomBytes)
             }
-            let output = try NowhereMorph.apply(
-                Data(repeating: 0, count: NowhereMorph.nonceSize),
-                key: state.key,
-                nonce: state.nonce,
-                offset: state.offset
-            )
+            let offset = state.offset
+            try withUnsafeTemporaryAllocation(byteCount: NowhereMorph.nonceSize, alignment: 4) { zero in
+                zero.initializeMemory(as: UInt8.self, repeating: 0)
+                try state.key.withUnsafeBytes { key in
+                    try state.nonce.withUnsafeBytes { base in
+                        try NowhereMorph.apply(UnsafeRawBufferPointer(zero), into: nonce, key: key, nonce: base, offset: offset)
+                    }
+                }
+            }
             state.offset += UInt64(NowhereMorph.nonceSize)
-            return output
         }
     }
 
@@ -206,34 +226,51 @@ nonisolated final class NowhereMorphPacketObfuscator: QUICPacketObfuscator {
     }
 
     func seal(_ packet: UnsafeRawBufferPointer) -> [Data] {
-        do {
-            let nonce = try nonceGenerator.next()
-            let ciphertext = try NowhereMorph.apply(
-                Data(packet),
-                key: sendKey,
-                nonce: nonce,
-                offset: 0
-            )
-            var output = Data(capacity: NowhereMorph.nonceSize + ciphertext.count)
-            output.append(nonce)
-            output.append(ciphertext)
-            return [output]
-        } catch {
-            let handler: (@Sendable (Error) -> Void)? = failureState.withLock { state in
-                guard !state.failed else { return nil }
-                state.failed = true
-                return state.handler
+        var output = Data(count: NowhereMorph.nonceSize + packet.count)
+        let sealed: Bool = output.withUnsafeMutableBytes { raw in
+            let nonce = UnsafeMutableRawBufferPointer(rebasing: raw[..<NowhereMorph.nonceSize])
+            let payload = UnsafeMutableRawBufferPointer(rebasing: raw[NowhereMorph.nonceSize...])
+            do {
+                try nonceGenerator.next(into: nonce)
+                try sendKey.withUnsafeBytes { key in
+                    try NowhereMorph.apply(packet, into: payload, key: key, nonce: UnsafeRawBufferPointer(nonce), offset: 0)
+                }
+                return true
+            } catch {
+                reportFailure(error)
+                return false
             }
-            handler?(error)
-            return []
         }
+        return sealed ? [output] : []
     }
 
     func open(_ datagram: Data) -> Data? {
-        guard datagram.count > NowhereMorph.nonceSize else { return nil }
-        let nonce = Data(datagram.prefix(NowhereMorph.nonceSize))
-        let ciphertext = Data(datagram.dropFirst(NowhereMorph.nonceSize))
-        return try? NowhereMorph.apply(ciphertext, key: receiveKey, nonce: nonce, offset: 0)
+        let count = datagram.count - NowhereMorph.nonceSize
+        guard count > 0 else { return nil }
+        var output = Data(count: count)
+        let opened: Bool = datagram.withUnsafeBytes { raw in
+            output.withUnsafeMutableBytes { destination in
+                receiveKey.withUnsafeBytes { key in
+                    (try? NowhereMorph.apply(
+                        UnsafeRawBufferPointer(rebasing: raw[NowhereMorph.nonceSize...]),
+                        into: destination,
+                        key: key,
+                        nonce: UnsafeRawBufferPointer(rebasing: raw[..<NowhereMorph.nonceSize]),
+                        offset: 0
+                    )) != nil
+                }
+            }
+        }
+        return opened ? output : nil
+    }
+
+    private func reportFailure(_ error: Error) {
+        let handler: (@Sendable (Error) -> Void)? = failureState.withLock { state in
+            guard !state.failed else { return nil }
+            state.failed = true
+            return state.handler
+        }
+        handler?(error)
     }
 }
 
