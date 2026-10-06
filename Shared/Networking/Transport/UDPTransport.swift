@@ -9,12 +9,6 @@ import Foundation
 import Network
 import Synchronization
 
-nonisolated protocol UDPTransportEngine: AnyObject, Sendable {
-    func send(_ datagram: Data) async throws
-    func receive() async throws -> Data
-    func cancel()
-}
-
 nonisolated final class UDPTransport: DatagramTransport, Sendable {
 
     // MARK: State
@@ -41,7 +35,7 @@ nonisolated final class UDPTransport: DatagramTransport, Sendable {
     private struct State: PhaseHolding {
         var phase: Phase = .idle
 
-        var engine: (any UDPTransportEngine)?
+        var engine: UDPTransportEngine?
         var flowSlot: FlowSlot?
         var failure: AnywhereError?
     }
@@ -78,12 +72,7 @@ nonisolated final class UDPTransport: DatagramTransport, Sendable {
         let endpoint = NWEndpoint.hostPort(host: endpointHost, port: nwPort)
         let slot = FlowSlot(context: "[UDP] \(endpointDescription)")
 
-        let engine: any UDPTransportEngine
-        if #available(iOS 26.0, macOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *) {
-            engine = ModernUDPEngine(endpoint: endpoint)
-        } else {
-            engine = LegacyUDPEngine(endpoint: endpoint)
-        }
+        let engine = UDPTransportEngine(endpoint: endpoint)
 
         let live: Bool = state.withLock { state in
             guard state.transition(to: .connecting) else { return false }
@@ -124,7 +113,7 @@ nonisolated final class UDPTransport: DatagramTransport, Sendable {
     }
 
     func cancel() {
-        let (engine, slot): ((any UDPTransportEngine)?, FlowSlot?) = state.withLock { state in
+        let (engine, slot): (UDPTransportEngine?, FlowSlot?) = state.withLock { state in
             if state.failure == nil { state.failure = .transport(.terminated) }
             state.transition(to: .cancelled)
             let pair = (state.engine, state.flowSlot)
@@ -138,7 +127,7 @@ nonisolated final class UDPTransport: DatagramTransport, Sendable {
 
     // MARK: - Helpers
 
-    private func activeEngine() throws -> any UDPTransportEngine {
+    private func activeEngine() throws -> UDPTransportEngine {
         try state.withLock { state in
             if let failure = state.failure { throw failure }
             if state.phase == .cancelled { throw AnywhereError.transport(.terminated) }
@@ -152,33 +141,60 @@ nonisolated final class UDPTransport: DatagramTransport, Sendable {
     }
 }
 
-// MARK: - Modern engine
+// MARK: - Engine
 
-@available(iOS 26.0, macOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *)
-nonisolated final class ModernUDPEngine: UDPTransportEngine, Sendable {
-    private let connection: NetworkConnection<UDP>
-    private let stall = NetworkConnectionStallLatch()
+nonisolated final class UDPTransportEngine: Sendable {
+    private let connection: NWConnection
+    private let queue = DispatchQueue(label: "com.argsment.Anywhere.UDPTransport", qos: .userInitiated)
+    private let stall = NWStallLatch()
 
     init(endpoint: NWEndpoint) {
-        connection = NetworkConnection(to: endpoint) { UDP() }
+        connection = NWConnection(to: endpoint, using: .udp)
         stall.watch(connection)
+        connection.start(queue: queue)
+    }
+
+    deinit {
+        connection.cancel()
     }
 
     func cancel() {
-        stall.cancel()
+        connection.cancel()
     }
 
     func send(_ datagram: Data) async throws {
         let connection = connection
-        try await stall.perform(.send) {
-            try await connection.send(datagram)
+        let stall = stall
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                connection.send(content: datagram, completion: .contentProcessed { error in
+                    if let error {
+                        continuation.resume(throwing: stall.failure(for: error, operation: .send))
+                    } else {
+                        continuation.resume()
+                    }
+                })
+            }
+        } onCancel: {
+            connection.cancel()
         }
     }
 
     func receive() async throws -> Data {
         let connection = connection
-        return try await stall.perform(.receive) {
-            try await connection.receive().content
+        let stall = stall
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, any Error>) in
+                connection.receiveMessage { content, _, _, error in
+                    if let error {
+                        continuation.resume(throwing: stall.failure(for: error, operation: .receive))
+                    } else {
+                        continuation.resume(returning: content ?? Data())
+                    }
+                }
+            }
+        } onCancel: {
+            connection.cancel()
         }
     }
 }

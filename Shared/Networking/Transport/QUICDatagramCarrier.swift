@@ -12,11 +12,6 @@ import Network
 
 nonisolated private let logger = AnywhereLogger(category: "QUICDatagramCarrier")
 
-nonisolated protocol QUICDatagramEngine: AnyObject, Sendable {
-    func send(_ datagrams: [Data])
-    func close()
-}
-
 nonisolated struct QUICDatagramEngineSink: Sendable {
     fileprivate weak var carrier: QUICDatagramCarrier?
 
@@ -113,13 +108,13 @@ nonisolated final class QUICDatagramCarrierCore: QUICPublishingState {
 
     private enum Phase: PhaseTransitionable {
         case idle
-        case connecting(any QUICDatagramEngine)
-        case ready(any QUICDatagramEngine)
+        case connecting(QUICDatagramEngine)
+        case ready(QUICDatagramEngine)
         case failed(Int32)
         case finished
         case closed
 
-        var engine: (any QUICDatagramEngine)? {
+        var engine: QUICDatagramEngine? {
             switch self {
             case .connecting(let engine), .ready(let engine): engine
             case .idle, .failed, .finished, .closed: nil
@@ -212,11 +207,7 @@ nonisolated final class QUICDatagramCarrierCore: QUICPublishingState {
         flowSlot = FlowSlot(context: "[QUIC] Datagram carrier")
 
         let sink = QUICDatagramEngineSink(carrier: owner)
-        if #available(iOS 26.0, macOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *) {
-            Phase.transition(&phase, to: .connecting(ModernQUICDatagramEngine(endpoint: endpoint, obfuscator: obfuscator, sink: sink)))
-        } else {
-            Phase.transition(&phase, to: .connecting(LegacyQUICDatagramEngine(endpoint: endpoint, obfuscator: obfuscator, sink: sink)))
-        }
+        Phase.transition(&phase, to: .connecting(QUICDatagramEngine(endpoint: endpoint, obfuscator: obfuscator, sink: sink)))
     }
 
     // MARK: - Receive
@@ -438,26 +429,26 @@ nonisolated final class QUICDatagramCarrierCore: QUICPublishingState {
     }
 }
 
-// MARK: - Modern engine
+// MARK: - Engine
 
-@available(iOS 26.0, macOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *)
-nonisolated final class ModernQUICDatagramEngine: QUICDatagramEngine, Sendable {
+nonisolated final class QUICDatagramEngine: Sendable {
     private static let receiveConcurrency = 16
-    private static let maxQueuedSendBatches = 512
 
-    private let connection: NetworkConnection<UDP>
+    private let connection: NWConnection
     private let obfuscator: QUICPacketObfuscator?
-    private let driverTask: Task<Void, Never>
-    private let sendTask: Task<Void, Never>
-    private let outbound: AsyncStream<[Data]>.Continuation
+    private let queue = DispatchQueue(label: "com.argsment.Anywhere.QUICDatagramCarrier", qos: .userInitiated)
+
+    private let terminated = OneShotLatch()
 
     init(endpoint: NWEndpoint, obfuscator: QUICPacketObfuscator?, sink: QUICDatagramEngineSink) {
-        let connection = NetworkConnection(to: endpoint) { UDP() }
+        let connection = NWConnection(to: endpoint, using: .udp)
+        self.connection = connection
+        self.obfuscator = obfuscator
 
-        connection.onStateUpdate { connection, state in
+        connection.stateUpdateHandler = { [weak connection] state in
             switch state {
             case .ready:
-                sink.ready(interfaceType: connection.currentPath?.availableInterfaces.first?.type)
+                sink.ready(interfaceType: connection?.currentPath?.availableInterfaces.first?.type)
             case .failed(let error):
                 sink.failed(AnywhereError.errnoCode(from: error))
             case .waiting(let error):
@@ -466,136 +457,78 @@ nonisolated final class ModernQUICDatagramEngine: QUICDatagramEngine, Sendable {
                 break
             }
         }
-        connection.onViabilityUpdate { _, viable in
+        connection.viabilityUpdateHandler = { viable in
             guard !viable else { return }
             sink.viabilityLost()
         }
-        connection.onBetterPathUpdate { _, better in
+        connection.betterPathUpdateHandler = { better in
             guard better else { return }
             sink.betterPath()
         }
-        connection.onPathUpdate { _, path in
+        connection.pathUpdateHandler = { path in
             sink.pathChanged(interfaceType: path.availableInterfaces.first?.type)
         }
 
-        self.connection = connection
-        self.obfuscator = obfuscator
-        self.driverTask = Task { [obfuscator] in
-            await Self.runDriver(connection: connection, sink: sink, obfuscator: obfuscator)
-        }
-        let (batches, outbound) = AsyncStream.makeStream(
-            of: [Data].self,
-            bufferingPolicy: .bufferingOldest(Self.maxQueuedSendBatches)
-        )
-        self.outbound = outbound
-        self.sendTask = Task { [obfuscator] in
-            await Self.runSendLoop(batches, over: connection, obfuscator: obfuscator)
+        connection.start(queue: queue)
+        for _ in 0..<Self.receiveConcurrency {
+            Self.armReceive(on: connection, obfuscator: obfuscator, sink: sink, terminated: terminated)
         }
     }
 
     deinit {
-        driverTask.cancel()
-        outbound.finish()
-        sendTask.cancel()
+        connection.cancel()
     }
-
+    
     func send(_ datagrams: [Data]) {
-        outbound.yield(datagrams)
+        let connection = connection
+        let obfuscator = obfuscator
+        queue.async {
+            connection.batch {
+                for datagram in datagrams {
+                    if let obfuscator {
+                        let wireDatagrams = datagram.withUnsafeBytes { obfuscator.seal($0) }
+                        for wire in wireDatagrams {
+                            connection.send(content: wire, completion: .contentProcessed { _ in })
+                        }
+                    } else {
+                        connection.send(content: datagram, completion: .contentProcessed { _ in })
+                    }
+                }
+            }
+        }
     }
 
     func close() {
-        driverTask.cancel()
-        outbound.finish()
-    }
-    
-    @concurrent
-    private static func runSendLoop(
-        _ batches: AsyncStream<[Data]>,
-        over connection: NetworkConnection<UDP>,
-        obfuscator: QUICPacketObfuscator?
-    ) async {
-        for await batch in batches {
-            for datagram in batch {
-                await transmit(datagram, over: connection, obfuscator: obfuscator)
-            }
-        }
+        terminated.claim()
+        let connection = connection
+        queue.async { connection.cancel() }
     }
 
-    @concurrent
-    private static func transmit(
-        _ datagram: Data,
-        over connection: NetworkConnection<UDP>,
-        obfuscator: QUICPacketObfuscator?
-    ) async {
-        if let obfuscator {
-            let wireDatagrams = datagram.withUnsafeBytes { obfuscator.seal($0) }
-            for wire in wireDatagrams {
-                try? await connection.send(wire)
-            }
-        } else {
-            try? await connection.send(datagram)
-        }
-    }
-
-    // MARK: - Driver
-
-    @concurrent
-    private static func runDriver(
-        connection: NetworkConnection<UDP>,
+    private static func armReceive(
+        on connection: NWConnection,
+        obfuscator: QUICPacketObfuscator?,
         sink: QUICDatagramEngineSink,
-        obfuscator: QUICPacketObfuscator?
-    ) async {
-        do {
-            try await Self.runReceiveLoop(
-                connection,
-                sink: sink,
-                obfuscator: obfuscator
-            )
-        } catch {
-
-        }
-        sink.finished()
-    }
-
-    private static func runReceiveLoop(
-        _ connection: NetworkConnection<UDP>,
-        sink: QUICDatagramEngineSink,
-        obfuscator: QUICPacketObfuscator?
-    ) async throws {
-        do {
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                for _ in 0..<receiveConcurrency {
-                    group.addTask {
-                        try await Self.drainReceives(
-                            connection,
-                            sink: sink,
-                            obfuscator: obfuscator
-                        )
-                    }
+        terminated: OneShotLatch
+    ) {
+        connection.receiveMessage { content, _, _, error in
+            if let error {
+                if terminated.claim() {
+                    sink.failed(AnywhereError.errnoCode(from: error))
+                    sink.finished()
                 }
-                try await group.next()
+                return
             }
-        } catch {
-            sink.failed(AnywhereError.errnoCode(from: error))
-            throw error
-        }
-    }
-
-    @concurrent
-    private static func drainReceives(
-        _ connection: NetworkConnection<UDP>,
-        sink: QUICDatagramEngineSink,
-        obfuscator: QUICPacketObfuscator?
-    ) async throws {
-        while true {
-            let message = try await connection.receive()
-            var packet = message.content
-            guard !packet.isEmpty else { continue }
-            if let obfuscator {
-                guard let opened = obfuscator.open(packet) else { continue }
-                packet = opened
+            if let content, !content.isEmpty {
+                if let obfuscator {
+                    if let opened = obfuscator.open(content) {
+                        sink.packet(opened)
+                    }
+                } else {
+                    sink.packet(content)
+                }
             }
-            sink.packet(packet)
+            guard !terminated.isClaimed else { return }
+            Self.armReceive(on: connection, obfuscator: obfuscator, sink: sink, terminated: terminated)
         }
     }
 }
