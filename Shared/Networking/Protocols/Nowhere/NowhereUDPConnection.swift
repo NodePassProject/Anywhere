@@ -9,7 +9,6 @@ import Foundation
 import Synchronization
 
 actor NowhereUDPConnection {
-
     private let session: NowhereSession
     private let destination: NowhereProtocol.Target
     private let flowHeader: NowhereProtocol.FlowHeader
@@ -147,7 +146,7 @@ actor NowhereUDPConnection {
         }
     }
 
-    // MARK: - Demux feed (nonisolated; driven on the QUIC queue)
+    // MARK: - Demux feed
 
     nonisolated func handleControlStreamData(_ data: Data, fin: Bool) {
         if !data.isEmpty { controlInbox.yield(Data(data)) }

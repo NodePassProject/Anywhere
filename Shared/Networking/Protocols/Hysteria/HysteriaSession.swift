@@ -144,7 +144,7 @@ nonisolated final class HysteriaSession: Sendable {
                 }
             }
 
-            let opened: Bool = await quic.run { self.openControlAndAuthOnQueue() }
+            let opened = self.openControlAndAuth()
             if !opened {
                 failSession(AnywhereError.proxy(.hysteria, .connectionClosed(detail: "Failed to open auth stream")))
                 return
@@ -164,18 +164,18 @@ nonisolated final class HysteriaSession: Sendable {
         }
     }
 
-    private func openControlAndAuthOnQueue() -> Bool {
+    private func openControlAndAuth() -> Bool {
         if let sid = quic.openUniStream() {
             var payload = Data()
             payload.append(0x00) // stream type = control
             payload.append(Self.clientSettingsFrame())
-            quic.writeStreamOnQueue(sid, data: payload)
+            quic.submitStreamWrite(sid, data: payload)
         }
         if let encoderStreamID = quic.openUniStream() {
-            quic.writeStreamOnQueue(encoderStreamID, data: Data([0x02]))
+            quic.submitStreamWrite(encoderStreamID, data: Data([0x02]))
         }
         if let decoderStreamID = quic.openUniStream() {
-            quic.writeStreamOnQueue(decoderStreamID, data: Data([0x03]))
+            quic.submitStreamWrite(decoderStreamID, data: Data([0x03]))
         }
 
         guard let sid = quic.openBidiStream() else { return false }
@@ -193,7 +193,7 @@ nonisolated final class HysteriaSession: Sendable {
         let frame = HysteriaHTTP3Codec.encodeAuthRequestFrame(
             authority: "hysteria", path: "/auth", extraHeaders: extraHeaders
         )
-        quic.writeStreamOnQueue(sid, data: frame)
+        quic.submitStreamWrite(sid, data: frame)
         return true
     }
 
@@ -379,7 +379,7 @@ nonisolated final class HysteriaSession: Sendable {
 
     func openTCPStream(for connection: HysteriaConnection) async throws -> Int64 {
         enum Result { case notReady; case openFailed; case ok(Int64) }
-        let result: Result = await quic.run {
+        let result: Result = {
             guard self.state.withLock({ $0.phase == .ready }) else { return .notReady }
             guard let sid = self.quic.openBidiStream() else { return .openFailed }
             let accepted: Bool = self.state.withLock { session in
@@ -392,7 +392,7 @@ nonisolated final class HysteriaSession: Sendable {
                 return .notReady
             }
             return .ok(sid)
-        }
+        }()
         switch result {
         case .notReady:
             throw AnywhereError.proxy(.hysteria, .notReady)

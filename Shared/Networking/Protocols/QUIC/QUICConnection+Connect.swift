@@ -14,44 +14,15 @@ private struct WeakConnectionBox: Sendable {
     weak var value: QUICConnection?
 }
 
-extension QUICConnection {
+extension QUICConnectionCore {
 
     // MARK: Connect
-
-    nonisolated func connect() async throws {
-        let dialAttempt = ConnectionMetrics.currentAttempt
-        let resolvedIPs: [String] = transport == nil ? await DNSResolver.shared.resolveAll(host) : []
-        try await bridge.runParkedThrowing(host: self) { me, continuation in
-            guard me.phase == .idle else {
-                continuation.resume(throwing: AnywhereError.quic(.connectionFailed(detail: "Invalid state")))
-                return
-            }
-            me.transition(to: .connecting)
-            me.dialAttempt = dialAttempt
-            me.connectContinuation = continuation
-            me.setupUDP(resolvedIPs: resolvedIPs)
-        }
-    }
 
     func finishConnect(_ error: Error?) {
         guard let continuation = connectContinuation else { return }
         connectContinuation = nil
         if let error { continuation.resume(throwing: error) } else { continuation.resume() }
     }
-
-    nonisolated func exportKeyingMaterial(label: String, context: Data, length: Int) async throws -> Data {
-        let result: Result<Data, Error> = await bridge.run { [weak self] in
-            guard let self else { return .failure(AnywhereError.quic(.closed(graceful: false))) }
-            return self.assumeIsolated { connection in
-                guard connection.phase == .connected, let tls = connection.tlsHandler else {
-                    return .failure(AnywhereError.quic(.closed(graceful: false)))
-                }
-                return Result { try tls.exportKeyingMaterial(label: label, context: context, length: length) }
-            }
-        }
-        return try result.get()
-    }
-
 
     // MARK: UDP
 
@@ -69,10 +40,10 @@ extension QUICConnection {
             guard remoteAddr.ss_family != 0 else {
                 throw AnywhereError.quic(.connectionFailed(detail: "DNS lookup failed for \(host)"))
             }
-            let carrier = QUICDatagramCarrier(bridge: bridge, obfuscator: obfuscator)
+            let carrier = QUICDatagramCarrier(obfuscator: obfuscator)
             let remote = remoteAddr
             var local = localAddr
-            try carrier.assumeIsolated { try $0.connect(remoteAddr: remote, localAddr: &local) }
+            try carrier.connect(remoteAddr: remote, localAddr: &local)
             localAddr = local
             self.carrier = carrier
             try initializeQUIC()
@@ -100,7 +71,6 @@ extension QUICConnection {
 
     func startTransportIO(transport: QUICDatagramTransport) {
         let localAddr = self.localAddr
-        let bridge = self.bridge
         let obfuscator = self.obfuscator
 
         var sealStream: AsyncStream<Data>?
@@ -113,10 +83,10 @@ extension QUICConnection {
             sealStream = stream
         }
 
-        let host = WeakConnectionBox(value: self)
+        let host = WeakConnectionBox(value: owner)
         rootTask = Task {
             await Self.runTransportDriver(
-                host: host, bridge: bridge, transport: transport, obfuscator: obfuscator,
+                host: host, transport: transport, obfuscator: obfuscator,
                 sealStream: sealStream, localAddr: localAddr
             )
         }
@@ -125,7 +95,6 @@ extension QUICConnection {
     @concurrent
     private static func runTransportDriver(
         host: WeakConnectionBox,
-        bridge: QUICConcurrencyBridge,
         transport: QUICDatagramTransport,
         obfuscator: QUICPacketObfuscator?,
         sealStream: AsyncStream<Data>?,
@@ -135,7 +104,6 @@ extension QUICConnection {
             group.addTask {
                 await Self.runTransportReceiveLoop(
                     host: host,
-                    bridge: bridge,
                     transport: transport,
                     obfuscator: obfuscator,
                     localAddr: localAddr
@@ -151,7 +119,6 @@ extension QUICConnection {
 
     private static func runTransportReceiveLoop(
         host: WeakConnectionBox,
-        bridge: QUICConcurrencyBridge,
         transport: QUICDatagramTransport,
         obfuscator: QUICPacketObfuscator?,
         localAddr: sockaddr_storage
@@ -159,7 +126,7 @@ extension QUICConnection {
         do {
             while true {
                 guard let data = try await transport.receiveDatagram() else {
-                    bridge.enqueue { host.value?.assumeIsolated { $0.handleTransportClosed(nil) } }
+                    host.value?.update { $0.handleTransportClosed(nil) }
                     return
                 }
                 guard !data.isEmpty else { continue }
@@ -169,10 +136,10 @@ extension QUICConnection {
                     packet = opened
                 }
                 let datagram = packet
-                bridge.enqueue { host.value?.assumeIsolated { $0.handleReceivedPacket(datagram, localAddr: localAddr) } }
+                host.value?.update { $0.handleReceivedPacket(datagram, localAddr: localAddr) }
             }
         } catch {
-            bridge.enqueue { host.value?.assumeIsolated { $0.handleTransportClosed(error) } }
+            host.value?.update { $0.handleTransportClosed(error) }
         }
     }
 
@@ -213,12 +180,12 @@ extension QUICConnection {
     }
 
     func closeCarrier() {
-        carrier?.assumeIsolated { $0.close() }
+        carrier?.close()
         carrier = nil
         if case .proactiveProbing(let target, _) = migration {
-            target.assumeIsolated { $0.close() }
+            target.close()
         } else if case .proactiveValidating(let target, _) = migration {
-            target.assumeIsolated { $0.close() }
+            target.close()
         }
         setMigration(.none)
     }
@@ -308,7 +275,6 @@ extension QUICConnection {
 
     func initializeQUIC() throws {
         let tls = QUICTLSHandler(serverName: serverName, alpn: alpn)
-        tlsHandler = tls
         let payloadSize = transport != nil ? Self.chainedMaxUDPPayload : directMaxUDPPayload
         var probes = Self.pmtudProbes.filter { $0 <= payloadSize }
         if let maximumProbe = UInt16(exactly: payloadSize),
@@ -339,7 +305,7 @@ extension QUICConnection {
             maxDatagramFrameSize: datagramsEnabled ? Self.maxDatagramFrameSize : 0
         )
         let controller = tuning.makeCongestionController()
-        brutalCC = controller as? QUICBrutalCongestionController
+        usesBrutalCC = controller is QUICBrutalCongestionController
         let engine = AnywhereQUIC.QUICConnection(
             settings: settings,
             transportParameters: parameters,
@@ -350,23 +316,7 @@ extension QUICConnection {
             now: currentTimestamp()
         )
         self.engine = engine
+        retransmitTimer = makeRetransmitTimer()
         txBuffer = [UInt8](repeating: 0, count: engine.settings.maxSendUDPPayloadSize)
-    }
-
-    nonisolated func setBrutalBandwidth(_ bps: UInt64) {
-        bridge.enqueue { [weak self] in
-            self?.assumeIsolated { $0.brutalCC?.bytesPerSecond = bps }
-        }
-    }
-
-    nonisolated func uninstallBrutalCC() {
-        bridge.enqueue { [weak self] in
-            self?.assumeIsolated { me in
-                guard let engine = me.engine, me.brutalCC != nil else { return }
-                me.brutalCC = nil
-                engine.setCongestionController(QUICCubicCongestionController(), now: me.currentTimestamp())
-                me.scheduleFlush()
-            }
-        }
     }
 }

@@ -7,174 +7,10 @@
 
 import Foundation
 import Synchronization
-import Network
 import AnywhereQUIC
 
-nonisolated private let logger = AnywhereLogger(category: "QUICConnection")
-
-// MARK: - QUICPacketObfuscator
-
-nonisolated protocol QUICPacketObfuscator: AnyObject, Sendable {
-    func seal(_ packet: UnsafeRawBufferPointer) -> [Data]
-    func open(_ datagram: Data) -> Data?
-}
-
-// MARK: - QUICConnection
-
-actor QUICConnection {
-
-    nonisolated var unownedExecutor: UnownedSerialExecutor {
-        bridge.executor.asUnownedSerialExecutor()
-    }
-
-    enum Phase: CustomStringConvertible, PhaseTransitionable {
-        case idle, connecting, handshaking, connected, closed
-
-        var description: String {
-            switch self {
-            case .idle: "idle"
-            case .connecting: "connecting"
-            case .handshaking: "handshaking"
-            case .connected: "connected"
-            case .closed: "closed"
-            }
-        }
-
-        static func canTransition(from old: Phase, to new: Phase) -> Bool {
-            switch (old, new) {
-            case (.idle, .connecting),
-                 (.connecting, .handshaking),
-                 (.handshaking, .connected):
-                return true
-            case (_, .closed):
-                return old != .closed
-            default:
-                return false
-            }
-        }
-    }
-
-    // MARK: Properties
-
-    let host: String
-    let port: UInt16
-    let serverName: String
-    let alpn: [String]
-    let tuning: QUICTuning
-    let directMaxUDPPayload: Int
-
-    let transport: QUICDatagramTransport?
-
-    let obfuscator: QUICPacketObfuscator?
-
-    private(set) var phase: Phase = .idle
-
-    @discardableResult
-    func transition(to new: Phase) -> Bool {
-        let old = phase
-        guard Phase.transition(&phase, to: new) else {
-            if new != .closed {
-                logger.error("[QUIC] Invalid transition \(old) → \(new) for \(host); ignored")
-            }
-            return false
-        }
-        return true
-    }
-
-    let bridge: QUICConcurrencyBridge
-
-    nonisolated func enqueue(_ work: @escaping @convention(block) @Sendable () -> Void) {
-        bridge.enqueue(work)
-    }
-
-    nonisolated func run<T>(_ body: @escaping @Sendable () -> T) async -> T {
-        await bridge.run(body)
-    }
-
-    nonisolated func run<T>(_ body: @escaping @Sendable () -> Result<T, Error>) async throws -> T {
-        try await bridge.run(body).get()
-    }
-
-    // MARK: Reentrancy
-
-    private let _connHeld = Atomic<Bool>(false)
-    nonisolated var connHeld: Bool { _connHeld.load(ordering: .relaxed) }
-
-    nonisolated func enterConnHeld() -> Bool {
-        let previous = _connHeld.load(ordering: .relaxed)
-        _connHeld.store(true, ordering: .relaxed)
-        return previous
-    }
-
-    nonisolated func exitConnHeld(_ previous: Bool) {
-        _connHeld.store(previous, ordering: .relaxed)
-    }
-
-    var engine: AnywhereQUIC.QUICConnection?
-
-    var inReadPkt = false
-
-    var flushScheduled = false
-
-    var carrier: QUICDatagramCarrier?
-
-    var rootTask: Task<Void, Never>?
-
-    var transportSealContinuation: AsyncStream<Data>.Continuation?
-
-    var localAddr = sockaddr_storage()
-    var remoteAddr = sockaddr_storage()
-    var addrLen: Int = MemoryLayout<sockaddr_in>.size
-
-    // MARK: Migration state
-
-    enum Migration: PhaseTransitionable {
-        case none
-        case proactiveProbing(target: QUICDatagramCarrier, localAddr: sockaddr_storage)
-        case proactiveValidating(target: QUICDatagramCarrier, localAddr: sockaddr_storage)
-        case reactiveValidating(localAddr: sockaddr_storage)
-
-        var label: String {
-            switch self {
-            case .none: "none"
-            case .proactiveProbing: "proactiveProbing"
-            case .proactiveValidating: "proactiveValidating"
-            case .reactiveValidating: "reactiveValidating"
-            }
-        }
-
-        static func canTransition(from old: Migration, to new: Migration) -> Bool {
-            switch (old, new) {
-            case (_, .none),
-                 (.none, .proactiveProbing),
-                 (.none, .reactiveValidating),
-                 (.proactiveProbing, .proactiveValidating):
-                return true
-            default:
-                return false
-            }
-        }
-    }
-    var migration: Migration = .none
-    var migrationCounter: UInt8 = 0
-    var migrationFailures = 0
-    static let maxMigrationFailures = 3
-    var proactiveDeadlineTask: Task<Void, Never>?
-    static let proactiveReadyTimeout: TimeInterval = 5
-
-    var tlsHandler: QUICTLSHandler?
-
-    var retransmitTimer: BridgeDeadlineTimer?
-
-    var connectContinuation: CheckedContinuation<Void, Error>?
-
-    var dialAttempt: ConnectionMetrics.Attempt?
-
-    enum StreamTerminationCause {
-        case closed
-        case reset
-    }
-
+nonisolated final class QUICConnection: Sendable {
+    enum StreamTerminationCause: Sendable { case closed, reset }
     struct Handlers: Sendable {
         var streamData: (@Sendable (Int64, Data, Bool) -> Void)?
         var streamTermination: (@Sendable (Int64, Error?, StreamTerminationCause) -> Void)?
@@ -182,121 +18,160 @@ actor QUICConnection {
         var connectionClosed: (@Sendable (Error) -> Void)?
         var bidiCredit: (@Sendable (UInt64) -> Void)?
     }
-    let handlers = Mutex(Handlers())
 
-    var brutalCC: QUICBrutalCongestionController?
+    let handlers: QUICHandlerStore
+    private let state: QUICState<QUICConnectionCore>
+    private let host: String
+    private let usesTransport: Bool
+    static let maxUDPPayload = QUICConnectionCore.maxUDPPayload
+    static let maxPendingDatagrams = QUICConnectionCore.maxPendingDatagrams
 
-    let datagramsEnabled: Bool
-    static let maxDatagramFrameSize: UInt64 = 65535
-
-    var streamSendQueues: [Int64: StreamSendQueue] = [:]
-    var streamPumpCursor: Int64 = -1
-
-    final class StreamSendChunk {
-        let data: Data
-        let fin: Bool
-        var offset = 0
-        var continuation: CheckedContinuation<Void, Error>?
-
-        init(data: Data, fin: Bool, continuation: CheckedContinuation<Void, Error>?) {
-            self.data = data
-            self.fin = fin
-            self.continuation = continuation
-        }
-    }
-
-    final class StreamSendQueue {
-        var chunks: [StreamSendChunk] = []
-        var finQueued = false
-        var isFailed = false
-
-        func append(_ chunk: StreamSendChunk) {
-            chunks.append(chunk)
-            if chunk.fin { finQueued = true }
-        }
-
-        func fail() -> [CheckedContinuation<Void, Error>] {
-            isFailed = true
-            let continuations = chunks.compactMap(\.continuation)
-            chunks.removeAll()
-            return continuations
-        }
-    }
-
-    struct PendingDatagram {
-        let data: Data
-        let latch: DatagramBatchLatch?
-    }
-    var pendingDatagrams: [PendingDatagram] = []
-    static let maxPendingDatagrams = 1024
-    static let maxQueuedTransportDatagrams = 512
-
-    final class DatagramBatchLatch {
-        private var remaining: Int
-        private var firstError: Error?
-        private var continuation: CheckedContinuation<Void, Error>?
-
-        init(count: Int, continuation: CheckedContinuation<Void, Error>) {
-            self.remaining = count
-            self.continuation = continuation
-        }
-
-        func settle(_ error: Error?) {
-            if let error, firstError == nil { firstError = error }
-            remaining -= 1
-            guard remaining <= 0, let continuation else { return }
-            self.continuation = nil
-            if let firstError { continuation.resume(throwing: firstError) } else { continuation.resume() }
-        }
-    }
-    var didWarnDatagramOverflow = false
-
-    static let maxUDPPayload = 1452
-    static let chainedMaxUDPPayload = 1200
-
-    var txBuffer: [UInt8] = []
-
-    static let pmtudProbes: [UInt16] = [1350, 1400, 1452]
-
-    // MARK: Init
-
-    nonisolated var isOnQueue: Bool { bridge.isOnQueue }
-
-    init(host: String, port: UInt16, serverName: String? = nil, alpn: [String],
-         datagramsEnabled: Bool = false, tuning: QUICTuning,
-         obfuscator: QUICPacketObfuscator? = nil,
-         directMaxUDPPayload: Int = QUICConnection.maxUDPPayload,
-         transport: QUICDatagramTransport? = nil) {
+    init(
+        host: String,
+        port: UInt16,
+        serverName: String? = nil,
+        alpn: [String],
+        datagramsEnabled: Bool = false,
+        tuning: QUICTuning,
+        obfuscator: QUICPacketObfuscator? = nil,
+        directMaxUDPPayload: Int = QUICConnection.maxUDPPayload,
+        transport: QUICDatagramTransport? = nil
+    ) {
         self.host = host
-        self.port = port
-        self.serverName = serverName ?? host
-        self.alpn = alpn
-        self.datagramsEnabled = datagramsEnabled
-        self.tuning = tuning
-        self.obfuscator = obfuscator
-        self.directMaxUDPPayload = directMaxUDPPayload
-        self.transport = transport
-        self.bridge = QUICConcurrencyBridge()
-    }
-
-    deinit {
-        rootTask?.cancel()
-    }
-
-    // MARK: Timer state
-
-    var lastScheduledExpiry: UInt64 = 0
-
-    // MARK: Utilities
-
-    func currentTimestamp() -> QUICInstant {
-        .now
-    }
-
-    func quicPath(local: sockaddr_storage) -> QUICPath {
-        QUICPath(
-            local: QUICSocketAddress(local, length: addrLen),
-            remote: QUICSocketAddress(remoteAddr, length: addrLen)
+        usesTransport = transport != nil
+        let handlers = QUICHandlerStore()
+        self.handlers = handlers
+        state = QUICState(
+            QUICConnectionCore(
+                host: host,
+                port: port,
+                serverName: serverName,
+                alpn: alpn,
+                datagramsEnabled: datagramsEnabled,
+                tuning: tuning,
+                obfuscator: obfuscator,
+                directMaxUDPPayload: directMaxUDPPayload,
+                transport: transport,
+                handlers: handlers
+            )
         )
+        state.update { $0.owner = self }
+    }
+
+    func update<T: Sendable>(_ body: (QUICConnectionCore) -> T) -> T { state.update(body) }
+
+    func connect() async throws {
+        let attempt = ConnectionMetrics.currentAttempt
+        let resolved = usesTransport ? [] : await DNSResolver.shared.resolveAll(host)
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            update { core in
+                guard core.phase == .idle else {
+                    continuation.resume(throwing: AnywhereError.quic(.connectionFailed(detail: "Invalid state")))
+                    return
+                }
+                core.transition(to: .connecting)
+                core.dialAttempt = attempt
+                core.connectContinuation = continuation
+                core.setupUDP(resolvedIPs: resolved)
+            }
+        }
+    }
+
+    func exportKeyingMaterial(label: String, context: Data, length: Int) async throws -> Data {
+        try state.read { core in
+            guard core.phase == .connected, let engine = core.engine else {
+                throw AnywhereError.quic(.closed(graceful: false))
+            }
+            return try engine.exportKeyingMaterial(label: label, context: context, length: length)
+        }
+    }
+
+    func close(error: Error? = nil) { update { $0.performTeardown(error: error) } }
+
+    func openBidiStream() -> Int64? { update { $0.openStream(bidirectional: true) } }
+    func openUniStream() -> Int64? { update { $0.openStream(bidirectional: false) } }
+    var availableBidiStreams: UInt64 { state.read { $0.engine?.availableBidirectionalStreams ?? 0 } }
+    var maxDatagramPayloadSize: Int { state.read { $0.engine?.maxDatagramPayloadSize ?? 0 } }
+    func currentMaxDatagramPayloadSize() async -> Int { maxDatagramPayloadSize }
+
+    func extendStreamOffset(_ streamID: Int64, count: Int) {
+        guard count > 0 else { return }
+        update { $0.extendStreamOffset(streamID, count: count) }
+    }
+    func shutdownStream(_ streamID: Int64, appErrorCode: UInt64) {
+        update { core in
+            guard let engine = core.engine, streamID >= 0 else { return }
+            engine.shutdownStream(QUICStreamID(rawValue: UInt64(streamID)), errorCode: appErrorCode)
+            core.failStreamSendQueue(streamId: streamID, error: AnywhereError.quic(.closed(graceful: false)))
+            core.scheduleFlush()
+        }
+    }
+    func writeStream(_ streamID: Int64, data: Data, fin: Bool = false) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            update { core in
+                guard core.phase == .connected, core.engine != nil else {
+                    continuation.resume(throwing: AnywhereError.quic(.closed(graceful: false)))
+                    return
+                }
+                core.appendStreamWrite(streamID, data: data, fin: fin, continuation: continuation)
+            }
+        }
+    }
+    func submitStreamWrite(_ streamID: Int64, data: Data, fin: Bool = false) {
+        update { core in
+            guard core.phase == .connected, core.engine != nil else { return }
+            core.appendStreamWrite(streamID, data: data, fin: fin, continuation: nil)
+        }
+    }
+    func writeDatagrams(_ datagrams: [Data]) async throws {
+        try await writeDatagrams(datagrams, atomically: false)
+    }
+    func writeDatagramsAtomically(_ datagrams: [Data]) async throws {
+        try await writeDatagrams(datagrams, atomically: true)
+    }
+    private func writeDatagrams(_ datagrams: [Data], atomically: Bool) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            update { core in
+                guard core.phase == .connected, core.engine != nil else {
+                    continuation.resume(throwing: AnywhereError.quic(.closed(graceful: false)))
+                    return
+                }
+                if datagrams.isEmpty { continuation.resume(); return }
+                if atomically, !Self.canEnqueueDatagramBatch(
+                    pendingCount: core.pendingDatagrams.count + (core.engine?.pendingDatagramCount ?? 0),
+                    batchCount: datagrams.count
+                ) {
+                    continuation.resume(throwing: AnywhereError.quic(.datagramQueueFull))
+                    return
+                }
+                let latch = QUICConnectionCore.DatagramBatchLatch(count: datagrams.count, continuation: continuation)
+                let pending = datagrams.map { QUICConnectionCore.PendingDatagram(data: $0, latch: latch) }
+                if atomically { core.pendingDatagrams.append(contentsOf: pending) }
+                else { core.enqueueDatagrams(pending) }
+                core.scheduleFlush()
+            }
+        }
+    }
+    static func canEnqueueDatagramBatch(pendingCount: Int, batchCount: Int) -> Bool {
+        guard pendingCount >= 0, batchCount >= 0, pendingCount <= maxPendingDatagrams else { return false }
+        return batchCount <= maxPendingDatagrams - pendingCount
+    }
+    func setBrutalBandwidth(_ bytesPerSecond: UInt64) {
+        _ = update { $0.engine?.setBrutalBandwidth(bytesPerSecond) }
+    }
+    func uninstallBrutalCC() {
+        update { core in
+            guard core.usesBrutalCC, let engine = core.engine else { return }
+            core.usesBrutalCC = false
+            engine.setCongestionController(QUICCubicCongestionController(), now: core.currentTimestamp())
+            core.scheduleFlush()
+        }
+    }
+}
+
+nonisolated final class QUICHandlerStore: Sendable {
+    private let storage = Mutex(QUICConnection.Handlers())
+    func withLock<T: Sendable>(_ body: (inout QUICConnection.Handlers) -> T) -> T {
+        storage.withLock { body(&$0) }
     }
 }

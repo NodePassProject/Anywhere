@@ -15,8 +15,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/NodePassProject/AnywhereQUIC",
       "state" : {
-        "revision" : "6101dc386c54ac37484432a3527ff7ab86024b4b",
-        "version" : "1.0.0"
+        "revision" : "fac6a32f77fa82981a1cc814434c4b73546403a9",
+        "version" : "2.0.0"
       }
     },
     {

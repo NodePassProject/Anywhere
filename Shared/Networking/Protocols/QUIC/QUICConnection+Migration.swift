@@ -12,7 +12,7 @@ import AnywhereQUIC
 
 nonisolated private let logger = AnywhereLogger(category: "QUICConnection")
 
-extension QUICConnection {
+extension QUICConnectionCore {
 
     enum PathValidationResult {
         case success, failure, aborted
@@ -80,11 +80,11 @@ extension QUICConnection {
             return
         }
 
-        let newCarrier = QUICDatagramCarrier(bridge: bridge, obfuscator: obfuscator)
+        let newCarrier = QUICDatagramCarrier(obfuscator: obfuscator)
         var placeholder = sockaddr_storage()
         let remote = remoteAddr
         do {
-            try newCarrier.assumeIsolated { try $0.connect(remoteAddr: remote, localAddr: &placeholder) }
+            try newCarrier.connect(remoteAddr: remote, localAddr: &placeholder)
         } catch {
             close(error: error)
             return
@@ -95,7 +95,7 @@ extension QUICConnection {
             try engine.migrate(to: quicPath(local: newLocal), immediately: true, now: currentTimestamp())
         } catch {
             logger.warning("[QUIC] Reactive migration rejected (\(error)); reconnecting")
-            newCarrier.assumeIsolated { $0.close() }
+            newCarrier.close()
             migrationFailures += 1
             close(error: AnywhereError.quic(.connectionFailed(detail: "migration rejected: \(error)")))
             return
@@ -106,7 +106,7 @@ extension QUICConnection {
         carrier = newCarrier
         localAddr = newLocal
         armActiveCarrier(newCarrier, localAddr: newLocal)
-        oldCarrier?.assumeIsolated { $0.close() }
+        oldCarrier?.close()
         logger.info("[QUIC] Reactive migration initiated; validating new path")
         writeToUDP()
         rescheduleTimer()
@@ -116,76 +116,74 @@ extension QUICConnection {
         guard migrationEnabled, phase == .connected, case .none = migration,
               migrationFailures < Self.maxMigrationFailures,
               engine != nil,
-              let oldType = carrier?.assumeIsolated({ $0.currentInterfaceType }) else { return }
+              let oldType = carrier?.currentInterfaceType else { return }
 
-        let target = QUICDatagramCarrier(bridge: bridge, obfuscator: obfuscator)
+        let target = QUICDatagramCarrier(obfuscator: obfuscator)
         var placeholder = sockaddr_storage()
         let remote = remoteAddr
         do {
-            try target.assumeIsolated { try $0.connect(remoteAddr: remote, localAddr: &placeholder) }
+            try target.connect(remoteAddr: remote, localAddr: &placeholder)
         } catch {
-            target.assumeIsolated { $0.close() }
+            target.close()
             return
         }
 
         let newLocal = makeMigrationLocalAddr()
         setMigration(.proactiveProbing(target: target, localAddr: newLocal))
 
-        armReceive(target, localAddr: newLocal) { [weak self] _ in
-            self?.assumeIsolated { $0.abortProactiveIfNotValidating() }
+        armReceive(target, localAddr: newLocal) { [weak owner, weak target] _ in
+            guard let target else { return }
+            owner?.update { $0.abortProactiveIfNotValidating(target: target) }
         }
-        target.assumeIsolated {
-            $0.onPathDown = { [weak self] in
-                self?.assumeIsolated { $0.abortProactiveIfNotValidating() }
-            }
+        target.onPathDown = { [weak owner, weak target] in
+            guard let target else { return }
+            owner?.update { $0.abortProactiveIfNotValidating(target: target) }
         }
+        scheduleProactiveDeadline(target: target, validating: false)
+        target.onReady = { [weak owner, weak target] in
+            guard let target else { return }
+            owner?.update { $0.beginProactiveValidation(target: target, oldType: oldType) }
+        }
+    }
 
-        proactiveDeadlineTask = Task { [weak self, weak target] in
-            try? await Task.sleep(for: .seconds(Self.proactiveReadyTimeout))
-            guard !Task.isCancelled, let self, let target else { return }
-            self.bridge.enqueue {
-                self.assumeIsolated { me in
-                    guard case .proactiveProbing(let current, _) = me.migration, current === target else { return }
-                    logger.warning("[QUIC] Proactive migration target not ready in \(Int(Self.proactiveReadyTimeout))s; staying put")
-                    me.abortProactiveMigration(countAsFailure: false)
+    private func scheduleProactiveDeadline(target: QUICDatagramCarrier, validating: Bool) {
+        proactiveDeadlineTask?.cancel()
+        proactiveDeadlineTask = Task { [weak owner, weak target] in
+            do { try await Task.sleep(for: .seconds(Self.proactiveReadyTimeout)) }
+            catch { return }
+            guard !Task.isCancelled, let target else { return }
+            owner?.update { core in
+                switch core.migration {
+                case .proactiveProbing(let current, _) where !validating && current === target:
+                    logger.warning("[QUIC] Proactive migration target not ready; staying put")
+                    core.abortProactiveMigration(countAsFailure: false)
+                case .proactiveValidating(let current, _) where validating && current === target:
+                    logger.warning("[QUIC] Proactive migration path validation timed out; staying put")
+                    core.abortProactiveMigration(countAsFailure: true)
+                default: break
                 }
             }
         }
+    }
 
-        target.assumeIsolated { $0.onReady = { [weak self, weak target] in
-            guard let self else { return }
-            self.assumeIsolated { me in
-                guard let target,
-                      case .proactiveProbing(let current, let migratingLocal) = me.migration, current === target,
-                      let engine = me.engine,
-                      let newType = target.assumeIsolated({ $0.currentInterfaceType }), newType != oldType else {
-                    me.abortProactiveIfNotValidating()
-                    return
-                }
-                do {
-                    try engine.migrate(to: me.quicPath(local: migratingLocal), immediately: false, now: me.currentTimestamp())
-                } catch {
-                    logger.warning("[QUIC] Proactive migration rejected (\(error)); staying put")
-                    me.abortProactiveMigration(countAsFailure: true)
-                    return
-                }
-                me.setMigration(.proactiveValidating(target: target, localAddr: migratingLocal))
-                me.proactiveDeadlineTask = Task { [weak self, weak target] in
-                    try? await Task.sleep(for: .seconds(Self.proactiveReadyTimeout))
-                    guard !Task.isCancelled, let self, let target else { return }
-                    self.bridge.enqueue {
-                        self.assumeIsolated { me in
-                            guard case .proactiveValidating(let current, _) = me.migration, current === target else { return }
-                            logger.warning("[QUIC] Proactive migration path validation timed out; staying put")
-                            me.abortProactiveMigration(countAsFailure: true)
-                        }
-                    }
-                }
-                logger.info("[QUIC] Proactive migration: validating better path")
-                me.writeToUDP()
-                me.rescheduleTimer()
-            }
-        } }
+    private func beginProactiveValidation(target: QUICDatagramCarrier, oldType: NWInterface.InterfaceType) {
+        guard case .proactiveProbing(let current, let migratingLocal) = migration, current === target else { return }
+        guard let engine, let newType = target.currentInterfaceType, newType != oldType else {
+            abortProactiveIfNotValidating()
+            return
+        }
+        do {
+            try engine.migrate(to: quicPath(local: migratingLocal), immediately: false, now: currentTimestamp())
+        } catch {
+            logger.warning("[QUIC] Proactive migration rejected (\(error)); staying put")
+            abortProactiveMigration(countAsFailure: true)
+            return
+        }
+        setMigration(.proactiveValidating(target: target, localAddr: migratingLocal))
+        scheduleProactiveDeadline(target: target, validating: true)
+        logger.info("[QUIC] Proactive migration: validating better path")
+        writeToUDP()
+        rescheduleTimer()
     }
 
     func abortProactiveMigration(countAsFailure: Bool) {
@@ -194,7 +192,7 @@ extension QUICConnection {
         }
         switch migration {
         case .proactiveProbing(let target, _), .proactiveValidating(let target, _):
-            target.assumeIsolated { $0.close() }
+            target.close()
             setMigration(.none)
             if countAsFailure { migrationFailures += 1 }
         case .none, .reactiveValidating:
@@ -202,8 +200,8 @@ extension QUICConnection {
         }
     }
 
-    func abortProactiveIfNotValidating() {
-        guard case .proactiveProbing = migration else { return }
+    func abortProactiveIfNotValidating(target: QUICDatagramCarrier? = nil) {
+        guard case .proactiveProbing(let current, _) = migration, target == nil || current === target else { return }
         abortProactiveMigration(countAsFailure: false)
     }
 
@@ -217,14 +215,14 @@ extension QUICConnection {
             guard pathBelongsToMigration(pathLocal, expected: migratingLocal) else { return }
             switch result {
             case .success:
-                if !target.assumeIsolated({ $0.isUsable }) {
+                if !target.isUsable {
                     logger.warning("[QUIC] Migration target died during validation; adopting committed path, expecting path-down")
                 }
                 let old = carrier
                 carrier = target
                 localAddr = migratingLocal
                 armActiveCarrier(target, localAddr: migratingLocal)
-                old?.assumeIsolated { $0.close() }
+                old?.close()
                 setMigration(.none)
                 migrationFailures = 0
                 logger.info("[QUIC] Migration validated; new path active")
@@ -278,11 +276,11 @@ extension QUICConnection {
             if let transportSealContinuation {
                 transportSealContinuation.yield(datagram)
             } else {
-                transport.sendDatagram(datagram)
+                publish { transport.sendDatagram(datagram) }
             }
             return
         }
         guard let carrier else { return }
-        carrier.assumeIsolated { $0.send(datagram) }
+        carrier.send(datagram)
     }
 }

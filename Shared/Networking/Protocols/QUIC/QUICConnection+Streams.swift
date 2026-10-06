@@ -12,128 +12,28 @@ import AnywhereQUIC
 
 nonisolated private let logger = AnywhereLogger(category: "QUICConnection")
 
-extension QUICConnection {
+extension QUICConnectionCore {
 
-    // MARK: Streams
-
-    nonisolated func openBidiStream() -> Int64? {
-        assumeIsolated { me in
-            guard me.phase == .connected, let engine = me.engine else { return nil }
-            return try? Int64(engine.openStream(bidirectional: true).rawValue)
-        }
+    func openStream(bidirectional: Bool) -> Int64? {
+        guard phase == .connected, let engine else { return nil }
+        return try? Int64(engine.openStream(bidirectional: bidirectional).rawValue)
     }
 
-    nonisolated var availableBidiStreams: UInt64 {
-        assumeIsolated { me in
-            guard me.phase == .connected, let engine = me.engine else { return 0 }
-            return engine.availableBidirectionalStreams
-        }
-    }
-
-    nonisolated func openUniStream() -> Int64? {
-        assumeIsolated { me in
-            guard me.phase == .connected, let engine = me.engine else { return nil }
-            return try? Int64(engine.openStream(bidirectional: false).rawValue)
-        }
-    }
-
-    nonisolated func extendStreamOffset(_ streamId: Int64, count: Int) {
-        guard count > 0 else { return }
-        if isOnQueue {
-            assumeIsolated { $0.extendStreamOffsetOnQueue(streamId, count: count) }
-        } else {
-            bridge.enqueue { [weak self] in
-                self?.assumeIsolated { $0.extendStreamOffsetOnQueue(streamId, count: count) }
-            }
-        }
-    }
-
-    func extendStreamOffsetOnQueue(_ streamId: Int64, count: Int) {
+    func extendStreamOffset(_ streamId: Int64, count: Int) {
         guard let engine, streamId >= 0 else { return }
         engine.extendReceiveWindow(for: QUICStreamID(rawValue: UInt64(streamId)), by: count)
-        if inReadPkt { return }
         scheduleFlush()
     }
 
     func scheduleFlush() {
-        if flushScheduled { return }
+        guard !flushScheduled, phase != .closed else { return }
         flushScheduled = true
-        bridge.enqueue { [weak self] in
-            self?.assumeIsolated { me in
-                me.flushScheduled = false
-                me.writeToUDP()
+        publish { [weak owner] in
+            owner?.update { core in
+                core.flushScheduled = false
+                core.writeToUDP()
             }
         }
-    }
-
-    nonisolated func shutdownStream(_ streamId: Int64, appErrorCode: UInt64) {
-        bridge.enqueue { [weak self] in
-            self?.assumeIsolated { me in
-                guard let engine = me.engine else { return }
-                guard streamId >= 0 else { return }
-                engine.shutdownStream(QUICStreamID(rawValue: UInt64(streamId)), errorCode: appErrorCode)
-                me.failStreamSendQueue(streamId: streamId, error: AnywhereError.quic(.closed(graceful: false)))
-                me.writeToUDP()
-            }
-        }
-    }
-
-    nonisolated func writeStream(_ streamId: Int64, data: Data, fin: Bool = false) async throws {
-        try await bridge.runParkedThrowing(host: self) { me, continuation in
-            guard me.engine != nil, me.phase == .connected else {
-                continuation.resume(throwing: AnywhereError.quic(.closed(graceful: false)))
-                return
-            }
-            me.appendStreamWrite(streamId, data: data, fin: fin, continuation: continuation)
-        }
-    }
-
-    nonisolated func writeStreamOnQueue(_ streamId: Int64, data: Data, fin: Bool = false) {
-        assumeIsolated { me in
-            guard me.engine != nil, me.phase == .connected else { return }
-            me.appendStreamWrite(streamId, data: data, fin: fin, continuation: nil)
-        }
-    }
-
-    // MARK: Datagrams
-
-    nonisolated func writeDatagrams(_ datagrams: [Data]) async throws {
-        try await bridge.runParkedThrowing(host: self) { me, continuation in
-            guard me.engine != nil, me.phase == .connected else {
-                continuation.resume(throwing: AnywhereError.quic(.closed(graceful: false)))
-                return
-            }
-            if datagrams.isEmpty { continuation.resume(); return }
-            let latch = DatagramBatchLatch(count: datagrams.count, continuation: continuation)
-            me.enqueueDatagrams(datagrams.map { PendingDatagram(data: $0, latch: latch) })
-            me.writeToUDP()
-        }
-    }
-
-    nonisolated func writeDatagramsAtomically(_ datagrams: [Data]) async throws {
-        try await bridge.runParkedThrowing(host: self) { me, continuation in
-            guard me.engine != nil, me.phase == .connected else {
-                continuation.resume(throwing: AnywhereError.quic(.closed(graceful: false)))
-                return
-            }
-            if datagrams.isEmpty { continuation.resume(); return }
-            guard Self.canEnqueueDatagramBatch(
-                pendingCount: me.pendingDatagrams.count + (me.engine?.pendingDatagramCount ?? 0),
-                batchCount: datagrams.count
-            ) else {
-                continuation.resume(throwing: AnywhereError.quic(.datagramQueueFull))
-                return
-            }
-            let latch = DatagramBatchLatch(count: datagrams.count, continuation: continuation)
-            me.pendingDatagrams.append(contentsOf: datagrams.map { PendingDatagram(data: $0, latch: latch) })
-            me.writeToUDP()
-        }
-    }
-
-    static func canEnqueueDatagramBatch(pendingCount: Int, batchCount: Int) -> Bool {
-        guard pendingCount >= 0, batchCount >= 0,
-              pendingCount <= maxPendingDatagrams else { return false }
-        return batchCount <= maxPendingDatagrams - pendingCount
     }
 
     func enqueueDatagrams(_ datagrams: [PendingDatagram]) {
@@ -148,16 +48,6 @@ extension QUICConnection {
         }
         let overflowError = AnywhereError.quic(.connectionFailed(detail: "Datagram send queue overflowed"))
         for d in dropped { d.latch?.settle(overflowError) }
-    }
-
-    nonisolated func currentMaxDatagramPayloadSize() async -> Int {
-        await bridge.run { [weak self] in self?.maxDatagramPayloadSize ?? 0 }
-    }
-
-    nonisolated var maxDatagramPayloadSize: Int {
-        assumeIsolated { me in
-            me.engine?.maxDatagramPayloadSize ?? 0
-        }
     }
 
     func appendStreamWrite(
@@ -188,7 +78,7 @@ extension QUICConnection {
                 continuation: continuation
             )
         )
-        writeToUDP()
+        scheduleFlush()
     }
 
     func pumpStreamQueues(_ engine: AnywhereQUIC.QUICConnection) {

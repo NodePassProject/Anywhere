@@ -162,22 +162,20 @@ nonisolated final class HTTP3Multiplexer: Multiplexer, Sendable {
     // MARK: - Stream Creation
 
     func openStream(events: StreamEvents) async -> Int64? {
-        await quic.run { () -> Int64? in
-            guard let sid = self.quic.openBidiStream() else {
-                self.markStreamBlocked()
-                return nil
-            }
-            let accepted: Bool = self.state.withLock { session in
-                guard session.phase == .ready else { return false }
-                session.streams[sid] = events
-                return true
-            }
-            guard accepted else {
-                self.quic.shutdownStream(sid, appErrorCode: HTTP3ErrorCode.requestCancelled.rawValue)
-                return nil
-            }
-            return sid
+        guard let sid = self.quic.openBidiStream() else {
+            self.markStreamBlocked()
+            return nil
         }
+        let accepted: Bool = self.state.withLock { session in
+            guard session.phase == .ready else { return false }
+            session.streams[sid] = events
+            return true
+        }
+        guard accepted else {
+            self.quic.shutdownStream(sid, appErrorCode: HTTP3ErrorCode.requestCancelled.rawValue)
+            return nil
+        }
+        return sid
     }
 
     func releaseUnopenedStream() {
@@ -262,7 +260,7 @@ nonisolated final class HTTP3Multiplexer: Multiplexer, Sendable {
                 failSession(error)
                 return
             }
-            await quic.run { self.openControlStreams() }
+            self.openControlStreams()
 
             let outcome: (ready: Bool, goaway: (activeStreams: Int, shouldClose: Bool)?) = state.withLock { session in
                 guard session.transition(to: .ready) else { return (false, nil) }
@@ -286,13 +284,13 @@ nonisolated final class HTTP3Multiplexer: Multiplexer, Sendable {
             var payload = Data()
             payload.append(0x00)
             payload.append(HTTP3Framer.clientSettingsFrame())
-            quic.writeStreamOnQueue(sid, data: payload)
+            quic.submitStreamWrite(sid, data: payload)
         }
         if let sid = quic.openUniStream() {
-            quic.writeStreamOnQueue(sid, data: Data([0x02]))
+            quic.submitStreamWrite(sid, data: Data([0x02]))
         }
         if let sid = quic.openUniStream() {
-            quic.writeStreamOnQueue(sid, data: Data([0x03]))
+            quic.submitStreamWrite(sid, data: Data([0x03]))
         }
     }
 

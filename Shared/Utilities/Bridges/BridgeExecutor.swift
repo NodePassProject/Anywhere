@@ -6,7 +6,6 @@
 //
 
 import Dispatch
-import Synchronization
 
 nonisolated final class BridgeExecutor: SerialExecutor, @unchecked Sendable {
     let queue: DispatchQueue
@@ -41,27 +40,21 @@ nonisolated final class BridgeExecutor: SerialExecutor, @unchecked Sendable {
     var isOnQueue: Bool {
         DispatchQueue.getSpecific(key: onQueueKey) == true
     }
-    
-    // MARK: - Timers
-    
-    func makeDeadlineTimer(handler: @escaping @Sendable () -> Void) -> BridgeDeadlineTimer {
-        BridgeDeadlineTimer(queue: queue, handler: handler)
-    }
 }
 
 nonisolated final class BridgeDeadlineTimer: @unchecked Sendable {
-    
+
     private let timer: DispatchSourceTimer
     private let cancelled = OneShotLatch()
 
-    fileprivate init(queue: DispatchQueue, handler: @escaping @Sendable () -> Void) {
+    init(queue: DispatchQueue, handler: @escaping @Sendable () -> Void) {
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.setEventHandler(handler: handler)
         self.timer = timer
         timer.schedule(deadline: .distantFuture, leeway: .nanoseconds(0))
         timer.resume()
     }
-    
+
     func schedule(afterNanoseconds nanoseconds: UInt64) {
         guard !cancelled.isClaimed else { return }
         timer.schedule(

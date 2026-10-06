@@ -59,17 +59,6 @@ nonisolated enum CertificatePolicy {
         case rejected(reason: String)
     }
     
-    static func verify(chain: [SecCertificate], serverName: String) -> Verification {
-        switch prepare(chain: chain, serverName: serverName) {
-        case .decided(let verification):
-            return verification
-        case .evaluate(let trust):
-            var cfError: CFError?
-            let trusted = SecTrustEvaluateWithError(trust, &cfError)
-            return outcome(trusted: trusted, error: cfError)
-        }
-    }
-    
     static func verify(chain: [SecCertificate], serverName: String) async -> Verification {
         switch prepare(chain: chain, serverName: serverName) {
         case .decided(let verification):

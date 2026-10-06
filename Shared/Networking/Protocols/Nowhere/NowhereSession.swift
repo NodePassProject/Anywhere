@@ -243,7 +243,7 @@ nonisolated final class NowhereSession: Sendable {
         updateIdleCloseTimer()
     }
 
-    // MARK: - Stream dispatch (delivered synchronously on the QUIC queue)
+    // MARK: - Stream dispatch
 
     private func handleStreamData(sid: Int64, data: Data, fin: Bool) {
         enum Route { case tcp(NowhereConnection); case udpControl(NowhereUDPConnection); case serverReject; case orphanData; case ignore }
@@ -451,7 +451,7 @@ nonisolated final class NowhereSession: Sendable {
         try await ensureReady()
 
         enum Bootstrap { case notBootstrap; case failed; case ok(sid: Int64, authFrame: Data) }
-        let bootstrap: Bootstrap = await quic.run { () -> Bootstrap in
+        let bootstrap: Bootstrap = { () -> Bootstrap in
             guard self.state.withLock({ $0.phase == .transportReady }) else { return .notBootstrap }
             guard let sid = self.quic.openBidiStream() else { return .failed }
             let authFrame: Data? = self.state.withLock { session in
@@ -467,7 +467,7 @@ nonisolated final class NowhereSession: Sendable {
                 return .notBootstrap
             }
             return .ok(sid: sid, authFrame: authFrame)
-        }
+        }()
 
         switch bootstrap {
         case .failed:
@@ -481,7 +481,7 @@ nonisolated final class NowhereSession: Sendable {
                 earlyDataAttempt?.markEarlyDataWriteStarted()
                 try await quic.writeStream(sid, data: payload, fin: fin)
                 state.withLock { $0.bootstrapSubmitted = true }
-                await quic.run { self.finishAuthenticationIfReady() }
+                self.finishAuthenticationIfReady()
                 return sid
             } catch {
                 failSession(error)
@@ -518,20 +518,18 @@ nonisolated final class NowhereSession: Sendable {
         defer { state.withLock { _ = $0.cancelledStreamOpenWaiters.remove(waiterID) } }
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                quic.enqueue {
-                    self.openOrParkOnQueue(
-                        waiterID: waiterID,
-                        registerUnderLock: registerUnderLock,
-                        continuation: continuation
-                    )
-                }
+                self.openOrPark(
+                    waiterID: waiterID,
+                    registerUnderLock: registerUnderLock,
+                    continuation: continuation
+                )
             }
         } onCancel: {
             self.cancelStreamOpenWaiter(waiterID)
         }
     }
 
-    private func openOrParkOnQueue(
+    private func openOrPark(
         waiterID: UInt64,
         registerUnderLock: @escaping @Sendable (inout State, Int64) -> Void,
         continuation: CheckedContinuation<Int64, Error>

@@ -124,6 +124,8 @@ nonisolated final class QUICTLSHandler: QUICTLSProvider {
     private var cryptoBufferLevel: QUICEncryptionLevel?
 
     private var serverCertificates: [SecCertificate] = []
+    private var serverCertificateData: [Data] = []
+    private var isAwaitingPeerVerification = false
     private var transcriptBeforeCertVerify: Data?
     private var transcriptBeforeServerFinished: Data?
     private var certificateVerifyAlgorithm: UInt16 = 0
@@ -269,6 +271,9 @@ nonisolated final class QUICTLSHandler: QUICTLSProvider {
         cryptoBuffer.append(data)
 
         while cryptoBuffer.count >= 4 {
+            guard !isAwaitingPeerVerification else {
+                return fail("handshake data after server Finished at level \(level)")
+            }
             let startIndex = cryptoBuffer.startIndex
             let msgType = cryptoBuffer[startIndex]
             let msgLen = (Int(cryptoBuffer[startIndex + 1]) << 16)
@@ -565,31 +570,24 @@ nonisolated final class QUICTLSHandler: QUICTLSProvider {
         guard phase == .serverHelloReceived else {
             return fail("Finished in phase \(phase)")
         }
-        guard let keyDerivation, let handshakeSecret, let clientHTS = clientHandshakeTrafficSecret else {
+        guard let keyDerivation, handshakeSecret != nil, clientHandshakeTrafficSecret != nil else {
             return fail("internal: handshake secrets unavailable at server Finished")
         }
 
-        authenticatedInsecurely = pskAccepted ? offeredTicketInsecure : CertificatePolicy.allowInsecure
-        
-        if !pskAccepted {
-            if let error = validateCertificate() {
-                logger.warning("[QUIC-TLS] Certificate validation failed: \(error.localizedDescription)")
+        let allowInsecure = CertificatePolicy.allowInsecure
+        authenticatedInsecurely = pskAccepted ? offeredTicketInsecure : allowInsecure
+
+        if !pskAccepted, !allowInsecure {
+            if let error = TLS13CertificateVerifier.verify(
+                transcriptBeforeCertVerify: transcriptBeforeCertVerify,
+                algorithm: certificateVerifyAlgorithm,
+                signature: certificateVerifySignature,
+                serverCertificates: serverCertificates,
+                keyDerivation: keyDerivation
+            ) {
+                logger.warning("[QUIC-TLS] CertificateVerify rejected: \(error.localizedDescription)")
                 handshakeError = error
                 return .error
-            }
-            
-            if !CertificatePolicy.allowInsecure {
-                if let error = TLS13CertificateVerifier.verify(
-                    transcriptBeforeCertVerify: transcriptBeforeCertVerify,
-                    algorithm: certificateVerifyAlgorithm,
-                    signature: certificateVerifySignature,
-                    serverCertificates: serverCertificates,
-                    keyDerivation: keyDerivation
-                ) {
-                    logger.warning("[QUIC-TLS] CertificateVerify rejected: \(error.localizedDescription)")
-                    handshakeError = error
-                    return .error
-                }
             }
         }
 
@@ -602,6 +600,39 @@ nonisolated final class QUICTLSHandler: QUICTLSProvider {
         )
         guard body == expectedServerFinished else {
             return fail("server Finished verification failed (transcript mismatch)")
+        }
+
+        guard pskAccepted || allowInsecure else {
+            isAwaitingPeerVerification = true
+            actions.append(.verifyPeer(certificates: serverCertificateData))
+            return .success
+        }
+        return completeServerFinished()
+    }
+
+    func completePeerVerification(error: (any Error)?) throws -> [QUICHandshakeAction] {
+        guard isAwaitingPeerVerification else {
+            throw AnywhereError.tls(.handshakeFailed(detail: "Unexpected peer verification result"))
+        }
+        isAwaitingPeerVerification = false
+        if let error {
+            logger.warning("[QUIC-TLS] Certificate validation failed: \(error.localizedDescription)")
+            handshakeError = error
+            throw error
+        }
+        actions.removeAll(keepingCapacity: true)
+        if case .error = completeServerFinished() {
+            actions.removeAll(keepingCapacity: true)
+            throw handshakeError ?? AnywhereError.tls(.handshakeFailed(detail: "QUIC TLS handshake failed"))
+        }
+        let result = actions
+        actions.removeAll(keepingCapacity: true)
+        return result
+    }
+
+    private func completeServerFinished() -> QUICTLSResult {
+        guard let keyDerivation, let handshakeSecret, let clientHTS = clientHandshakeTrafficSecret else {
+            return fail("internal: handshake secrets unavailable at server Finished")
         }
 
         let application = keyDerivation.deriveApplicationMaterial(
@@ -761,6 +792,7 @@ nonisolated final class QUICTLSHandler: QUICTLSProvider {
 
     private func parseTLS13CertificateMessage(_ body: Data) {
         serverCertificates.removeAll()
+        serverCertificateData.removeAll()
         guard body.count >= 4 else { return }
 
         var offset = 0
@@ -784,6 +816,7 @@ nonisolated final class QUICTLSHandler: QUICTLSProvider {
 
             if let cert = SecCertificateCreateWithData(nil, certData as CFData) {
                 serverCertificates.append(cert)
+                serverCertificateData.append(certData)
             }
 
             guard offset + 2 <= listEnd else { break }
@@ -814,8 +847,9 @@ nonisolated final class QUICTLSHandler: QUICTLSProvider {
 
     // MARK: - Certificate Validation
 
-    private func validateCertificate() -> Error? {
-        switch CertificatePolicy.verify(chain: serverCertificates, serverName: serverName) {
+    static func verifyPeer(certificates: [Data], serverName: String) async -> Error? {
+        let chain = certificates.compactMap { SecCertificateCreateWithData(nil, $0 as CFData) }
+        switch await CertificatePolicy.verify(chain: chain, serverName: serverName) {
         case .trusted:
             return nil
         case .rejected(let reason):

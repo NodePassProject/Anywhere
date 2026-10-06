@@ -9,7 +9,7 @@ import Foundation
 import Network
 import AnywhereQUIC
 
-extension QUICConnection {
+extension QUICConnectionCore {
 
     // MARK: Path-aware carrier I/O
 
@@ -18,57 +18,88 @@ extension QUICConnection {
         localAddr: sockaddr_storage,
         onError: @escaping @Sendable (Int32) -> Void
     ) {
-        carrier.assumeIsolated {
-            $0.startReceiving(
-                onPacket: { [weak self] data in self?.assumeIsolated { $0.handleReceivedPacket(data, localAddr: localAddr) } },
-                onError: onError
-            )
-        }
+        carrier.startReceiving(
+            onPacket: { [weak owner, weak carrier] packets in
+                guard let carrier else { return }
+                owner?.update { core in
+                    guard core.isReceiving(from: carrier) else { return }
+                    core.handleReceivedPackets(packets, localAddr: localAddr)
+                }
+            },
+            onError: onError
+        )
     }
 
     func armActiveCarrier(_ carrier: QUICDatagramCarrier, localAddr: sockaddr_storage) {
-        armReceive(carrier, localAddr: localAddr) { [weak self] errno in
-            self?.close(error: AnywhereError.quic(.connectionFailed(detail: "recv errno=\(errno)")))
+        armReceive(carrier, localAddr: localAddr) { [weak owner, weak carrier] errno in
+            guard let carrier else { return }
+            owner?.update { core in
+                guard core.carrier === carrier else { return }
+                core.close(error: AnywhereError.quic(.connectionFailed(detail: "recv errno=\(errno)")))
+            }
         }
         installMigrationTriggers(on: carrier)
     }
 
     func installMigrationTriggers(on carrier: QUICDatagramCarrier) {
         guard migrationEnabled else { return }
-        carrier.assumeIsolated {
-            $0.onPathDown = { [weak self] in self?.assumeIsolated { $0.attemptReactiveMigration() } }
-            $0.onBetterPath = { [weak self] in self?.assumeIsolated { $0.attemptProactiveMigration() } }
+        carrier.onPathDown = { [weak owner, weak carrier] in
+            guard let carrier else { return }
+            owner?.update { core in
+                guard core.carrier === carrier else { return }
+                core.attemptReactiveMigration()
+            }
+        }
+        carrier.onBetterPath = { [weak owner, weak carrier] in
+            guard let carrier else { return }
+            owner?.update { core in
+                guard core.carrier === carrier else { return }
+                core.attemptProactiveMigration()
+            }
+        }
+    }
+
+    private func isReceiving(from source: QUICDatagramCarrier) -> Bool {
+        guard phase != .closed else { return false }
+        if carrier === source { return true }
+        switch migration {
+        case .proactiveProbing(let target, _), .proactiveValidating(let target, _): return target === source
+        case .none, .reactiveValidating: return false
         }
     }
 
     // MARK: Packet processing
 
     func handleReceivedPacket(_ packet: Data, localAddr: sockaddr_storage) {
-        guard !packet.isEmpty, let engine else { return }
+        handleReceivedPackets(CollectionOfOne(packet), localAddr: localAddr)
+    }
+
+    func handleReceivedPackets(_ packets: some Sequence<Data>, localAddr: sockaddr_storage) {
+        guard let engine else { return }
         if let dialAttempt {
             self.dialAttempt = nil
             dialAttempt.noteServerResponse()
         }
-        inReadPkt = true
-        let previous = enterConnHeld()
-        defer {
-            exitConnHeld(previous)
-            inReadPkt = false
+        let path = quicPath(local: localAddr)
+        for packet in packets where !packet.isEmpty {
+            engine.receive(packet, from: path, now: currentTimestamp())
         }
-        engine.receive(packet, from: quicPath(local: localAddr), now: currentTimestamp())
         drainEngineEvents(engine)
         if phase != .closed { scheduleFlush() }
     }
 
     func pumpDatagrams(_ engine: AnywhereQUIC.QUICConnection) {
-        guard engine.state == .established else { return }
-        while let head = pendingDatagrams.first {
+        guard !pendingDatagrams.isEmpty, engine.state == .established else { return }
+        var consumed = 0
+        defer { pendingDatagrams.removeFirst(consumed) }
+        while consumed < pendingDatagrams.count {
+            let head = pendingDatagrams[consumed]
             do {
                 try engine.sendDatagram(head.data)
             } catch QUICError.sendBufferFull {
                 return
             } catch {
-                pendingDatagrams.removeFirst()
+                consumed += 1
                 let failure: Error
                 switch error {
                 case .datagramTooLarge:
@@ -81,19 +112,13 @@ extension QUICConnection {
                 head.latch?.settle(failure)
                 continue
             }
-            pendingDatagrams.removeFirst()
+            consumed += 1
             head.latch?.settle(nil)
         }
     }
 
     func writeToUDP() {
         guard let engine, phase != .closed else { return }
-        guard !connHeld, !inReadPkt else {
-            scheduleFlush()
-            return
-        }
-        let previous = enterConnHeld()
-        defer { exitConnHeld(previous) }
         let now = currentTimestamp()
         pumpStreamQueues(engine)
         pumpDatagrams(engine)
@@ -108,35 +133,28 @@ extension QUICConnection {
 
     // MARK: Timer
 
-    func rescheduleTimer() {
-        guard let engine, phase != .closed else { return }
-        let expiry = engine.nextTimeout?.nanoseconds ?? UInt64.max
-        if expiry == lastScheduledExpiry && retransmitTimer != nil { return }
-        lastScheduledExpiry = expiry
-
-        let timer: BridgeDeadlineTimer
-        if let existing = retransmitTimer {
-            timer = existing
-        } else {
-            timer = bridge.makeDeadlineTimer { [weak self] in
-                self?.assumeIsolated { me in
-                    guard let engine = me.engine else { return }
-                    me.lastScheduledExpiry = 0
-                    let previous = me.enterConnHeld()
-                    engine.handleTimeout(now: me.currentTimestamp())
-                    me.drainEngineEvents(engine)
-                    me.exitConnHeld(previous)
-                    me.writeToUDP()
-                }
+    func makeRetransmitTimer() -> BridgeDeadlineTimer {
+        BridgeDeadlineTimer(queue: .global(qos: .userInitiated)) { [weak owner] in
+            owner?.update { core in
+                guard core.phase != .closed, let engine = core.engine else { return }
+                core.lastScheduledExpiry = 0
+                engine.handleTimeout(now: core.currentTimestamp())
+                core.drainEngineEvents(engine)
+                core.writeToUDP()
             }
-            retransmitTimer = timer
         }
+    }
 
-        if expiry == UInt64.max {
-            timer.parkUntilRearmed()
-        } else {
-            let now = currentTimestamp().nanoseconds
-            timer.schedule(afterNanoseconds: expiry > now ? expiry - now : 0)
+    func rescheduleTimer() {
+        guard let engine, let retransmitTimer, phase != .closed else { return }
+        let expiry = engine.nextTimeout?.nanoseconds ?? UInt64.max
+        if expiry == lastScheduledExpiry { return }
+        lastScheduledExpiry = expiry
+        guard expiry != UInt64.max else {
+            retransmitTimer.parkUntilRearmed()
+            return
         }
+        let now = currentTimestamp().nanoseconds
+        retransmitTimer.schedule(afterNanoseconds: expiry > now ? expiry - now : 0)
     }
 }

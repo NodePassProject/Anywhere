@@ -6,8 +6,9 @@
 //
 
 import Foundation
-import Network
+import Synchronization
 import Darwin
+import Network
 
 nonisolated private let logger = AnywhereLogger(category: "QUICDatagramCarrier")
 
@@ -17,48 +18,96 @@ nonisolated protocol QUICDatagramEngine: AnyObject, Sendable {
 }
 
 nonisolated struct QUICDatagramEngineSink: Sendable {
-    fileprivate let bridge: QUICConcurrencyBridge
     fileprivate weak var carrier: QUICDatagramCarrier?
 
     func ready(interfaceType: NWInterface.InterfaceType?) {
-        bridge.enqueue { [self] in carrier?.assumeIsolated { $0.handleReady(interfaceType: interfaceType) } }
+        carrier?.update { $0.handleReady(interfaceType: interfaceType) }
     }
 
     func waiting(_ code: Int32) {
-        bridge.enqueue { [self] in carrier?.assumeIsolated { $0.handleWaiting(code) } }
+        carrier?.update { $0.handleWaiting(code) }
     }
 
     func failed(_ code: Int32) {
-        bridge.enqueue { [self] in carrier?.assumeIsolated { $0.deliverError(code) } }
+        carrier?.update { $0.deliverError(code) }
     }
 
     func viabilityLost() {
-        bridge.enqueue { [self] in carrier?.assumeIsolated { $0.handleViabilityLost() } }
+        carrier?.update { $0.handleViabilityLost() }
     }
 
     func betterPath() {
-        bridge.enqueue { [self] in carrier?.assumeIsolated { $0.handleBetterPath() } }
+        carrier?.update { $0.handleBetterPath() }
     }
 
     func pathChanged(interfaceType: NWInterface.InterfaceType?) {
-        bridge.enqueue { [self] in carrier?.assumeIsolated { $0.handlePathUpdate(interfaceType: interfaceType) } }
+        carrier?.update { $0.handlePathUpdate(interfaceType: interfaceType) }
     }
 
     func packet(_ datagram: Data) {
-        bridge.enqueue { [self] in carrier?.assumeIsolated { $0.deliverPacket(datagram) } }
+        carrier?.update { $0.deliverPacket(datagram) }
     }
 
     func finished() {
-        bridge.enqueue { [self] in carrier?.assumeIsolated { $0.handleEngineFinished() } }
+        carrier?.update { $0.handleEngineFinished() }
     }
 }
 
-actor QUICDatagramCarrier {
-    nonisolated var unownedExecutor: UnownedSerialExecutor {
-        bridge.executor.asUnownedSerialExecutor()
+nonisolated final class QUICDatagramCarrier: Sendable {
+    private let state: QUICState<QUICDatagramCarrierCore>
+
+    init(obfuscator: QUICPacketObfuscator?) {
+        state = QUICState(QUICDatagramCarrierCore(obfuscator: obfuscator))
+        state.update { $0.owner = self }
     }
 
-    private let bridge: QUICConcurrencyBridge
+    fileprivate func update<T: Sendable>(_ body: (QUICDatagramCarrierCore) -> T) -> T { state.update(body) }
+    var currentInterfaceType: NWInterface.InterfaceType? { state.read { $0.currentInterfaceType } }
+    var isUsable: Bool { state.read { $0.isUsable } }
+    var onPathDown: (@Sendable () -> Void)? {
+        get { state.read { $0.onPathDown } }
+        set { update { $0.onPathDown = newValue } }
+    }
+    var onBetterPath: (@Sendable () -> Void)? {
+        get { state.read { $0.onBetterPath } }
+        set { update { $0.onBetterPath = newValue } }
+    }
+    var onReady: (@Sendable () -> Void)? {
+        get { state.read { $0.onReady } }
+        set {
+            update { core in
+                if core.isReady, let newValue { core.publish(newValue) }
+                else { core.onReady = newValue }
+            }
+        }
+    }
+    func connect(remoteAddr: sockaddr_storage, localAddr: inout sockaddr_storage) throws {
+        let result: Result<sockaddr_storage, Error> = update { core in
+            Result {
+                var local = sockaddr_storage()
+                try core.connect(remoteAddr: remoteAddr, localAddr: &local)
+                return local
+            }
+        }
+        localAddr = try result.get()
+    }
+    func startReceiving(onPacket: @escaping @Sendable ([Data]) -> Void, onError: @escaping @Sendable (Int32) -> Void) {
+        update { $0.startReceiving(onPacket: onPacket, onError: onError) }
+    }
+    func send(_ datagram: Data) { update { $0.send(datagram) } }
+    func close() { update { $0.close() } }
+
+    fileprivate func deliverPendingPackets() {
+        let (handler, packets) = update { $0.takePendingPackets() }
+        guard let handler, !packets.isEmpty else { return }
+        handler(packets)
+    }
+}
+
+nonisolated final class QUICDatagramCarrierCore: QUICPublishingState {
+    weak var owner: QUICDatagramCarrier?
+    var publications: [@Sendable () -> Void] = []
+    func publish(_ action: @escaping @Sendable () -> Void) { publications.append(action) }
 
     private let obfuscator: QUICPacketObfuscator?
 
@@ -115,19 +164,20 @@ actor QUICDatagramCarrier {
     }
     private var phase: Phase = .idle
 
-    private var packetHandler: (@Sendable (Data) -> Void)?
+    private var packetHandler: (@Sendable ([Data]) -> Void)?
     private var receiveErrorHandler: (@Sendable (Int32) -> Void)?
+    private var pendingPackets: [Data] = []
+    private static let maxPacketBatch = 16
 
     var onPathDown: (@Sendable () -> Void)?
     var onBetterPath: (@Sendable () -> Void)?
-    var onReady: (() -> Void)?
+    var onReady: (@Sendable () -> Void)?
 
     private var flowSlot: FlowSlot?
 
     private var cachedInterfaceType: NWInterface.InterfaceType?
 
-    init(bridge: QUICConcurrencyBridge, obfuscator: QUICPacketObfuscator?) {
-        self.bridge = bridge
+    init(obfuscator: QUICPacketObfuscator?) {
         self.obfuscator = obfuscator
     }
 
@@ -138,6 +188,8 @@ actor QUICDatagramCarrier {
     var currentInterfaceType: NWInterface.InterfaceType? {
         cachedInterfaceType
     }
+
+    var isReady: Bool { if case .ready = phase { true } else { false } }
 
     var isUsable: Bool {
         switch phase {
@@ -159,7 +211,7 @@ actor QUICDatagramCarrier {
 
         flowSlot = FlowSlot(context: "[QUIC] Datagram carrier")
 
-        let sink = QUICDatagramEngineSink(bridge: bridge, carrier: self)
+        let sink = QUICDatagramEngineSink(carrier: owner)
         if #available(iOS 26.0, macOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *) {
             Phase.transition(&phase, to: .connecting(ModernQUICDatagramEngine(endpoint: endpoint, obfuscator: obfuscator, sink: sink)))
         } else {
@@ -170,7 +222,7 @@ actor QUICDatagramCarrier {
     // MARK: - Receive
 
     func startReceiving(
-        onPacket: @escaping @Sendable (Data) -> Void,
+        onPacket: @escaping @Sendable ([Data]) -> Void,
         onError: @escaping @Sendable (Int32) -> Void
     ) {
         let deadCode: Int32?
@@ -183,7 +235,7 @@ actor QUICDatagramCarrier {
             deadCode = nil
         }
         if let deadCode {
-            bridge.enqueue { onError(deadCode) }
+            publish { onError(deadCode) }
             return
         }
         packetHandler = onPacket
@@ -211,6 +263,7 @@ actor QUICDatagramCarrier {
         Phase.transition(&phase, to: .closed)
         packetHandler = nil
         receiveErrorHandler = nil
+        pendingPackets = []
         onPathDown = nil
         onBetterPath = nil
         onReady = nil
@@ -224,7 +277,7 @@ actor QUICDatagramCarrier {
         cachedInterfaceType = interfaceType
         if let onReady {
             self.onReady = nil
-            onReady()
+            publish { onReady() }
         }
     }
 
@@ -232,7 +285,7 @@ actor QUICDatagramCarrier {
         switch phase {
         case .ready:
             if let onPathDown {
-                onPathDown()
+                publish { onPathDown() }
             } else {
                 enterFailed(code)
             }
@@ -246,7 +299,7 @@ actor QUICDatagramCarrier {
     fileprivate func handleViabilityLost() {
         guard case .ready = phase else { return }
         if let onPathDown {
-            onPathDown()
+            publish { onPathDown() }
         } else {
             enterFailed(POSIXErrorCode.ENETDOWN.rawValue)
         }
@@ -254,7 +307,8 @@ actor QUICDatagramCarrier {
 
     fileprivate func handleBetterPath() {
         guard case .ready = phase else { return }
-        onBetterPath?()
+        let handler = onBetterPath
+        publish { handler?() }
     }
 
     fileprivate func handlePathUpdate(interfaceType: NWInterface.InterfaceType?) {
@@ -270,7 +324,7 @@ actor QUICDatagramCarrier {
             if case .ready(let engine) = phase, let onPathDown {
                 engine.close()
                 Phase.transition(&phase, to: .finished)
-                onPathDown()
+                publish { onPathDown() }
             } else {
                 enterFailed(POSIXErrorCode.ECONNABORTED.rawValue)
             }
@@ -282,10 +336,25 @@ actor QUICDatagramCarrier {
     fileprivate func deliverPacket(_ packet: Data) {
         switch phase {
         case .connecting, .ready:
-            packetHandler?(packet)
+            pendingPackets.append(packet)
+            guard pendingPackets.count == 1 else { return }
+            publish { [weak owner] in owner?.deliverPendingPackets() }
         case .idle, .failed, .finished, .closed:
             break
         }
+    }
+
+    fileprivate func takePendingPackets() -> ((@Sendable ([Data]) -> Void)?, [Data]) {
+        let batch: [Data]
+        if pendingPackets.count > Self.maxPacketBatch {
+            batch = Array(pendingPackets.prefix(Self.maxPacketBatch))
+            pendingPackets.removeFirst(Self.maxPacketBatch)
+            publish { [weak owner] in owner?.deliverPendingPackets() }
+        } else {
+            batch = pendingPackets
+            pendingPackets = []
+        }
+        return (packetHandler, batch)
     }
 
     fileprivate func deliverError(_ code: Int32) {
@@ -301,10 +370,11 @@ actor QUICDatagramCarrier {
         }
         phase.engine?.close()
         Phase.transition(&phase, to: .failed(code))
+        pendingPackets = []
         releaseFlowSlot()
         if let handler = receiveErrorHandler {
             receiveErrorHandler = nil
-            handler(code)
+            publish { handler(code) }
         }
     }
 

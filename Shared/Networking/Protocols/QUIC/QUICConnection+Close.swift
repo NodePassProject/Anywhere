@@ -12,22 +12,11 @@ import AnywhereQUIC
 
 nonisolated private let logger = AnywhereLogger(category: "QUICConnection")
 
-extension QUICConnection {
+extension QUICConnectionCore {
 
     // MARK: Close
 
-    nonisolated func close(error: Error? = nil) {
-        if connHeld && isOnQueue {
-            bridge.enqueue { self.close(error: error) }
-            return
-        }
-        let teardown: @Sendable () -> Void = { self.assumeIsolated { $0.performTeardown(error: error) } }
-        if isOnQueue {
-            teardown()
-        } else {
-            bridge.enqueue(teardown)
-        }
-    }
+    func close(error: Error? = nil) { performTeardown(error: error) }
 
     func performTeardown(error: Error?) {
         let handshakeFailed = self.phase == .handshaking
@@ -38,14 +27,13 @@ extension QUICConnection {
         }
         self.retransmitTimer?.cancel()
         self.retransmitTimer = nil
-        self.brutalCC = nil
+        self.usesBrutalCC = false
         self.engine = nil
-        self.tlsHandler = nil
         self.transportSealContinuation?.finish()
         self.transportSealContinuation = nil
         self.rootTask?.cancel()
         self.rootTask = nil
-        self.transport?.cancel()
+        if let transport { publish { transport.cancel() } }
         self.closeCarrier()
         var failedWriters: [CheckedContinuation<Void, Error>] = []
         for queue in self.streamSendQueues.values {
@@ -69,9 +57,9 @@ extension QUICConnection {
         for d in datagrams { d.latch?.settle(closeError) }
         let closedHandler = self.handlers.withLock { current in
             let closed = current.connectionClosed
-            current = Handlers()
+            current = QUICConnection.Handlers()
             return closed
         }
-        closedHandler?(closeError)
+        publish { closedHandler?(closeError) }
     }
 }
