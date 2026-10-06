@@ -48,12 +48,6 @@ struct AdvancedSettingsView: View {
             }
             
             Section {
-                NavigationLink("IPv6") {
-                    IPv6SettingsView()
-                }
-            }
-
-            Section {
                 // Remnawave is a self-hosting proxy panel
                 Toggle("Remnawave HWID", isOn: $settings.remnawaveHWIDEnabled)
             }
@@ -65,7 +59,7 @@ struct AdvancedSettingsView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Enabling Hide VPN Icon may cause connection instability, and IPv6 traffic will bypass the VPN.")
+            Text("Enabling Hide VPN Icon may cause connection instability.")
         }
     }
 }

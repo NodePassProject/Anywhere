@@ -75,7 +75,6 @@ nonisolated final class AWCore {
         static let ipRuleDNSPlainServer = "ipRuleDNSPlainServer"
         static let lastConfigurationData = "lastConfigurationData"
         static let latencyResults = "latencyResults"
-        static let localIPv6RequestsEnabled = "localIPv6RequestsEnabled"
         static let mitmEnabled = "mitmEnabled"
         static let onboardingCompleted = "onboardingCompleted"
         static let preventDNSLeak = "preventDNSLeak"
@@ -583,14 +582,6 @@ nonisolated final class AWCore {
         )
     }
     
-    static func getLocalIPv6RequestsEnabled() -> Bool {
-        userDefaults.bool(forKey: UserDefaultsKey.localIPv6RequestsEnabled)
-    }
-
-    static func setLocalIPv6RequestsEnabled(_ value: Bool) {
-        userDefaults.set(value, forKey: UserDefaultsKey.localIPv6RequestsEnabled)
-    }
-
     static func getRemnawaveHWIDEnabled() -> Bool {
         userDefaults.bool(forKey: UserDefaultsKey.remnawaveHWIDEnabled)
     }

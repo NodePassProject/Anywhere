@@ -11,5 +11,4 @@ nonisolated struct NetworkContext: Equatable {
     var isWiFi = false
     var isCellular = false
     var ssid: String?
-    var supportsIPv6 = true
 }

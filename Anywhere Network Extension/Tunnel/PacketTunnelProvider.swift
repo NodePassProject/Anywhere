@@ -197,24 +197,17 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
         let excludedRoutes = Self.parseRoutes(AWCore.getTunnelExcludedRoutes())
 
         let ipv4Settings = NEIPv4Settings(addresses: [tunnelAddressIPv4], subnetMasks: ["255.255.255.0"])
-        var includedIPv4Routes = [NEIPv4Route.default()] + includedRoutes.ipv4
+        var includedIPv4Routes = [NEIPv4Route.default()] + includedRoutes
         if reflectionEnabled {
             includedIPv4Routes.append(NEIPv4Route(destinationAddress: TunnelAddress.reflection, subnetMask: "255.255.255.255"))
         }
         ipv4Settings.includedRoutes = includedIPv4Routes
-        var excludedIPv4Routes = excludedRoutes.ipv4
+        var excludedIPv4Routes = excludedRoutes
         if hideVPNIcon {
             excludedIPv4Routes.append(NEIPv4Route(destinationAddress: "0.0.0.0", subnetMask: "255.255.255.254"))
         }
         ipv4Settings.excludedRoutes = excludedIPv4Routes
         settings.ipv4Settings = ipv4Settings
-
-        if !hideVPNIcon && !reflectionEnabled {
-            let ipv6Settings = NEIPv6Settings(addresses: [TunnelAddress.ipv6], networkPrefixLengths: [64])
-            ipv6Settings.includedRoutes = [NEIPv6Route.default()] + includedRoutes.ipv6
-            ipv6Settings.excludedRoutes = excludedRoutes.ipv6
-            settings.ipv6Settings = ipv6Settings
-        }
 
         settings.dnsSettings = NEDNSSettings(servers: [tunnelAddressIPv4])
         settings.mtu = 1500
@@ -222,32 +215,10 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
         return settings
     }
 
-    private static func parseRoutes(_ strings: [String]) -> (ipv4: [NEIPv4Route], ipv6: [NEIPv6Route]) {
-        var ipv4Routes: [NEIPv4Route] = []
-        var ipv6Routes: [NEIPv6Route] = []
-
-        for route in strings.compactMap({ IPRoute($0) }) {
-            switch route {
-            case .ipv4(let network, let prefixLength):
-                let mask = IPRoute.ipv4Mask(prefixLength: prefixLength)
-                ipv4Routes.append(NEIPv4Route(destinationAddress: dottedQuad(network), subnetMask: dottedQuad(mask)))
-            case .ipv6(let network, let prefixLength):
-                guard let address = ipv6String(network) else { continue }
-                ipv6Routes.append(NEIPv6Route(destinationAddress: address, networkPrefixLength: NSNumber(value: prefixLength)))
-            }
+    private static func parseRoutes(_ strings: [String]) -> [NEIPv4Route] {
+        strings.compactMap(IPRoute.init).map { route in
+            NEIPv4Route(destinationAddress: dottedQuad(route.network), subnetMask: dottedQuad(route.mask))
         }
-
-        return (ipv4: ipv4Routes, ipv6: ipv6Routes)
-    }
-
-    private static func ipv6String(_ network: SIMD16<UInt8>) -> String? {
-        var address = in6_addr()
-        withUnsafeMutableBytes(of: &address) { bytes in
-            for i in 0..<16 { bytes[i] = network[i] }
-        }
-        var buffer = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
-        guard inet_ntop(AF_INET6, &address, &buffer, socklen_t(INET6_ADDRSTRLEN)) != nil else { return nil }
-        return String(nulTerminated: buffer)
     }
 
     private static func dottedQuad(_ value: UInt32) -> String {
@@ -388,13 +359,12 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
         let primaryType = path.availableInterfaces.first?.type
         let isWiFi = primaryType == .wifi
         let isCellular = primaryType == .cellular
-        let supportsIPv6 = path.supportsIPv6
 #if os(iOS)
         if isWiFi {
             let ssid = await pathMonitorBridge.currentWiFiSSID()
             await tunnelStack.updateNetworkContext(
                 NetworkContext(
-                    isWiFi: true, isCellular: false, ssid: ssid, supportsIPv6: supportsIPv6
+                    isWiFi: true, isCellular: false, ssid: ssid
                 )
             )
             return
@@ -402,7 +372,7 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
 #endif
         await tunnelStack.updateNetworkContext(
             NetworkContext(
-                isWiFi: isWiFi, isCellular: isCellular, ssid: nil, supportsIPv6: supportsIPv6
+                isWiFi: isWiFi, isCellular: isCellular, ssid: nil
             )
         )
     }

@@ -165,8 +165,7 @@ extension TunnelStack {
     func updateNetworkContext(_ context: NetworkContext) {
         guard context != networkContext else { return }
         networkContext = context
-        publishIPv6Enabled()
-        
+
         guard phase == .running, let configuration else { return }
         let newEffective = computeEffectiveProxyMode()
         guard newEffective != proxyMode else { return }
@@ -332,9 +331,6 @@ extension TunnelStack {
         }
         if new.reflectionEnabled != old.reflectionEnabled {
             publishReflectionEnabled()
-        }
-        if new.localIPv6RequestsEnabled != old.localIPv6RequestsEnabled {
-            publishIPv6Enabled()
         }
         if new.ipRuleDNSUpstream != old.ipRuleDNSUpstream {
             RuleResolver.shared.setUpstream(new.ipRuleDNSUpstream)

@@ -2294,58 +2294,6 @@
         }
       }
     },
-    "Adjust this setting on your proxy server." : {
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "اضبط هذا الإعداد على خادم البروكسي الخاص بك."
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Adjust this setting on your proxy server."
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ajusta esta configuración en tu servidor proxy."
-          }
-        },
-        "fa" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "این تنظیم را در سرور پروکسی خود تغییر دهید."
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Измените этот параметр на вашем прокси-сервере."
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Bu ayarı proxy sunucunuzda değiştirin."
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Điều chỉnh cài đặt này trên máy chủ proxy của bạn."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "请在代理服务器上调整此设置。"
-          }
-        }
-      }
-    },
     "Advanced Settings" : {
       "localizations" : {
         "ar" : {
@@ -6984,106 +6932,106 @@
         }
       }
     },
-    "Enabling Hide VPN Icon may cause connection instability, and IPv6 traffic will bypass the VPN." : {
+    "Enabling Hide VPN Icon may cause connection instability." : {
       "localizations" : {
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "قد يؤدي تفعيل \"إخفاء أيقونة VPN\" إلى عدم استقرار الاتصال، وستتجاوز حركة IPv6 شبكة VPN."
+            "value" : "قد يؤدي تفعيل \"إخفاء أيقونة VPN\" إلى عدم استقرار الاتصال."
           }
         },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Enabling Hide VPN Icon may cause connection instability, and IPv6 traffic will bypass the VPN."
+            "value" : "Enabling Hide VPN Icon may cause connection instability."
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Activar Ocultar icono de VPN puede causar inestabilidad en la conexión, y el tráfico IPv6 no pasará por la VPN."
+            "value" : "Activar Ocultar icono de VPN puede causar inestabilidad en la conexión."
           }
         },
         "fa" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "فعال‌سازی «مخفی کردن آیکون VPN» ممکن است باعث ناپایداری اتصال شود و ترافیک IPv6 از VPN عبور نخواهد کرد."
+            "value" : "فعال‌سازی «مخفی کردن آیکون VPN» ممکن است باعث ناپایداری اتصال شود."
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Включение «Скрыть значок VPN» может вызвать нестабильность соединения, а трафик IPv6 будет идти в обход VPN."
+            "value" : "Включение «Скрыть значок VPN» может вызвать нестабильность соединения."
           }
         },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "\"VPN Simgesini Gizle\"yi etkinleştirmek bağlantı kararsızlığına neden olabilir ve IPv6 trafiği VPN'i atlayacaktır."
+            "value" : "\"VPN Simgesini Gizle\"yi etkinleştirmek bağlantı kararsızlığına neden olabilir."
           }
         },
         "vi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Bật Ẩn biểu tượng VPN có thể gây mất ổn định kết nối và lưu lượng IPv6 sẽ không đi qua VPN."
+            "value" : "Bật Ẩn biểu tượng VPN có thể gây mất ổn định kết nối."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "启用隐藏 VPN 图标可能导致连接不稳定，且 IPv6 流量将绕过 VPN。"
+            "value" : "启用隐藏 VPN 图标可能导致连接不稳定。"
           }
         }
       }
     },
-    "Enabling Reflection may reduce performance, and IPv6 traffic will bypass the VPN." : {
+    "Enabling Reflection may reduce performance." : {
       "localizations" : {
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "قد يؤدي تفعيل \"الانعكاس\" إلى تقليل الأداء، وستتجاوز حركة IPv6 شبكة VPN."
+            "value" : "قد يؤدي تفعيل \"الانعكاس\" إلى تقليل الأداء."
           }
         },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Enabling Reflection may reduce performance, and IPv6 traffic will bypass the VPN."
+            "value" : "Enabling Reflection may reduce performance."
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Activar Reflexión puede reducir el rendimiento, y el tráfico IPv6 no pasará por la VPN."
+            "value" : "Activar Reflexión puede reducir el rendimiento."
           }
         },
         "fa" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "فعال‌سازی «بازتاب» ممکن است عملکرد را کاهش دهد و ترافیک IPv6 از VPN عبور نخواهد کرد."
+            "value" : "فعال‌سازی «بازتاب» ممکن است عملکرد را کاهش دهد."
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Включение «Отражения» может снизить производительность, а трафик IPv6 будет идти в обход VPN."
+            "value" : "Включение «Отражения» может снизить производительность."
           }
         },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "\"Yansıma\"yı etkinleştirmek performansı düşürebilir ve IPv6 trafiği VPN'i atlayacaktır."
+            "value" : "\"Yansıma\"yı etkinleştirmek performansı düşürebilir."
           }
         },
         "vi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Bật Phản chiếu có thể làm giảm hiệu suất và lưu lượng IPv6 sẽ không đi qua VPN."
+            "value" : "Bật Phản chiếu có thể làm giảm hiệu suất."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "启用反射可能降低性能，且 IPv6 流量将绕过 VPN。"
+            "value" : "启用反射可能降低性能。"
           }
         }
       }
@@ -9755,58 +9703,6 @@
         }
       }
     },
-    "IPv6" : {
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "IPv6"
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "IPv6"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "IPv6"
-          }
-        },
-        "fa" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "IPv6"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "IPv6"
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "IPv6"
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "IPv6"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "IPv6"
-          }
-        }
-      }
-    },
     "IPv6 CIDR" : {
       "localizations" : {
         "ar" : {
@@ -9855,58 +9751,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "IPv6 CIDR"
-          }
-        }
-      }
-    },
-    "IPv6 Proxies" : {
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "بروكسيات IPv6"
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "IPv6 Proxies"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Proxies IPv6"
-          }
-        },
-        "fa" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "پروکسی‌های IPv6"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "IPv6-прокси"
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "IPv6 Proxy'leri"
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Proxy IPv6"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "IPv6 代理"
           }
         }
       }
@@ -10331,58 +10175,6 @@
         }
       }
     },
-    "Local IPv6 Requests" : {
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "طلبات IPv6 المحلية"
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Local IPv6 Requests"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Solicitudes IPv6 locales"
-          }
-        },
-        "fa" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "درخواست‌های IPv6 محلی"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Локальные IPv6-запросы"
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Yerel IPv6 İstekleri"
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Yêu cầu IPv6 cục bộ"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "本地 IPv6 请求"
-          }
-        }
-      }
-    },
     "Logs" : {
       "localizations" : {
         "ar" : {
@@ -10588,58 +10380,6 @@
     },
     "Maximum Padding" : {
       "shouldTranslate" : false
-    },
-    "May cause connection issues if your network does not support IPv6." : {
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "قد يسبب مشكلات في الاتصال إذا كانت شبكتك لا تدعم IPv6."
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "May cause connection issues if your network does not support IPv6."
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Puede causar problemas de conexión si tu red no es compatible con IPv6."
-          }
-        },
-        "fa" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "اگر شبکه شما از IPv6 پشتیبانی نکند، ممکن است باعث مشکلات اتصال شود."
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Может вызвать проблемы с подключением, если ваша сеть не поддерживает IPv6."
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ağınız IPv6'yı desteklemiyorsa bağlantı sorunlarına neden olabilir."
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Có thể gây sự cố kết nối nếu mạng của bạn không hỗ trợ IPv6."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "如果你的网络不支持 IPv6，可能会导致连接问题。"
-          }
-        }
-      }
     },
     "Mbps" : {
       "shouldTranslate" : false
@@ -14741,58 +14481,6 @@
     },
     "Remnawave HWID" : {
       "shouldTranslate" : false
-    },
-    "Remote IPv6 Requests" : {
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "طلبات IPv6 البعيدة"
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Remote IPv6 Requests"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Solicitudes IPv6 remotas"
-          }
-        },
-        "fa" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "درخواست‌های IPv6 راه‌دور"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Удалённые IPv6-запросы"
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Uzak IPv6 İstekleri"
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Yêu cầu IPv6 từ xa"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "远程 IPv6 请求"
-          }
-        }
-      }
     },
     "Remove" : {
       "localizations" : {
@@ -20739,58 +20427,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "你"
-          }
-        }
-      }
-    },
-    "You can connect to your proxies via IPv6 if your network supports IPv6." : {
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "يمكنك الاتصال بالبروكسيات الخاصة بك عبر IPv6 إذا كانت شبكتك تدعم IPv6."
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "You can connect to your proxies via IPv6 if your network supports IPv6."
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Puedes conectarte a tus proxies mediante IPv6 si tu red es compatible con IPv6."
-          }
-        },
-        "fa" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "اگر شبکه شما از IPv6 پشتیبانی کند، می‌توانید از طریق IPv6 به پروکسی‌های خود متصل شوید."
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Если ваша сеть поддерживает IPv6, вы можете подключаться к прокси через IPv6."
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ağınız IPv6'yı destekliyorsa proxy'lerinize IPv6 üzerinden bağlanabilirsiniz."
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Bạn có thể kết nối đến proxy của mình qua IPv6 nếu mạng của bạn hỗ trợ IPv6."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "如果你的网络支持 IPv6，可以通过 IPv6 连接到代理。"
           }
         }
       }

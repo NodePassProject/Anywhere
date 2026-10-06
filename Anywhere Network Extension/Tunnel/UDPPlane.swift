@@ -92,7 +92,6 @@ actor UDPPlane {
     private func openFlow(for datagram: InboundDatagram, udpConfig: TunnelStack.UDPConfig) -> UDPFlow? {
         let destination = datagram.destination
         if destination.port == 53 || udpConfig.blockUDP { return nil }
-        if destination.address.isIPv6, !stack.ipv6Enabled { return nil }
         if destination.port == 443 && udpConfig.quicPolicy.blocksAllQUIC { return nil }
         if udpConfig.blockWebRTC && TunnelStack.isSTUNMessage(datagram.payload) { return nil }
         guard let flow = flows[TunnelStack.UDPFlowKey(datagram)], !flow.isClosed else { return nil }
@@ -153,11 +152,6 @@ actor UDPPlane {
         let payload = datagram.payload
         let dstAddress = datagram.destination.address
         let dstPort = datagram.destination.port
-
-        if dstAddress.isIPv6, !stack.ipv6Enabled {
-            stack.sendICMPPortUnreachable(rejecting: datagram)
-            return
-        }
 
         let udpConfig = stack.udpConfig()
 

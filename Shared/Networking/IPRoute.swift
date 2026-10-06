@@ -7,47 +7,26 @@
 
 import Foundation
 
-nonisolated enum IPRoute: Equatable, Sendable {
-    case ipv4(network: UInt32, prefixLength: Int)
-    case ipv6(network: SIMD16<UInt8>, prefixLength: Int)
-    
+nonisolated struct IPRoute: Equatable, Sendable {
+    let network: UInt32
+    let prefixLength: Int
+
+    var mask: UInt32 { Self.mask(prefixLength: prefixLength) }
+
     init?(_ string: String) {
         let parts = string.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false)
-        let address = String(parts[0])
-        let prefix = parts.count == 2 ? parts[1] : nil
-
-        if address.contains(":") {
-            var raw = in6_addr()
-            guard inet_pton(AF_INET6, address, &raw) == 1,
-                  let prefixLength = Self.prefixLength(prefix, maximum: 128) else { return nil }
-            var network = SIMD16<UInt8>()
-            withUnsafeBytes(of: &raw) { bytes in
-                for i in 0..<16 { network[i] = bytes[i] }
-            }
-            self = .ipv6(network: network & Self.ipv6Mask(prefixLength: prefixLength), prefixLength: prefixLength)
+        var raw = in_addr()
+        guard inet_pton(AF_INET, String(parts[0]), &raw) == 1 else { return nil }
+        if parts.count == 2 {
+            guard let value = Int(parts[1]), (0...32).contains(value) else { return nil }
+            prefixLength = value
         } else {
-            var raw = in_addr()
-            guard inet_pton(AF_INET, address, &raw) == 1,
-                  let prefixLength = Self.prefixLength(prefix, maximum: 32) else { return nil }
-            self = .ipv4(network: UInt32(bigEndian: raw.s_addr) & Self.ipv4Mask(prefixLength: prefixLength), prefixLength: prefixLength)
+            prefixLength = 32
         }
+        network = UInt32(bigEndian: raw.s_addr) & Self.mask(prefixLength: prefixLength)
     }
 
-    static func ipv4Mask(prefixLength: Int) -> UInt32 {
+    private static func mask(prefixLength: Int) -> UInt32 {
         ~UInt32(0) << (32 - prefixLength)
-    }
-
-    static func ipv6Mask(prefixLength: Int) -> SIMD16<UInt8> {
-        var mask = SIMD16<UInt8>()
-        for i in 0..<16 {
-            mask[i] = ~UInt8(0) << (8 - min(max(prefixLength - i * 8, 0), 8))
-        }
-        return mask
-    }
-
-    private static func prefixLength(_ string: Substring?, maximum: Int) -> Int? {
-        guard let string else { return maximum }
-        guard let value = Int(string), (0...maximum).contains(value) else { return nil }
-        return value
     }
 }

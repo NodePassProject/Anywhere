@@ -33,14 +33,11 @@ extension TunnelStack {
             },
             synFilter: { [weak self] _, destination in
                 guard let self else { return .drop }
-                let verdict: AcceptVerdict
-                if destination.address.isIPv6, !self.ipv6Enabled {
-                    verdict = .reset
-                } else {
-                    verdict = !self.isRejectMarked(destination.address) && self.ipStackSynVerdict() ? .accept : .drop
+                guard !self.isRejectMarked(destination.address), self.ipStackSynVerdict() else {
+                    self.recordRejectedSYN(to: destination)
+                    return .drop
                 }
-                if verdict != .accept { self.recordRejectedSYN(to: destination) }
-                return verdict
+                return .accept
             },
             strayFilter: { [weak self] _, destination in
                 self.map { !$0.isRejectMarked(destination.address) } ?? false

@@ -18,7 +18,6 @@ nonisolated struct TunnelSettings: Equatable {
     var preventDNSLeak = false
     var reflectionEnabled = false
     var hideVPNIcon = false
-    var localIPv6RequestsEnabled = false
     var tunnelIncludedRoutes: [String] = []
     var tunnelExcludedRoutes: [String] = []
     var ipRuleDNSUpstream: DNSUpstream = .system
@@ -36,7 +35,6 @@ nonisolated struct TunnelSettings: Equatable {
             preventDNSLeak: AWCore.getPreventDNSLeak(),
             reflectionEnabled: AWCore.getReflectionEnabled(),
             hideVPNIcon: AWCore.getHideVPNIcon(),
-            localIPv6RequestsEnabled: AWCore.getLocalIPv6RequestsEnabled(),
             tunnelIncludedRoutes: AWCore.getTunnelIncludedRoutes(),
             tunnelExcludedRoutes: AWCore.getTunnelExcludedRoutes(),
             ipRuleDNSUpstream: AWCore.getIPRuleDNSUpstream(),

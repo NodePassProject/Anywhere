@@ -36,7 +36,7 @@ struct ReflectionSettingsView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Enabling Reflection may reduce performance, and IPv6 traffic will bypass the VPN.")
+            Text("Enabling Reflection may reduce performance.")
         }
     }
 }
