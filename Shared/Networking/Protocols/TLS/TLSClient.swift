@@ -192,7 +192,7 @@ actor TLSClient {
         let clientHello = try buildTLSClientHello(privateKey: privateKey)
         storedClientHello = clientHello.subdata(in: 5..<clientHello.count)
 
-        let transport = TCPTransport(host: host, port: port, resolvesViaProxyDNS: true)
+        let transport = TCPTransport(host: host, port: port, resolution: .proxies)
         adoptTransport(transport)
         do {
             try await transport.connect(initialData: clientHello)
@@ -271,7 +271,7 @@ actor TLSClient {
     private func prepareECH() async throws {
         guard configuration.echIsOpportunistic else { return }
         let serverName = configuration.serverName
-        let config: Data? = await DNSResolver.shared.resolveECHConfigList(for: serverName)
+        let config: Data? = await ECHResolver.shared.resolveConfigList(for: serverName)
         guard let config else {
             throw AnywhereError.tls(.handshakeFailed(detail:
                 "Opportunistic ECH: no ECH config published in DNS for \(serverName)"))

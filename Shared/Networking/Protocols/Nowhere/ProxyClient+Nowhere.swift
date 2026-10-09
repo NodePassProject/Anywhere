@@ -732,7 +732,7 @@ nonisolated extension ProxyClient {
                 let tcp = TCPTransport(
                     host: connectHost,
                     port: try configuration.proxyPort(for: .tcp),
-                    resolvesViaProxyDNS: true
+                    resolution: .proxies
                 )
                 try await tcp.connect()
                 base = tcp

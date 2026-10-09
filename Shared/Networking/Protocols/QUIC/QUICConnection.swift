@@ -65,7 +65,7 @@ nonisolated final class QUICConnection: Sendable {
 
     func connect() async throws {
         let attempt = ConnectionMetrics.currentAttempt
-        let resolved = usesTransport ? [] : await DNSResolver.shared.resolveAll(host)
+        let resolved = usesTransport ? [] : await DNSResolver.proxies.resolveAll(host)
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             update { core in
                 guard core.phase == .idle else {

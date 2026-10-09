@@ -53,7 +53,7 @@ nonisolated enum OutboundConnector {
         if isLoopbackOrPrivate(host) { return (.direct, nil) }
 
         if !literal, !context.preventDNSLeak,
-           let ip = await RuleResolver.shared.resolveIPv4(for: host),
+           let ip = await DNSResolver.localRequests.resolveHost(host, family: .ipv4),
            let ruleMatch = router.matchIP(ip) {
             return (ruleMatch.action, ruleMatch.ruleSetName)
         }
@@ -95,7 +95,7 @@ nonisolated enum OutboundConnector {
     }
 
     private static func dialDirect(host: String, port: UInt16) async throws -> Dialed {
-        let transport = TCPTransport(host: host, port: port)
+        let transport = TCPTransport(host: host, port: port, resolution: .localRequests)
         let connection = DirectProxyConnection(transport: transport)
         do {
             try await transport.connect()

@@ -58,8 +58,52 @@ nonisolated final class DNSSyscallConcurrencyBridge: Sendable {
         next?.resume()
     }
 
+    // MARK: - Address lookup
+
+    func resolveAddresses(_ host: String, family: DNSAddressFamily) async -> [String] {
+        await run { Self.resolveAddressesBlocking(host, family: family) }
+    }
+
+    private static func resolveAddressesBlocking(_ host: String, family: DNSAddressFamily) -> [String] {
+        var hints = addrinfo()
+        switch family {
+        case .ipv4: hints.ai_family = AF_INET
+        case .ipv6: hints.ai_family = AF_INET6
+        case .preferIPv4: hints.ai_family = AF_UNSPEC
+        }
+        hints.ai_socktype = SOCK_STREAM
+
+        var result: UnsafeMutablePointer<addrinfo>?
+        let status = getaddrinfo(host, nil, &hints, &result)
+        guard status == 0, let res = result else { return [] }
+        defer { freeaddrinfo(res) }
+
+        var ipv4: [String] = []
+        var ipv6: [String] = []
+        var current: UnsafeMutablePointer<addrinfo>? = res
+        while let info = current {
+            if info.pointee.ai_family == AF_INET {
+                var address = info.pointee.ai_addr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee }
+                var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+                if inet_ntop(AF_INET, &address.sin_addr, &buffer, socklen_t(INET_ADDRSTRLEN)) != nil {
+                    let ip = String(nulTerminated: buffer)
+                    if !ipv4.contains(ip) { ipv4.append(ip) }
+                }
+            } else if info.pointee.ai_family == AF_INET6 {
+                var address = info.pointee.ai_addr.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { $0.pointee }
+                var buffer = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+                if inet_ntop(AF_INET6, &address.sin6_addr, &buffer, socklen_t(INET6_ADDRSTRLEN)) != nil {
+                    let ip = String(nulTerminated: buffer)
+                    if !ipv6.contains(ip) { ipv6.append(ip) }
+                }
+            }
+            current = info.pointee.ai_next
+        }
+        return ipv4.isEmpty ? ipv6 : ipv4
+    }
+
     // MARK: - Record query
-    
+
     func queryFirstRecord(
         host: String,
         rrtype: UInt16,

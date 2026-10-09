@@ -32,8 +32,8 @@ nonisolated final class AWCore {
             UserDefaultsKey.echDNSDoHURL: DNSUpstream.defaultDoHURL,
             UserDefaultsKey.echDNSPlainServer: DNSUpstream.defaultPlainServer,
             UserDefaultsKey.fallbackDNSServer: DNSUpstream.defaultPlainServer,
-            UserDefaultsKey.ipRuleDNSDoHURL: DNSUpstream.defaultDoHURL,
-            UserDefaultsKey.ipRuleDNSPlainServer: DNSUpstream.defaultPlainServer,
+            UserDefaultsKey.localRequestDNSDoHURL: DNSUpstream.defaultDoHURL,
+            UserDefaultsKey.localRequestDNSPlainServer: DNSUpstream.defaultPlainServer,
             UserDefaultsKey.proxyDNSDoHURL: DNSUpstream.defaultDoHURL,
             UserDefaultsKey.proxyDNSPlainServer: DNSUpstream.defaultPlainServer,
             UserDefaultsKey.proxyMode: ProxyMode.rule.rawValue,
@@ -70,11 +70,11 @@ nonisolated final class AWCore {
         static let homeColorScheme = "homeColorScheme"
         static let iCloudSyncEnabled = "iCloudSyncEnabled"
         static let identifier = "identifier"
-        static let ipRuleDNSDoHURL = "ipRuleDNSDoHURL"
-        static let ipRuleDNSMode = "ipRuleDNSMode"
-        static let ipRuleDNSPlainServer = "ipRuleDNSPlainServer"
         static let lastConfigurationData = "lastConfigurationData"
         static let latencyResults = "latencyResults"
+        static let localRequestDNSDoHURL = "localRequestDNSDoHURL"
+        static let localRequestDNSMode = "localRequestDNSMode"
+        static let localRequestDNSPlainServer = "localRequestDNSPlainServer"
         static let mitmEnabled = "mitmEnabled"
         static let onboardingCompleted = "onboardingCompleted"
         static let preventDNSLeak = "preventDNSLeak"
@@ -455,28 +455,28 @@ nonisolated final class AWCore {
         userDefaults.set(value, forKey: UserDefaultsKey.subscriptionDNSDoHURL)
     }
 
-    static func getIPRuleDNSMode() -> DNSMode {
-        userDefaults.string(forKey: UserDefaultsKey.ipRuleDNSMode).flatMap(DNSMode.init(rawValue:)) ?? .default
+    static func getLocalRequestDNSMode() -> DNSMode {
+        userDefaults.string(forKey: UserDefaultsKey.localRequestDNSMode).flatMap(DNSMode.init(rawValue:)) ?? .default
     }
 
-    static func setIPRuleDNSMode(_ value: DNSMode) {
-        userDefaults.set(value.rawValue, forKey: UserDefaultsKey.ipRuleDNSMode)
+    static func setLocalRequestDNSMode(_ value: DNSMode) {
+        userDefaults.set(value.rawValue, forKey: UserDefaultsKey.localRequestDNSMode)
     }
 
-    static func getIPRuleDNSPlainServer() -> String {
-        userDefaults.string(forKey: UserDefaultsKey.ipRuleDNSPlainServer)!
+    static func getLocalRequestDNSPlainServer() -> String {
+        userDefaults.string(forKey: UserDefaultsKey.localRequestDNSPlainServer)!
     }
 
-    static func setIPRuleDNSPlainServer(_ value: String) {
-        userDefaults.set(value, forKey: UserDefaultsKey.ipRuleDNSPlainServer)
+    static func setLocalRequestDNSPlainServer(_ value: String) {
+        userDefaults.set(value, forKey: UserDefaultsKey.localRequestDNSPlainServer)
     }
 
-    static func getIPRuleDNSDoHURL() -> String {
-        userDefaults.string(forKey: UserDefaultsKey.ipRuleDNSDoHURL)!
+    static func getLocalRequestDNSDoHURL() -> String {
+        userDefaults.string(forKey: UserDefaultsKey.localRequestDNSDoHURL)!
     }
 
-    static func setIPRuleDNSDoHURL(_ value: String) {
-        userDefaults.set(value, forKey: UserDefaultsKey.ipRuleDNSDoHURL)
+    static func setLocalRequestDNSDoHURL(_ value: String) {
+        userDefaults.set(value, forKey: UserDefaultsKey.localRequestDNSDoHURL)
     }
 
     static func getFallbackDNSMode() -> FallbackDNSMode {
@@ -551,11 +551,11 @@ nonisolated final class AWCore {
         )
     }
     
-    static func getIPRuleDNSUpstream() -> DNSUpstream {
+    static func getLocalRequestDNSUpstream() -> DNSUpstream {
         DNSUpstream(
-            mode: getIPRuleDNSMode(),
-            plainServer: getIPRuleDNSPlainServer(),
-            dohURL: getIPRuleDNSDoHURL()
+            mode: getLocalRequestDNSMode(),
+            plainServer: getLocalRequestDNSPlainServer(),
+            dohURL: getLocalRequestDNSDoHURL()
         )
     }
     

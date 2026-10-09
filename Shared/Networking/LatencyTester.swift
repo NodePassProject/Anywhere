@@ -10,7 +10,6 @@ import Foundation
 nonisolated private let logger = AnywhereLogger(category: "LatencyTester")
 
 nonisolated enum LatencyTester {
-
     private static let timeout: Duration = .seconds(10)
 
     private static let latencyHost = "captive.apple.com"
@@ -66,7 +65,7 @@ nonisolated enum LatencyTester {
             name: configuration.name,
             serverAddress: configuration.serverAddress,
             serverPort: configuration.serverPort,
-            resolvedIP: await DNSResolver.shared.resolveHost(configuration.serverAddress, forceFresh: true),
+            resolvedIP: await DNSResolver.proxies.resolveHost(configuration.serverAddress, forceFresh: true),
             subscriptionId: configuration.subscriptionId,
             outbound: configuration.outbound,
             chain: resolvedChain
@@ -74,10 +73,10 @@ nonisolated enum LatencyTester {
     }
 
     private static func performTest(_ configuration: ProxyConfiguration) async throws -> Int {
-        await DNSResolver.shared.prewarm(configuration.serverAddress)
+        _ = await DNSResolver.proxies.resolveAll(configuration.serverAddress)
         if let chain = configuration.chain {
             for proxy in chain {
-                await DNSResolver.shared.prewarm(proxy.serverAddress)
+                _ = await DNSResolver.proxies.resolveAll(proxy.serverAddress)
             }
         }
 
@@ -86,12 +85,10 @@ nonisolated enum LatencyTester {
         do {
             let ms = try await withTaskCancellationHandler {
                 let proxyConnection = try await Self.establishWarmedConnection(client: client)
-
-                // Phase 3 (untimed): send the request.
+                
                 let httpRequest = "HEAD / HTTP/1.1\r\nHost: \(Self.latencyHost)\r\nConnection: close\r\n\r\n".data(using: .utf8)!
                 try await proxyConnection.send(httpRequest)
-
-                // Phase 4 (timed): timer starts after the send completes.
+                
                 let clock = ContinuousClock()
                 let start = clock.now
 

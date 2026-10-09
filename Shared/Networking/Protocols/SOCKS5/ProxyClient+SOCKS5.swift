@@ -19,7 +19,7 @@ extension ProxyClient {
         if let tunnel = self.tunnel {
             transport = TunneledTransport(tunnel: tunnel)
         } else {
-            let tcp = TCPTransport(host: directDialHost, port: configuration.serverPort, resolvesViaProxyDNS: true)
+            let tcp = TCPTransport(host: directDialHost, port: configuration.serverPort, resolution: .proxies)
             try await tcp.connect()
             transport = tcp
         }
@@ -91,7 +91,7 @@ extension ProxyClient {
                 finalDestination: (relayHost, relayPort)
             )
         } else {
-            let transport = UDPTransport(host: relayHost, port: relayPort, resolvesViaProxyDNS: true)
+            let transport = UDPTransport(host: relayHost, port: relayPort, resolution: .proxies)
             try await transport.connect()
             return DirectUDPProxyConnection(transport: transport)
         }

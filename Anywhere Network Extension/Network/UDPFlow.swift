@@ -364,7 +364,7 @@ actor UDPFlow {
     // MARK: Direct (bypass)
 
     private func runDirectLifecycle() async {
-        let transport = UDPTransport(host: dstHost, port: dstPort)
+        let transport = UDPTransport(host: dstHost, port: dstPort, resolution: .localRequests)
 
         let connectError: Error?
         do {
@@ -462,7 +462,7 @@ actor UDPFlow {
             return
         }
 
-        let cachedHints = DNSResolver.shared.cachedIPs(for: dstHost) ?? []
+        let cachedHints = DNSResolver.proxies.cachedIPs(for: dstHost) ?? []
         let (token, stream) = await session.register(
             dstHost: dstHost, dstPort: dstPort, responseHostHints: cachedHints
         )
@@ -474,7 +474,7 @@ actor UDPFlow {
         if cachedHints.isEmpty, Self.isDomainName(dstHost) {
             let host = dstHost
             Task { [weak session] in
-                let ips = await DNSResolver.shared.resolveAll(host)
+                let ips = await DNSResolver.proxies.resolveAll(host)
                 guard !ips.isEmpty, let session else { return }
                 await session.addResponseHints(token: token, hints: ips)
             }

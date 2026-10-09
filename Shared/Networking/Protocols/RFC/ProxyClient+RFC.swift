@@ -126,7 +126,7 @@ extension ProxyClient {
                 let tcp = TCPTransport(
                     host: directDialHost,
                     port: configuration.serverPort,
-                    resolvesViaProxyDNS: true
+                    resolution: .proxies
                 )
                 try await tcp.connect()
                 transport = tcp

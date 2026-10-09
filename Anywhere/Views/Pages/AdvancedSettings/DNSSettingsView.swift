@@ -10,8 +10,8 @@ import SwiftUI
 private struct ServerDrafts: Equatable {
     var subscriptionPlain = DNSUpstream.defaultPlainServer
     var subscriptionDoH = DNSUpstream.defaultDoHURL
-    var ipRulePlain = DNSUpstream.defaultPlainServer
-    var ipRuleDoH = DNSUpstream.defaultDoHURL
+    var localRequestPlain = DNSUpstream.defaultPlainServer
+    var localRequestDoH = DNSUpstream.defaultDoHURL
     var proxyPlain = DNSUpstream.defaultPlainServer
     var proxyDoH = DNSUpstream.defaultDoHURL
     var echPlain = DNSUpstream.defaultPlainServer
@@ -48,19 +48,19 @@ struct DNSSettingsView: View {
                 }
             }
 
-            Section("IP Rules") {
-                Picker("Resolver", selection: $settings.ipRuleDNSMode) {
+            Section("Local Requests") {
+                Picker("Resolver", selection: $settings.localRequestDNSMode) {
                     ForEach(DNSMode.allCases, id: \.self) { mode in
                         Text(mode.title).tag(mode)
                     }
                 }
-                switch settings.ipRuleDNSMode {
+                switch settings.localRequestDNSMode {
                 case .default:
                     EmptyView()
                 case .plain:
-                    plainRow($drafts.ipRulePlain)
+                    plainRow($drafts.localRequestPlain)
                 case .doh:
-                    dohRow($drafts.ipRuleDoH)
+                    dohRow($drafts.localRequestDoH)
                 }
             }
 
@@ -167,8 +167,8 @@ struct DNSSettingsView: View {
         drafts = ServerDrafts(
             subscriptionPlain: settings.subscriptionDNSPlainServer,
             subscriptionDoH: settings.subscriptionDNSDoHURL,
-            ipRulePlain: settings.ipRuleDNSPlainServer,
-            ipRuleDoH: settings.ipRuleDNSDoHURL,
+            localRequestPlain: settings.localRequestDNSPlainServer,
+            localRequestDoH: settings.localRequestDNSDoHURL,
             proxyPlain: settings.proxyDNSPlainServer,
             proxyDoH: settings.proxyDNSDoHURL,
             echPlain: settings.echDNSPlainServer,
@@ -181,8 +181,8 @@ struct DNSSettingsView: View {
         drafts = ServerDrafts(
             subscriptionPlain: Self.normalized(drafts.subscriptionPlain, empty: DNSUpstream.defaultPlainServer),
             subscriptionDoH: Self.normalized(drafts.subscriptionDoH, empty: DNSUpstream.defaultDoHURL),
-            ipRulePlain: Self.normalized(drafts.ipRulePlain, empty: DNSUpstream.defaultPlainServer),
-            ipRuleDoH: Self.normalized(drafts.ipRuleDoH, empty: DNSUpstream.defaultDoHURL),
+            localRequestPlain: Self.normalized(drafts.localRequestPlain, empty: DNSUpstream.defaultPlainServer),
+            localRequestDoH: Self.normalized(drafts.localRequestDoH, empty: DNSUpstream.defaultDoHURL),
             proxyPlain: Self.normalized(drafts.proxyPlain, empty: DNSUpstream.defaultPlainServer),
             proxyDoH: Self.normalized(drafts.proxyDoH, empty: DNSUpstream.defaultDoHURL),
             echPlain: Self.normalized(drafts.echPlain, empty: DNSUpstream.defaultPlainServer),
@@ -196,11 +196,11 @@ struct DNSSettingsView: View {
         if settings.subscriptionDNSDoHURL != drafts.subscriptionDoH {
             settings.subscriptionDNSDoHURL = drafts.subscriptionDoH
         }
-        if settings.ipRuleDNSPlainServer != drafts.ipRulePlain {
-            settings.ipRuleDNSPlainServer = drafts.ipRulePlain
+        if settings.localRequestDNSPlainServer != drafts.localRequestPlain {
+            settings.localRequestDNSPlainServer = drafts.localRequestPlain
         }
-        if settings.ipRuleDNSDoHURL != drafts.ipRuleDoH {
-            settings.ipRuleDNSDoHURL = drafts.ipRuleDoH
+        if settings.localRequestDNSDoHURL != drafts.localRequestDoH {
+            settings.localRequestDNSDoHURL = drafts.localRequestDoH
         }
         if settings.proxyDNSPlainServer != drafts.proxyPlain {
             settings.proxyDNSPlainServer = drafts.proxyPlain

@@ -100,7 +100,7 @@ nonisolated final class ConnectionRouter: Sendable {
         }
 
         if !preventDNSLeak.load(ordering: .relaxed) {
-            if let resolvedIP = RuleResolver.shared.cachedIPv4(for: domain) {
+            if let resolvedIP = DNSResolver.localRequests.cachedIPs(for: domain, family: .ipv4)?.first {
                 if let match = domainRouter.matchIP(resolvedIP) {
                     return RouteDecision(
                         host: domain,
@@ -118,7 +118,7 @@ nonisolated final class ConnectionRouter: Sendable {
                     )
                 }
             } else {
-                RuleResolver.shared.warm(domain)
+                DNSResolver.localRequests.prewarm(domain, family: .ipv4)
                 return RouteDecision(
                     host: domain,
                     hostIsResolvedDomain: true,

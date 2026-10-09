@@ -52,7 +52,7 @@ nonisolated extension ProxyClient {
             setChainTunnel(nil)
             udpInner = tunnel
         } else {
-            let transport = UDPTransport(host: directDialHost, port: configuration.serverPort, resolvesViaProxyDNS: true)
+            let transport = UDPTransport(host: directDialHost, port: configuration.serverPort, resolution: .proxies)
             try await transport.connect()
             udpInner = DirectUDPProxyConnection(transport: transport)
         }

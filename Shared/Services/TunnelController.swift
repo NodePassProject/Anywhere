@@ -151,7 +151,7 @@ final class TunnelController {
         if let fallback {
             resolvedIP = fallback
         } else {
-            resolvedIP = await DNSResolver.shared.resolveHost(configuration.serverAddress)
+            resolvedIP = await DNSResolver.proxies.resolveHost(configuration.serverAddress)
         }
         guard let resolved = resolvedIP else {
             return configuration

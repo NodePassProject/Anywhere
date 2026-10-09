@@ -500,7 +500,6 @@ actor TunnelStack {
         settings = TunnelSettings.load()
         connectionRouter.preventDNSLeak.store(settings.preventDNSLeak, ordering: .relaxed)
         proxyMode = Self.effectiveProxyMode(settings: settings, network: networkContext)
-        RuleResolver.shared.setUpstream(settings.ipRuleDNSUpstream)
 
         if proxyMode == .direct {
             defaultRouteTarget = .direct

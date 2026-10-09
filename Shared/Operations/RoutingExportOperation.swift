@@ -64,7 +64,7 @@ struct RoutingExportOperation {
         for configuration in resolvedTargets.values {
             let address = configuration.serverAddress
             guard resolvedIPsByAddress[address] == nil else { continue }
-            if let ip = await DNSResolver.shared.resolveHost(address) {
+            if let ip = await DNSResolver.proxies.resolveHost(address) {
                 resolvedIPsByAddress[address] = ip
             }
         }

@@ -50,15 +50,15 @@ nonisolated final class TCPTransport: ByteTransport, Sendable {
 
     private let host: String
     private let port: UInt16
-    private let resolvesViaProxyDNS: Bool
+    private let resolution: DialResolution
     let endpointDescription: String
 
     private let dialAttempt: ConnectionMetrics.Attempt?
 
-    init(host: String, port: UInt16, resolvesViaProxyDNS: Bool = false) {
+    init(host: String, port: UInt16, resolution: DialResolution = .system) {
         self.host = host
         self.port = port
-        self.resolvesViaProxyDNS = resolvesViaProxyDNS
+        self.resolution = resolution
         self.endpointDescription = "\(host):\(port)"
         self.dialAttempt = ConnectionMetrics.currentAttempt
     }
@@ -77,7 +77,7 @@ nonisolated final class TCPTransport: ByteTransport, Sendable {
         guard let nwPort = NWEndpoint.Port(rawValue: port) else {
             throw AnywhereError.transport(.connectionFailed(endpoint: nil, detail: "invalid port \(port)"))
         }
-        let endpointHost = await NWEndpoint.Host.dialHost(for: host, viaProxyDNS: resolvesViaProxyDNS)
+        let endpointHost = try await NWEndpoint.Host.dialHost(for: host, resolution: resolution)
         let endpoint = NWEndpoint.hostPort(host: endpointHost, port: nwPort)
         let slot = FlowSlot(context: "[TCP] \(endpointDescription)")
 

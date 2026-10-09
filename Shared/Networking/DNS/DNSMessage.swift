@@ -21,11 +21,11 @@ nonisolated enum DNSMessage {
     static func makeQuery(domain: String, type: UInt16, id: UInt16, udpPayloadSize: UInt16? = nil) -> Data? {
         var message = Data(capacity: 32 + domain.utf8.count)
         message.append(contentsOf: [UInt8(id >> 8), UInt8(id & 0xFF)])
-        message.append(contentsOf: [0x01, 0x00])    // RD=1, everything else clear
-        message.append(contentsOf: [0x00, 0x01])    // QDCOUNT = 1
-        message.append(contentsOf: [0x00, 0x00])    // ANCOUNT
-        message.append(contentsOf: [0x00, 0x00])    // NSCOUNT
-        message.append(contentsOf: [0x00, udpPayloadSize == nil ? 0x00 : 0x01])    // ARCOUNT
+        message.append(contentsOf: [0x01, 0x00])
+        message.append(contentsOf: [0x00, 0x01])
+        message.append(contentsOf: [0x00, 0x00])
+        message.append(contentsOf: [0x00, 0x00])
+        message.append(contentsOf: [0x00, udpPayloadSize == nil ? 0x00 : 0x01])
 
         var labelCount = 0
         for label in domain.split(separator: ".") {
@@ -36,17 +36,17 @@ nonisolated enum DNSMessage {
             labelCount += 1
         }
         guard labelCount > 0 else { return nil }
-        message.append(0)                           // root label
+        message.append(0)
 
         message.append(contentsOf: [UInt8(type >> 8), UInt8(type & 0xFF)])
         message.append(contentsOf: [UInt8(classIN >> 8), UInt8(classIN & 0xFF)])
 
         if let udpPayloadSize {
-            message.append(0)                       // root owner name
+            message.append(0)
             message.append(contentsOf: [UInt8(typeOPT >> 8), UInt8(typeOPT & 0xFF)])
             message.append(contentsOf: [UInt8(udpPayloadSize >> 8), UInt8(udpPayloadSize & 0xFF)])
-            message.append(contentsOf: [0x00, 0x00, 0x00, 0x00])    // extended RCODE/flags clear
-            message.append(contentsOf: [0x00, 0x00])                // RDLENGTH = 0
+            message.append(contentsOf: [0x00, 0x00, 0x00, 0x00])
+            message.append(contentsOf: [0x00, 0x00])
         }
 
         guard message.count <= 512 else { return nil }
@@ -74,8 +74,11 @@ nonisolated enum DNSMessage {
         return ipv4 + ipv6
     }
     
-    static func parseRecords(_ response: Data, expectedID: UInt16,
-                             type wantedType: UInt16) throws(ParseFailure) -> [(rdata: Data, ttl: UInt32)] {
+    static func parseRecords(
+        _ response: Data,
+        expectedID: UInt16,
+        type wantedType: UInt16
+    ) throws(ParseFailure) -> [(rdata: Data, ttl: UInt32)] {
         var records: [(rdata: Data, ttl: UInt32)] = []
         try walkAnswers(response, expectedID: expectedID) { type, ttl, rdata in
             if type == wantedType { records.append((Data(rdata), ttl)) }
@@ -138,14 +141,13 @@ nonisolated enum DNSMessage {
             if length & 0xC0 == 0xC0 {
                 guard cursor + 2 <= bytes.count else { return nil }
                 let target = Int(UInt16(bytes[cursor] & 0x3F) << 8 | UInt16(bytes[cursor + 1]))
-                // Pointers must point backwards into the header-adjacent region.
                 guard target < cursor, target >= headerLength else { return nil }
                 return cursor + 2
             }
-            guard length & 0xC0 == 0 else { return nil }        // reserved label type
+            guard length & 0xC0 == 0 else { return nil }
 
             cursor += 1
-            if length == 0 { return cursor }                    // root label ends the name
+            if length == 0 { return cursor }
             cursor += length
             guard cursor <= bytes.count else { return nil }
         }

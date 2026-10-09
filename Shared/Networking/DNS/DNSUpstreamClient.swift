@@ -14,14 +14,13 @@ nonisolated enum DNSUpstreamClient {
     
     private static let recordUDPPayloadSize: UInt16 = 1232
 
-    enum Family {
-        case ipv4
-        case both
-    }
-
     // MARK: - Public API
     
-    static func resolve(_ host: String, via upstream: DNSUpstream, family: Family = .both) async throws -> [String] {
+    static func resolve(
+        _ host: String,
+        via upstream: DNSUpstream,
+        family: DNSAddressFamily = .preferIPv4
+    ) async throws -> [String] {
         let addresses: [String]
         do {
             switch upstream {
@@ -49,7 +48,9 @@ nonisolated enum DNSUpstreamClient {
     }
     
     static func queryRecord(
-        _ host: String, type: UInt16, via upstream: DNSUpstream,
+        _ host: String,
+        type: UInt16,
+        via upstream: DNSUpstream,
         accept: @escaping @Sendable (Data) -> Data?
     ) async throws -> (payload: Data, ttl: UInt32)? {
         do {
@@ -71,13 +72,15 @@ nonisolated enum DNSUpstreamClient {
     
     private static func queryAll(
         _ host: String,
-        family: Family,
+        family: DNSAddressFamily,
         query: @escaping @Sendable (String, UInt16) async throws -> [String]
     ) async throws -> [String] {
         switch family {
         case .ipv4:
             return try await query(host, DNSMessage.typeA)
-        case .both:
+        case .ipv6:
+            return try await query(host, DNSMessage.typeAAAA)
+        case .preferIPv4:
             async let ipv4 = query(host, DNSMessage.typeA)
             async let ipv6 = query(host, DNSMessage.typeAAAA)
             var addresses: [String] = []
@@ -92,8 +95,12 @@ nonisolated enum DNSUpstreamClient {
 
     // MARK: - Plain
 
-    private static func queryPlain(_ name: String, type: UInt16,
-                                   server: String, port: UInt16) async throws -> [String] {
+    private static func queryPlain(
+        _ name: String,
+        type: UInt16,
+        server: String,
+        port: UInt16
+    ) async throws -> [String] {
         let id = UInt16.random(in: UInt16.min...UInt16.max)
         guard let query = DNSMessage.makeQuery(domain: name, type: type, id: id) else {
             throw AnywhereError.dns(.resolutionFailed(host: name, detail: "name not encodable"))
@@ -117,7 +124,10 @@ nonisolated enum DNSUpstreamClient {
     }
 
     private static func queryRecordPlain(
-        _ name: String, type: UInt16, server: String, port: UInt16,
+        _ name: String,
+        type: UInt16,
+        server: String,
+        port: UInt16,
         accept: @escaping @Sendable (Data) -> Data?
     ) async throws -> (payload: Data, ttl: UInt32)? {
         let id = UInt16.random(in: UInt16.min...UInt16.max)
@@ -178,7 +188,9 @@ nonisolated enum DNSUpstreamClient {
     }
 
     private static func queryRecordDoH(
-        _ name: String, type: UInt16, url: URL,
+        _ name: String,
+        type: UInt16,
+        url: URL,
         accept: @escaping @Sendable (Data) -> Data?
     ) async throws -> (payload: Data, ttl: UInt32)? {
         let id: UInt16 = 0
@@ -221,8 +233,12 @@ nonisolated enum DNSUpstreamClient {
         }
     }
 
-    private static func decodeRecords(_ message: Data, id: UInt16, name: String,
-                                      type: UInt16) throws -> [(rdata: Data, ttl: UInt32)]? {
+    private static func decodeRecords(
+        _ message: Data,
+        id: UInt16,
+        name: String,
+        type: UInt16
+    ) throws -> [(rdata: Data, ttl: UInt32)]? {
         do {
             return try DNSMessage.parseRecords(message, expectedID: id, type: type)
         } catch DNSMessage.ParseFailure.identifierMismatch {

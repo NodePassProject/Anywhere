@@ -20,7 +20,6 @@ nonisolated struct TunnelSettings: Equatable {
     var hideVPNIcon = false
     var tunnelIncludedRoutes: [String] = []
     var tunnelExcludedRoutes: [String] = []
-    var ipRuleDNSUpstream: DNSUpstream = .system
     var interceptExemptDNSServers: Set<String> = []
 
     static func load() -> TunnelSettings {
@@ -37,7 +36,6 @@ nonisolated struct TunnelSettings: Equatable {
             hideVPNIcon: AWCore.getHideVPNIcon(),
             tunnelIncludedRoutes: AWCore.getTunnelIncludedRoutes(),
             tunnelExcludedRoutes: AWCore.getTunnelExcludedRoutes(),
-            ipRuleDNSUpstream: AWCore.getIPRuleDNSUpstream(),
             interceptExemptDNSServers: TunnelStack.interceptExemptDNSServers()
         )
     }

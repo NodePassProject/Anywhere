@@ -416,7 +416,7 @@ nonisolated extension ProxyClient {
         }
         switch security {
         case .none:
-            let transport = TCPTransport(host: host, port: port, resolvesViaProxyDNS: true)
+            let transport = TCPTransport(host: host, port: port, resolution: .proxies)
             try await transport.connect()
             return try await bringUp(transport, retaining: transport)
         case .tls(let tlsConfig):
@@ -484,7 +484,7 @@ nonisolated extension ProxyClient {
             if let tunnel = overTunnel {
                 return .byteStream(TunneledTransport(tunnel: tunnel))
             } else {
-                let transport = TCPTransport(host: host, port: port, resolvesViaProxyDNS: true)
+                let transport = TCPTransport(host: host, port: port, resolution: .proxies)
                 try await transport.connect()
                 return .byteStream(transport)
             }
@@ -594,7 +594,7 @@ nonisolated extension ProxyClient {
         }
         switch security {
         case .none:
-            let transport = TCPTransport(host: host, port: port, resolvesViaProxyDNS: true)
+            let transport = TCPTransport(host: host, port: port, resolution: .proxies)
             do {
                 try await transport.connect()
             } catch {

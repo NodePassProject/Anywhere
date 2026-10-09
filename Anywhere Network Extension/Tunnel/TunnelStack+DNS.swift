@@ -27,7 +27,7 @@ extension TunnelStack {
     static func interceptExemptDNSServers() -> Set<String> {
         let upstreams = [
             AWCore.getSubscriptionDNSUpstream(),
-            AWCore.getIPRuleDNSUpstream(),
+            AWCore.getLocalRequestDNSUpstream(),
             AWCore.getProxyDNSUpstream(),
             AWCore.getECHDNSUpstream(),
             AWCore.getFallbackDNSUpstream()

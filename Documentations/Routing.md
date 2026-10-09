@@ -54,10 +54,10 @@ A destination is classified at several points:
 3. **Connect time, literal IP.** A connection to a real IP is matched against
    CIDR rules only.
 4. **Resolved-IP fallback.** A domain connection that matches **no** domain
-   rule has its real IPv4 (resolved through the dedicated IP-rule resolver)
-   checked against CIDR rules — TCP applies this before dialing, UDP holds the
-   first datagrams until resolution completes. Enabling **Prevent DNS Leak**
-   disables this fallback.
+   rule has its real IPv4 (resolved through the dedicated **Local Requests**
+   resolver) checked against CIDR rules — TCP applies this before dialing, UDP
+   holds the first datagrams until resolution completes. Enabling **Prevent
+   DNS Leak** disables this fallback.
 5. **TLS SNI.** A sniffed SNI re-runs domain matching mid-connection and can
    change the route of a connection that was accepted by IP.
 
@@ -363,21 +363,3 @@ deeper suffix wins within the tier regardless of set order.
   selected chain, else selected configuration, else the tunnel's
   configuration.
 - **Case-insensitive.** Hosts and rule values are folded to lowercase.
-
----
-
-## Code map
-
-| Area | Location |
-| ---- | -------- |
-| `.arrs` parsing, `routing` header | `Anywhere/Views/Pages/Routing/RoutingRuleParser.swift` |
-| Import / subscribe UI | `Anywhere/Views/Pages/Routing/RoutingView.swift` |
-| Rule model, binary payload layout (`ARB2`) | `Shared/Models/RoutingRule.swift` |
-| Set storage, 100,000-rule cap, assignments | `Shared/DataStore/RoutingRuleSetStore.swift` |
-| Payload compilation, tier assignment | `Shared/Operations/RoutingExportOperation.swift` |
-| Subscription refresh | `Shared/Operations/RoutingRuleSetOperations.swift` |
-| Tiered matcher, keyword automaton, CIDR tries | `Shared/Networking/Routing/TieredRouteMatcher.swift` |
-| Suffix trie | `Shared/Networking/Routing/FlatLabelTrie.swift` |
-| Payload decoding, per-tier lookup | `Anywhere Network Extension/Routers/DomainRouter.swift` |
-| Connection decisions, reject marks, IP fallback | `Anywhere Network Extension/Routers/ConnectionRouter.swift` |
-| Bundled services / ADBlock / country rules | `Shared/DataStore/RoutingRulesDatabase.swift`, `Shared/Catalog/` |

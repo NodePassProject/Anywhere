@@ -176,23 +176,23 @@ final class AppSettings {
         }
     }
     
-    var ipRuleDNSMode: DNSMode {
+    var localRequestDNSMode: DNSMode {
         didSet {
-            AWCore.setIPRuleDNSMode(ipRuleDNSMode)
+            AWCore.setLocalRequestDNSMode(localRequestDNSMode)
             AWNotificationCenter.notifyTunnelSettingsChanged()
         }
     }
 
-    var ipRuleDNSPlainServer: String {
+    var localRequestDNSPlainServer: String {
         didSet {
-            AWCore.setIPRuleDNSPlainServer(ipRuleDNSPlainServer)
+            AWCore.setLocalRequestDNSPlainServer(localRequestDNSPlainServer)
             AWNotificationCenter.notifyTunnelSettingsChanged()
         }
     }
 
-    var ipRuleDNSDoHURL: String {
+    var localRequestDNSDoHURL: String {
         didSet {
-            AWCore.setIPRuleDNSDoHURL(ipRuleDNSDoHURL)
+            AWCore.setLocalRequestDNSDoHURL(localRequestDNSDoHURL)
             AWNotificationCenter.notifyTunnelSettingsChanged()
         }
     }
@@ -331,9 +331,9 @@ final class AppSettings {
         fallbackDNSMode = AWCore.getFallbackDNSMode()
         fallbackDNSServer = AWCore.getFallbackDNSServer()
         hideVPNIcon = AWCore.getHideVPNIcon()
-        ipRuleDNSMode = AWCore.getIPRuleDNSMode()
-        ipRuleDNSPlainServer = AWCore.getIPRuleDNSPlainServer()
-        ipRuleDNSDoHURL = AWCore.getIPRuleDNSDoHURL()
+        localRequestDNSMode = AWCore.getLocalRequestDNSMode()
+        localRequestDNSPlainServer = AWCore.getLocalRequestDNSPlainServer()
+        localRequestDNSDoHURL = AWCore.getLocalRequestDNSDoHURL()
         preventDNSLeak = AWCore.getPreventDNSLeak()
         proxyDNSMode = AWCore.getProxyDNSMode()
         proxyDNSPlainServer = AWCore.getProxyDNSPlainServer()

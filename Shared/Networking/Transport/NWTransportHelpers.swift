@@ -99,12 +99,36 @@ extension NWEndpoint.Host {
         }
     }
     
-    nonisolated static func dialHost(for host: String, viaProxyDNS: Bool) async -> NWEndpoint.Host {
+    nonisolated static func dialHost(for host: String, resolution: DialResolution) async throws -> NWEndpoint.Host {
         if let literal = NWEndpoint.Host(ipLiteral: host) { return literal }
-        guard viaProxyDNS,
-              let resolved = await DNSResolver.shared.resolveDialAddress(for: host),
-              let literal = NWEndpoint.Host(ipLiteral: resolved)
-        else { return .name(host, nil) }
-        return literal
+        switch resolution {
+        case .system:
+            return .name(host, nil)
+        case .proxies:
+            let resolver = DNSResolver.proxies
+            guard !resolver.usesSystemUpstream,
+                  let resolved = await resolver.resolveHost(host),
+                  let literal = NWEndpoint.Host(ipLiteral: resolved)
+            else { return .name(host, nil) }
+            return literal
+        case .localRequests:
+            let resolver = DNSResolver.localRequests
+            var address = await resolver.resolveHost(host, family: .ipv4)
+            if address == nil {
+                address = await resolver.resolveHost(host, family: .ipv6)
+            }
+            guard let resolved = address, let literal = NWEndpoint.Host(ipLiteral: resolved) else {
+                throw AnywhereError.dns(.resolutionFailed(host: host, detail: nil))
+            }
+            return literal
+        }
     }
+}
+
+// MARK: - Dial resolution
+
+nonisolated enum DialResolution: Sendable {
+    case system
+    case proxies
+    case localRequests
 }

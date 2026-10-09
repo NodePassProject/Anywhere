@@ -379,7 +379,7 @@ nonisolated final class ProxyClient: Sendable {
     }
     
     func dialServerTransport() async throws -> TCPTransport {
-        let transport = TCPTransport(host: directDialHost, port: configuration.serverPort, resolvesViaProxyDNS: true)
+        let transport = TCPTransport(host: directDialHost, port: configuration.serverPort, resolution: .proxies)
         try await transport.connect()
         return transport
     }

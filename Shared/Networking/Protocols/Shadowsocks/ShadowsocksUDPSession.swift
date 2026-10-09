@@ -132,7 +132,7 @@ actor ShadowsocksUDPSession {
         self.serverHost = serverHost
         self.serverPort = serverPort
 
-        let asyncTransport = UDPTransport(host: serverHost, port: serverPort, resolvesViaProxyDNS: true)
+        let asyncTransport = UDPTransport(host: serverHost, port: serverPort, resolution: .proxies)
         self.asyncTransport = asyncTransport
 
         switch mode {

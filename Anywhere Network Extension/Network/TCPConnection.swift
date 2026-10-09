@@ -264,7 +264,7 @@ actor TCPConnection: MITMSessionHost {
     private func applyIPRuleMatch() async {
         guard hostIsResolvedDomain, !ruleMatched, phase != .closed,
               let stack, !stack.connectionRouter.preventDNSLeak.load(ordering: .relaxed),
-              let ip = await RuleResolver.shared.resolveIPv4(for: dstHost),
+              let ip = await DNSResolver.localRequests.resolveHost(dstHost, family: .ipv4),
               phase != .closed, let match = stack.domainRouter.matchIP(ip)
         else { return }
 
@@ -485,7 +485,7 @@ actor TCPConnection: MITMSessionHost {
             pendingData.removeAll(keepingCapacity: true)
         }
 
-        let transport = TCPTransport(host: dstHost, port: dstPort)
+        let transport = TCPTransport(host: dstHost, port: dstPort, resolution: .localRequests)
         let connection = DirectProxyConnection(transport: transport)
         self.proxyConnection = connection
 
@@ -1004,7 +1004,7 @@ actor TCPConnection: MITMSessionHost {
     }
 
     private func dialDirectUpstream(host: String, port: UInt16) async throws -> MITMDialResult {
-        let transport = TCPTransport(host: host, port: port)
+        let transport = TCPTransport(host: host, port: port, resolution: .localRequests)
         let connection = DirectProxyConnection(transport: transport)
         do {
             try await withDialDeadline(.seconds(TunnelConstants.handshakeTimeout), onExpiry: {
@@ -1138,7 +1138,7 @@ actor TCPConnection: MITMSessionHost {
     private func ipRuleCandidate(forDialHost host: String) async -> String? {
         if let literal = Self.bareIPLiteral(host) { return literal }
         guard let stack, !stack.connectionRouter.preventDNSLeak.load(ordering: .relaxed) else { return nil }
-        return await RuleResolver.shared.resolveIPv4(for: host)
+        return await DNSResolver.localRequests.resolveHost(host, family: .ipv4)
     }
 
     nonisolated private static func bareIPLiteral(_ host: String) -> String? {

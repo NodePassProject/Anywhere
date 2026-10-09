@@ -332,9 +332,6 @@ extension TunnelStack {
         if new.reflectionEnabled != old.reflectionEnabled {
             publishReflectionEnabled()
         }
-        if new.ipRuleDNSUpstream != old.ipRuleDNSUpstream {
-            RuleResolver.shared.setUpstream(new.ipRuleDNSUpstream)
-        }
         let tunnelRoutesChanged = new.tunnelIncludedRoutes != old.tunnelIncludedRoutes
             || new.tunnelExcludedRoutes != old.tunnelExcludedRoutes
             || new.hideVPNIcon != old.hideVPNIcon
