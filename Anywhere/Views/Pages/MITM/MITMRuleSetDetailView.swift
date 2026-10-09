@@ -12,13 +12,19 @@ private struct MITMDomainSuffixDraft: Identifiable, Equatable {
     var value: String
 }
 
+enum MITMRuleSetTarget: Hashable {
+    case standalone(UUID)
+    case module(moduleId: UUID, ruleSetId: UUID)
+}
+
 struct MITMRuleSetDetailView: View {
     @Environment(\.editMode) private var editMode
-
+    
     @Environment(Operations.self) private var operations
-    @Environment(MITMRuleSetStore.self) private var store
-
-    let ruleSet: MITMRuleSet?
+    @Environment(MITMRuleSetStore.self) private var mitmRuleSetStore
+    @Environment(ModuleStore.self) private var moduleStore
+    
+    let target: MITMRuleSetTarget
 
     @State private var enabled: Bool = true
     @State private var suffixDrafts: [MITMDomainSuffixDraft] = []
@@ -37,14 +43,34 @@ struct MITMRuleSetDetailView: View {
     @State private var updateSucceeded = false
     @State private var updateError: String?
 
+    init(ruleSet: MITMRuleSet) {
+        target = .standalone(ruleSet.id)
+    }
+
+    init(target: MITMRuleSetTarget) {
+        self.target = target
+    }
+
     private var isEditing: Bool? { editMode?.wrappedValue.isEditing }
     
     private var currentRuleSet: MITMRuleSet? {
-        guard let id = ruleSet?.id else { return ruleSet }
-        return store.ruleSet(id: id) ?? ruleSet
+        switch target {
+        case .standalone(let id):
+            return mitmRuleSetStore.ruleSet(id: id)
+        case .module(let moduleId, let ruleSetId):
+            return moduleStore.mitmRuleSet(ruleSetId, in: moduleId)?.asMITMRuleSet()
+        }
     }
-
-    private var subscriptionURL: URL? { currentRuleSet?.subscriptionURL }
+    
+    private var subscriptionURL: URL? {
+        guard case .standalone = target else { return nil }
+        return currentRuleSet?.subscriptionURL
+    }
+    
+    private var isReadOnly: Bool {
+        guard case .module(let moduleId, _) = target else { return false }
+        return moduleStore.module(id: moduleId)?.isSubscribed ?? true
+    }
 
     var body: some View {
         Form {
@@ -53,9 +79,7 @@ struct MITMRuleSetDetailView: View {
                     get: { enabled },
                     set: { newValue in
                         enabled = newValue
-                        if let id = ruleSet?.id {
-                            operations.mitmRuleSets.setRuleSet(id, enabled: newValue)
-                        }
+                        setEnabled(newValue)
                     }
                 ))
             }
@@ -76,11 +100,13 @@ struct MITMRuleSetDetailView: View {
                 rulesSection
             }
         }
-        .navigationTitle(ruleSet?.name ?? String(localized: "Rule Set"))
+        .navigationTitle(currentRuleSet?.name ?? String(localized: "Rule Set"))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem {
-                EditButton()
+            if !isReadOnly {
+                ToolbarItem {
+                    EditButton()
+                }
             }
         }
         .sheet(isPresented: $showAddSheet) {
@@ -129,13 +155,38 @@ struct MITMRuleSetDetailView: View {
         }
     }
 
+    // MARK: - Persistence
+
     private func save() {
-        guard let id = ruleSet?.id else { return }
+        guard !isReadOnly else { return }
         suffixDrafts = suffixDrafts
             .filter { !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         let suffixes = suffixDrafts
             .map { $0.value.trimmingCharacters(in: .whitespacesAndNewlines) }
-        operations.mitmRuleSets.updateRuleSet(id, domainSuffixes: suffixes, rules: rules)
+        switch target {
+        case .standalone(let id):
+            operations.mitmRuleSets.updateRuleSet(id, domainSuffixes: suffixes, rules: rules)
+        case .module(let moduleId, let ruleSetId):
+            operations.modules.updateMITMRuleSet(ruleSetId, in: moduleId, domainSuffixes: suffixes, rules: rules)
+        }
+    }
+
+    private func setEnabled(_ value: Bool) {
+        switch target {
+        case .standalone(let id):
+            operations.mitmRuleSets.setRuleSet(id, enabled: value)
+        case .module(let moduleId, let ruleSetId):
+            operations.modules.setMITMRuleSet(ruleSetId, in: moduleId, enabled: value)
+        }
+    }
+
+    private func setParameterValue(name: String, value: String) {
+        switch target {
+        case .standalone(let id):
+            operations.mitmRuleSets.setParameterValue(id, name: name, value: value)
+        case .module(let moduleId, let ruleSetId):
+            operations.modules.setMITMParameterValue(ruleSetId, in: moduleId, name: name, value: value)
+        }
     }
 
     @ViewBuilder
@@ -210,9 +261,7 @@ struct MITMRuleSetDetailView: View {
             get: { parameterValues[parameter.name] ?? parameter.defaultValue },
             set: { newValue in
                 parameterValues[parameter.name] = newValue
-                if let id = ruleSet?.id {
-                    operations.mitmRuleSets.setParameterValue(id, name: parameter.name, value: newValue)
-                }
+                setParameterValue(name: parameter.name, value: newValue)
             }
         )
     }
@@ -229,18 +278,18 @@ struct MITMRuleSetDetailView: View {
                     .textInputAutocapitalization(.never)
                     .disabled(isEditing != true)
             }
-            .onDelete { offsets in
+            .onDelete(perform: isReadOnly ? nil : { offsets in
                 suffixDrafts.remove(atOffsets: offsets)
                 if isEditing != true {
                     save()
                 }
-            }
-            .onMove { source, destination in
+            })
+            .onMove(perform: isReadOnly ? nil : { source, destination in
                 suffixDrafts.move(fromOffsets: source, toOffset: destination)
                 if isEditing != true {
                     save()
                 }
-            }
+            })
         }
     }
     
@@ -261,6 +310,7 @@ struct MITMRuleSetDetailView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
                 .onTapGesture {
+                    guard !isReadOnly else { return }
                     // Scripts and native JSON-body edits are import-only.
                     switch rule.operation {
                     case .script, .streamScript, .bodyJSON: return
@@ -269,18 +319,18 @@ struct MITMRuleSetDetailView: View {
                     editingRule = rule
                 }
             }
-            .onDelete { offsets in
+            .onDelete(perform: isReadOnly ? nil : { offsets in
                 rules.remove(atOffsets: offsets)
                 if isEditing != true {
                     save()
                 }
-            }
-            .onMove { source, destination in
+            })
+            .onMove(perform: isReadOnly ? nil : { source, destination in
                 rules.move(fromOffsets: source, toOffset: destination)
                 if isEditing != true {
                     save()
                 }
-            }
+            })
             if isEditing == true {
                 Button {
                     showAddSheet = true
@@ -292,7 +342,7 @@ struct MITMRuleSetDetailView: View {
     }
 
     private func refresh() {
-        guard let id = ruleSet?.id else { return }
+        guard case .standalone(let id) = target else { return }
         isUpdating = true
         Task {
             do {

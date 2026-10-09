@@ -76,6 +76,7 @@ nonisolated final class AWCore {
         static let localRequestDNSMode = "localRequestDNSMode"
         static let localRequestDNSPlainServer = "localRequestDNSPlainServer"
         static let mitmEnabled = "mitmEnabled"
+        static let moduleRuleSetAssignments = "moduleRuleSetAssignments"
         static let onboardingCompleted = "onboardingCompleted"
         static let preventDNSLeak = "preventDNSLeak"
         static let proxiesPageProxyType = "proxiesPageProxyType"
@@ -359,12 +360,20 @@ nonisolated final class AWCore {
         userDefaults.set(value, forKey: UserDefaultsKey.bypassCountryCode)
     }
     
-    static func getRuleSetAssignments() -> [String: String] {
+    static func getRoutingRuleSetAssignments() -> [String: String] {
         userDefaults.dictionary(forKey: UserDefaultsKey.ruleSetAssignments) as? [String: String] ?? [:]
     }
 
-    static func setRuleSetAssignments(_ assignments: [String: String]) {
+    static func setRoutingRuleSetAssignments(_ assignments: [String: String]) {
         userDefaults.set(assignments, forKey: UserDefaultsKey.ruleSetAssignments)
+    }
+    
+    static func getModuleRoutingRuleSetAssignments() -> [String: String] {
+        userDefaults.dictionary(forKey: UserDefaultsKey.moduleRuleSetAssignments) as? [String: String] ?? [:]
+    }
+
+    static func setModuleRoutingRuleSetAssignments(_ assignments: [String: String]) {
+        userDefaults.set(assignments, forKey: UserDefaultsKey.moduleRuleSetAssignments)
     }
 
     static func getAllowInsecure() -> Bool {

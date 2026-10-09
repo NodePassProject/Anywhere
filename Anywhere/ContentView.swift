@@ -16,8 +16,8 @@ struct ContentView: View {
     @State private var showingDeepLinkAddSheet = false
     @State private var showingManualAddSheet = false
     @State private var pendingDeepLinkURL: String?
-    @State private var showingImportRuleSetsSheet = false
-    @State private var pendingRuleSetLinks: [URL] = []
+    @State private var showingImportModuleSheet = false
+    @State private var pendingModuleLink: URL?
     
     private var showOrphanedAlert: Binding<Bool> {
         Binding(
@@ -40,8 +40,10 @@ struct ContentView: View {
                         operations.selection.selectIfNone(configuration)
                     }
                 }
-                .sheet(isPresented: $showingImportRuleSetsSheet, onDismiss: { pendingRuleSetLinks = [] }) {
-                    ImportRuleSetsView(links: pendingRuleSetLinks)
+                .sheet(isPresented: $showingImportModuleSheet, onDismiss: { pendingModuleLink = nil }) {
+                    if let link = pendingModuleLink {
+                        ImportModuleView(link: link)
+                    }
                 }
                 .alert(String(localized: "Routing Rules Updated"), isPresented: showOrphanedAlert) {
                     Button(String(localized: "OK")) {}
@@ -59,11 +61,11 @@ struct ContentView: View {
                         showingDeepLinkAddSheet = true
                     }
                 }
-                .onChange(of: deepLinkManager.ruleSetLinks) { _, newValue in
-                    if let links = newValue, !links.isEmpty {
-                        pendingRuleSetLinks = links
-                        deepLinkManager.ruleSetLinks = nil
-                        showingImportRuleSetsSheet = true
+                .onChange(of: deepLinkManager.moduleLink) { _, newValue in
+                    if let link = newValue {
+                        pendingModuleLink = link
+                        deepLinkManager.moduleLink = nil
+                        showingImportModuleSheet = true
                     }
                 }
         } else {

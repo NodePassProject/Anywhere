@@ -55,6 +55,10 @@ struct HomeView: View {
                     Tab(Page.mitm.name, systemImage: Page.mitm.symbol, value: Page.mitm) {
                         MITMView()
                     }
+                    
+                    Tab(Page.modules.name, systemImage: Page.modules.symbol, value: Page.modules) {
+                        ModulesView()
+                    }
                 } header: {
                     Text("VPN")
                 }

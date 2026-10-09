@@ -110,7 +110,7 @@ class RoutingRuleSetStore {
     init(syncStore: SyncStore) {
         self.syncStore = syncStore
         bypassCountryCode = AWCore.getBypassCountryCode()
-        let assignments = AWCore.getRuleSetAssignments()
+        let assignments = AWCore.getRoutingRuleSetAssignments()
 
         let items = syncStore.loadItems(.customRuleSets)
         loadedItems = items
@@ -143,7 +143,7 @@ class RoutingRuleSetStore {
     }
 
     private func rebuildRuleSets(assignments: [String: String]? = nil) {
-        let assignmentsDict = assignments ?? AWCore.getRuleSetAssignments()
+        let assignmentsDict = assignments ?? AWCore.getRoutingRuleSetAssignments()
 
         var sets = Self.builtIn.map { name in
             RoutingRuleSet(id: name, name: name, assignedConfigurationId: assignmentsDict[name])
@@ -217,9 +217,9 @@ class RoutingRuleSetStore {
         customRuleSets.append(stamped)
         saveCustomRuleSets()
         if let initialAssignment {
-            var assignments = AWCore.getRuleSetAssignments()
+            var assignments = AWCore.getRoutingRuleSetAssignments()
             assignments[ruleSet.id.uuidString] = initialAssignment
-            AWCore.setRuleSetAssignments(assignments)
+            AWCore.setRoutingRuleSetAssignments(assignments)
         }
         rebuildRuleSets()
     }
@@ -231,9 +231,9 @@ class RoutingRuleSetStore {
         customRuleSets.removeAll { $0.id == id }
         saveCustomRuleSets()
 
-        var assignments = AWCore.getRuleSetAssignments()
+        var assignments = AWCore.getRoutingRuleSetAssignments()
         assignments.removeValue(forKey: id.uuidString)
-        AWCore.setRuleSetAssignments(assignments)
+        AWCore.setRoutingRuleSetAssignments(assignments)
 
         rebuildRuleSets()
     }
@@ -290,7 +290,7 @@ class RoutingRuleSetStore {
         let dictionary = Dictionary(uniqueKeysWithValues: ruleSets.compactMap { ruleSet in
             ruleSet.assignedConfigurationId.map { (ruleSet.id, $0) }
         })
-        AWCore.setRuleSetAssignments(dictionary)
+        AWCore.setRoutingRuleSetAssignments(dictionary)
     }
     
     nonisolated private static func decodeCustomSplit(from items: [Data]) -> (live: [CustomRoutingRuleSet], tombstones: [CustomRoutingRuleSet]) {

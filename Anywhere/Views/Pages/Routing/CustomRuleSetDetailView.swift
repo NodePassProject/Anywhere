@@ -7,11 +7,18 @@
 
 import SwiftUI
 
+enum RoutingRuleSetTarget: Hashable {
+    case custom(UUID)
+    case module(moduleId: UUID, ruleSetId: UUID)
+}
+
 struct CustomRuleSetDetailView: View {
-    let customRuleSetId: UUID
     @Environment(\.editMode) private var editMode
     @Environment(Operations.self) private var operations
     @Environment(RoutingRuleSetStore.self) private var ruleSetStore
+    @Environment(ModuleStore.self) private var moduleStore
+    
+    let target: RoutingRuleSetTarget
 
     @State private var rules: [RoutingRule] = []
 
@@ -23,27 +30,73 @@ struct CustomRuleSetDetailView: View {
     @State private var updateSucceeded = false
     @State private var updateError: String?
 
+    init(customRuleSetId: UUID) {
+        target = .custom(customRuleSetId)
+    }
+
+    init(target: RoutingRuleSetTarget) {
+        self.target = target
+    }
+
     private var isEditing: Bool? { editMode?.wrappedValue.isEditing }
 
+    // MARK: - Target resolution
+
     private var customRuleSet: CustomRoutingRuleSet? {
-        ruleSetStore.customRuleSet(for: customRuleSetId)
+        guard case .custom(let id) = target else { return nil }
+        return ruleSetStore.customRuleSet(for: id)
     }
 
-    private var ruleSet: RoutingRuleSet? {
-        ruleSetStore.ruleSets.first { $0.id == customRuleSetId.uuidString }
+    private var moduleRuleSet: ModuleRoutingRuleSet? {
+        guard case .module(let moduleId, let ruleSetId) = target else { return nil }
+        return moduleStore.routingRuleSet(ruleSetId, in: moduleId)
     }
 
-    private var isSubscribed: Bool { customRuleSet?.subscriptionURL != nil }
+    private var owningModule: Module? {
+        guard case .module(let moduleId, _) = target else { return nil }
+        return moduleStore.module(id: moduleId)
+    }
+
+    private var name: String? { customRuleSet?.name ?? moduleRuleSet?.name }
+
+    private var storedRules: [RoutingRule]? { customRuleSet?.rules ?? moduleRuleSet?.rules }
+    
+    private var subscriptionURL: URL? { customRuleSet?.subscriptionURL }
+    
+    private var isReadOnly: Bool {
+        switch target {
+        case .custom: return customRuleSet?.subscriptionURL != nil
+        case .module: return owningModule?.isSubscribed ?? true
+        }
+    }
+
+    /// A subscribed module's set names are the keys that keep its ids stable
+    /// across refreshes, so they stay as the file names them.
+    private var canRename: Bool {
+        switch target {
+        case .custom: return true
+        case .module: return !isReadOnly
+        }
+    }
+
+    private var assignment: String? {
+        switch target {
+        case .custom(let id):
+            return ruleSetStore.ruleSets.first { $0.id == id.uuidString }?.assignedConfigurationId
+        case .module(_, let ruleSetId):
+            return moduleStore.routingAssignment(for: ruleSetId)
+        }
+    }
 
     var body: some View {
         List {
-            if let ruleSet {
+            if name != nil {
                 Section {
-                    assignmentMenu(for: ruleSet)
+                    assignmentMenu
                 }
             }
 
-            if let subscriptionURL = customRuleSet?.subscriptionURL {
+            if let subscriptionURL {
                 subscriptionSection(url: subscriptionURL)
             }
 
@@ -52,13 +105,13 @@ struct CustomRuleSetDetailView: View {
                     ForEach(rules) { rule in
                         ruleRow(rule)
                     }
-                    .onDelete(perform: isSubscribed ? nil : { offsets in
+                    .onDelete(perform: isReadOnly ? nil : { offsets in
                         rules.remove(atOffsets: offsets)
                         if isEditing != true {
                             save()
                         }
                     })
-                    .onMove(perform: isSubscribed ? nil : { source, destination in
+                    .onMove(perform: isReadOnly ? nil : { source, destination in
                         rules.move(fromOffsets: source, toOffset: destination)
                         if isEditing != true {
                             save()
@@ -67,45 +120,23 @@ struct CustomRuleSetDetailView: View {
                 }
             }
         }
-        .navigationTitle(customRuleSet?.name ?? String(localized: "Rule Set"))
+        .navigationTitle(name ?? String(localized: "Rule Set"))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if !isSubscribed {
+            if !isReadOnly {
                 ToolbarItem {
                     EditButton()
                 }
             }
-            if #available(iOS 27.0, *) {
-                ToolbarOverflowMenu {
-                    if !isSubscribed {
-                        Button {
-                            showAddRuleSheet = true
-                        } label: {
-                            Label("Add Rule", systemImage: "plus")
-                        }
+            if !isReadOnly || canRename {
+                if #available(iOS 27.0, *) {
+                    ToolbarOverflowMenu {
+                        menuItems
                     }
-                    Button {
-                        renameText = customRuleSet?.name ?? ""
-                        showRenameAlert = true
-                    } label: {
-                        Label("Rename", systemImage: "pencil")
-                    }
-                }
-            } else {
-                ToolbarItem {
-                    Menu("More", systemImage: "ellipsis") {
-                        if !isSubscribed {
-                            Button {
-                                showAddRuleSheet = true
-                            } label: {
-                                Label("Add Rule", systemImage: "plus")
-                            }
-                        }
-                        Button {
-                            renameText = customRuleSet?.name ?? ""
-                            showRenameAlert = true
-                        } label: {
-                            Label("Rename", systemImage: "pencil")
+                } else {
+                    ToolbarItem {
+                        Menu("More", systemImage: "ellipsis") {
+                            menuItems
                         }
                     }
                 }
@@ -124,7 +155,7 @@ struct CustomRuleSetDetailView: View {
             Button("Rename") {
                 let name = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !name.isEmpty else { return }
-                operations.routingRuleSets.updateCustomRuleSet(customRuleSetId, name: name)
+                rename(to: name)
             }
             Button("Cancel", role: .cancel) {}
         }
@@ -144,14 +175,59 @@ struct CustomRuleSetDetailView: View {
         }
     }
 
-    private func loadInitial() {
-        guard let customRuleSet else { return }
-        rules = customRuleSet.rules
+    @ViewBuilder
+    private var menuItems: some View {
+        if !isReadOnly {
+            Button {
+                showAddRuleSheet = true
+            } label: {
+                Label("Add Rule", systemImage: "plus")
+            }
+        }
+        if canRename {
+            Button {
+                renameText = name ?? ""
+                showRenameAlert = true
+            } label: {
+                Label("Rename", systemImage: "pencil")
+            }
+        }
     }
-    
+
+    // MARK: - Persistence
+
+    private func loadInitial() {
+        guard let storedRules else { return }
+        rules = storedRules
+    }
+
     private func save() {
-        guard rules != customRuleSet?.rules else { return }
-        operations.routingRuleSets.updateCustomRuleSet(customRuleSetId, rules: rules)
+        guard !isReadOnly, let storedRules, rules != storedRules else { return }
+        switch target {
+        case .custom(let id):
+            operations.routingRuleSets.updateCustomRuleSet(id, rules: rules)
+        case .module(let moduleId, let ruleSetId):
+            operations.modules.updateRoutingRuleSet(ruleSetId, in: moduleId, rules: rules)
+        }
+    }
+
+    private func rename(to name: String) {
+        switch target {
+        case .custom(let id):
+            operations.routingRuleSets.updateCustomRuleSet(id, name: name)
+        case .module(let moduleId, let ruleSetId):
+            operations.modules.updateRoutingRuleSet(ruleSetId, in: moduleId, name: name)
+        }
+    }
+
+    private func setAssignment(_ configurationId: String?) {
+        switch target {
+        case .custom(let id):
+            guard let ruleSet = ruleSetStore.ruleSets.first(where: { $0.id == id.uuidString }) else { return }
+            operations.routingRuleSets.updateAssignment(ruleSet, configurationId: configurationId)
+        case .module(_, let ruleSetId):
+            operations.modules.setRoutingRuleSetAssignment(configurationId, for: ruleSetId)
+        }
     }
 
     @ViewBuilder
@@ -175,10 +251,11 @@ struct CustomRuleSetDetailView: View {
     }
 
     private func refresh() {
+        guard case .custom(let id) = target else { return }
         isUpdating = true
         Task {
             do {
-                try await operations.routingRuleSets.refresh(customRuleSetId)
+                try await operations.routingRuleSets.refresh(id)
                 loadInitial()
                 isUpdating = false
                 updateSucceeded = true
@@ -209,14 +286,14 @@ struct CustomRuleSetDetailView: View {
     }
 
     @ViewBuilder
-    private func assignmentMenu(for ruleSet: RoutingRuleSet) -> some View {
+    private var assignmentMenu: some View {
         HStack {
             Text("Route To")
             Spacer()
             AssignmentMenuButton(selection: Binding(
-                get: { ruleSet.assignedConfigurationId },
+                get: { assignment },
                 set: { newValue in
-                    operations.routingRuleSets.updateAssignment(ruleSet, configurationId: newValue)
+                    setAssignment(newValue)
                 }
             ))
         }

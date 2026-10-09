@@ -16,6 +16,7 @@ enum Page: Equatable, Hashable, Identifiable, CaseIterable {
     case purify
     case routing
     case mitm
+    case modules
     case trustedCertificates
     case trustedNetwork
     case diagnosis
@@ -31,10 +32,11 @@ enum Page: Equatable, Hashable, Identifiable, CaseIterable {
         case .purify: 5
         case .routing: 6
         case .mitm: 7
-        case .trustedCertificates: 8
-        case .trustedNetwork: 9
-        case .diagnosis: 10
-        case .about: 11
+        case .modules: 8
+        case .trustedCertificates: 9
+        case .trustedNetwork: 10
+        case .diagnosis: 11
+        case .about: 12
         }
     }
     
@@ -48,6 +50,7 @@ enum Page: Equatable, Hashable, Identifiable, CaseIterable {
         case .purify: String(localized: "Purify")
         case .routing: String(localized: "Routing")
         case .mitm: String(localized: "MITM")
+        case .modules: String(localized: "Modules")
         case .trustedCertificates: String(localized: "Trusted Certificates")
         case .trustedNetwork: String(localized: "Trusted Network")
         case .diagnosis: String(localized: "Diagnosis")
@@ -65,6 +68,7 @@ enum Page: Equatable, Hashable, Identifiable, CaseIterable {
         case .purify: "drop"
         case .routing: "arrow.triangle.branch"
         case .mitm: "key.horizontal"
+        case .modules: "shippingbox"
         case .trustedCertificates: "checkmark.seal"
         case .trustedNetwork: "wifi"
         case .diagnosis: "stethoscope"

@@ -55,6 +55,11 @@ struct ToolboxView: View {
                     } label: {
                         TextWithColorfulIcon(title: "MITM", systemName: "key.horizontal.fill", foregroundStyle: .white, backgroundStyle: .teal.gradient)
                     }
+                    NavigationLink {
+                        ModulesView()
+                    } label: {
+                        TextWithColorfulIcon(title: "Modules", systemName: "shippingbox.fill", foregroundStyle: .white, backgroundStyle: .orange.gradient)
+                    }
                 }
                 
                 Section {

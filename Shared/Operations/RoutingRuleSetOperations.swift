@@ -9,69 +9,69 @@ import Foundation
 
 @MainActor
 struct RoutingRuleSetOperations {
-    let store: RoutingRuleSetStore
-    let exporter: RoutingExportScheduler
+    let routingRuleSetStore: RoutingRuleSetStore
+    let routingExportScheduler: RoutingExportScheduler
 
     // MARK: - Assignments
 
     func updateAssignment(_ ruleSet: RoutingRuleSet, configurationId: String?) {
-        store.updateAssignment(ruleSet, configurationId: configurationId)
-        exporter.schedule()
+        routingRuleSetStore.updateAssignment(ruleSet, configurationId: configurationId)
+        routingExportScheduler.schedule()
     }
 
     func resetAssignments() {
-        store.resetAssignments()
-        exporter.schedule()
+        routingRuleSetStore.resetAssignments()
+        routingExportScheduler.schedule()
     }
 
     func setBypassCountryCode(_ code: String) {
-        store.bypassCountryCode = code
-        exporter.schedule()
+        routingRuleSetStore.bypassCountryCode = code
+        routingExportScheduler.schedule()
     }
 
     // MARK: - Custom Rule Sets
 
     @discardableResult
     func addCustomRuleSet(name: String) -> CustomRoutingRuleSet {
-        let ruleSet = store.addCustomRuleSet(name: name)
-        exporter.schedule()
+        let ruleSet = routingRuleSetStore.addCustomRuleSet(name: name)
+        routingExportScheduler.schedule()
         return ruleSet
     }
 
     func addCustomRuleSet(_ ruleSet: CustomRoutingRuleSet, initialAssignment: String? = nil) {
-        store.addCustomRuleSet(ruleSet, initialAssignment: initialAssignment)
-        exporter.schedule()
+        routingRuleSetStore.addCustomRuleSet(ruleSet, initialAssignment: initialAssignment)
+        routingExportScheduler.schedule()
     }
 
     func removeCustomRuleSet(_ id: UUID) {
-        store.removeCustomRuleSet(id)
-        exporter.schedule()
+        routingRuleSetStore.removeCustomRuleSet(id)
+        routingExportScheduler.schedule()
     }
 
     func updateCustomRuleSet(_ id: UUID, name: String? = nil, rules: [RoutingRule]? = nil, icons: (light: Data?, dark: Data?)? = nil) {
-        store.updateCustomRuleSet(id, name: name, rules: rules, icons: icons)
-        exporter.schedule()
+        routingRuleSetStore.updateCustomRuleSet(id, name: name, rules: rules, icons: icons)
+        routingExportScheduler.schedule()
     }
 
     func reorderCustomRuleSets(_ ordered: [CustomRoutingRuleSet]) {
-        store.reorderCustomRuleSets(ordered)
-        exporter.schedule()
+        routingRuleSetStore.reorderCustomRuleSets(ordered)
+        routingExportScheduler.schedule()
     }
 
     func removeCustomRuleSets(atOffsets offsets: IndexSet) {
-        store.removeCustomRuleSets(atOffsets: offsets)
-        exporter.schedule()
+        routingRuleSetStore.removeCustomRuleSets(atOffsets: offsets)
+        routingExportScheduler.schedule()
     }
 
     func moveCustomRuleSets(fromOffsets source: IndexSet, toOffset destination: Int) {
-        store.moveCustomRuleSets(fromOffsets: source, toOffset: destination)
-        exporter.schedule()
+        routingRuleSetStore.moveCustomRuleSets(fromOffsets: source, toOffset: destination)
+        routingExportScheduler.schedule()
     }
 
     // MARK: - Subscription Refresh
 
     func refresh(_ id: UUID) async throws {
-        guard let url = store.customRuleSet(for: id)?.subscriptionURL else {
+        guard let url = routingRuleSetStore.customRuleSet(for: id)?.subscriptionURL else {
             throw CustomRoutingRuleSetRefreshError.missingSubscriptionURL
         }
 
@@ -88,7 +88,7 @@ struct RoutingRuleSetOperations {
             throw CustomRoutingRuleSetRefreshError.tooManyRules
         }
 
-        guard let current = store.customRuleSet(for: id),
+        guard let current = routingRuleSetStore.customRuleSet(for: id),
               current.rules != parsed.rules
                 || current.iconLight != parsed.iconLight
                 || current.iconDark != parsed.iconDark

@@ -10,6 +10,8 @@ import Foundation
 nonisolated struct RoutingSnapshot {
     let ruleSets: [RoutingRuleSet]
     let customRuleSets: [CustomRoutingRuleSet]
+    let modules: [Module]
+    let moduleAssignments: [String: String]
     let configurations: [ProxyConfiguration]
     let chains: [ProxyChain]
 }
@@ -18,14 +20,17 @@ nonisolated struct RoutingSnapshot {
 struct RoutingExportScheduler {
     let debouncer: Debouncer
     let ruleSetStore: RoutingRuleSetStore
+    let moduleStore: ModuleStore
     let configurationStore: ConfigurationStore
     let chainStore: ChainStore
 
     func schedule() {
-        debouncer.schedule { [ruleSetStore, configurationStore, chainStore] in
+        debouncer.schedule { [ruleSetStore, moduleStore, configurationStore, chainStore] in
             let snapshot = RoutingSnapshot(
                 ruleSets: ruleSetStore.ruleSets,
                 customRuleSets: ruleSetStore.customRuleSets,
+                modules: moduleStore.modules.filter(\.enabled),
+                moduleAssignments: moduleStore.routingRuleSetAssignments,
                 configurations: configurationStore.configurations,
                 chains: chainStore.chains
             )
@@ -44,10 +49,19 @@ struct RoutingExportOperation {
 
         let ruleSets = snapshot.ruleSets
         let customRuleSets = snapshot.customRuleSets
+        let modules = snapshot.modules
+        let moduleAssignments = snapshot.moduleAssignments
         let configurations = snapshot.configurations
         let chains = snapshot.chains
 
-        let idsToResolve = ruleSets.compactMap(\.assignedConfigurationId)
+        var idsToResolve = ruleSets.compactMap(\.assignedConfigurationId)
+        for module in modules {
+            for ruleSet in module.routingRuleSets {
+                if let assignedId = moduleAssignments[ruleSet.id.uuidString] {
+                    idsToResolve.append(assignedId)
+                }
+            }
+        }
         var resolvedTargets: [String: ProxyConfiguration] = [:]
         for assignedId in idsToResolve {
             guard resolvedTargets[assignedId] == nil,
@@ -72,6 +86,37 @@ struct RoutingExportOperation {
         await Task.detached {
             var entries: [RoutingBinaryWriter.Entry] = []
             var configurationsById: [String: ProxyConfiguration] = [:]
+            
+            func resolve(_ explicitId: String?) -> (action: RoutingBinaryFormat.Action, configId: UUID?)? {
+                guard let explicitId else { return (.fallback, nil) }
+                switch explicitId {
+                case "PROXY": return (.defaultProxy, nil)
+                case "DIRECT": return (.direct, nil)
+                case "REJECT": return (.reject, nil)
+                default: break
+                }
+                guard let configuration = resolvedTargets[explicitId],
+                      let id = UUID(uuidString: explicitId) else { return nil }
+                configurationsById[explicitId] = configuration.withResolvedIP(
+                    resolvedIPsByAddress[configuration.serverAddress]
+                )
+                return (.proxy, id)
+            }
+            
+            for module in modules.reversed() {
+                for ruleSet in module.routingRuleSets.reversed() {
+                    guard !ruleSet.rules.isEmpty else { continue }
+                    let explicitId = moduleAssignments[ruleSet.id.uuidString]
+                    guard let resolved = resolve(explicitId) else { continue }
+                    entries.append(.init(
+                        tier: explicitId == nil ? .neutral : .user,
+                        action: resolved.action,
+                        configId: resolved.configId,
+                        name: module.qualifiedName(for: ruleSet.name),
+                        rules: ruleSet.rules
+                    ))
+                }
+            }
 
             for ruleSet in ruleSets.reversed() {
                 let explicitId = ruleSet.assignedConfigurationId
@@ -86,27 +131,7 @@ struct RoutingExportOperation {
                     rules = RoutingRuleSetStore.loadRules(for: ruleSet.name)
                 }
                 guard !rules.isEmpty else { continue }
-
-                let action: RoutingBinaryFormat.Action
-                var configId: UUID?
-                if explicitId == nil {
-                    action = .fallback
-                } else if explicitId == "PROXY" {
-                    action = .defaultProxy
-                } else if explicitId == "DIRECT" {
-                    action = .direct
-                } else if explicitId == "REJECT" {
-                    action = .reject
-                } else if let assignedId = explicitId,
-                          let configuration = resolvedTargets[assignedId], let id = UUID(uuidString: assignedId) {
-                    action = .proxy
-                    configId = id
-                    configurationsById[assignedId] = configuration.withResolvedIP(
-                        resolvedIPsByAddress[configuration.serverAddress]
-                    )
-                } else {
-                    continue
-                }
+                guard let resolved = resolve(explicitId) else { continue }
 
                 let tier: RoutingBinaryFormat.Tier
                 if explicitId == nil {
@@ -116,7 +141,7 @@ struct RoutingExportOperation {
                 } else {
                     tier = ruleSet.name == "ADBlock" ? .adBlock : .builtIn
                 }
-                entries.append(.init(tier: tier, action: action, configId: configId, name: ruleSet.name, rules: rules))
+                entries.append(.init(tier: tier, action: resolved.action, configId: resolved.configId, name: ruleSet.name, rules: rules))
             }
 
             let countryCode = AWCore.getBypassCountryCode()

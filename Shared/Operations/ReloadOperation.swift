@@ -18,6 +18,7 @@ extension GroupStore: Reloadable {}
 extension SubscriptionStore: Reloadable {}
 extension RoutingRuleSetStore: Reloadable {}
 extension MITMRuleSetStore: Reloadable {}
+extension ModuleStore: Reloadable {}
 
 @MainActor
 struct ReloadOperation {

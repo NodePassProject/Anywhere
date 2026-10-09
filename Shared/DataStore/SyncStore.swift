@@ -73,6 +73,7 @@ nonisolated final class SyncStore: Sendable {
         case subscriptions
         case customRuleSets
         case mitm
+        case modules
     }
 
     struct ItemSnapshot: Sendable {

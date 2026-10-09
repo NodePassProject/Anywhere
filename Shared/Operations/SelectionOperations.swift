@@ -9,27 +9,27 @@ import Foundation
 
 @MainActor
 struct SelectionOperations {
-    let selection: ProxySelection
-    let tunnel: TunnelController
-    let exporter: RoutingExportScheduler
+    let proxySelection: ProxySelection
+    let tunnelController: TunnelController
+    let routingExportScheduler: RoutingExportScheduler
 
     func select(_ configuration: ProxyConfiguration) {
-        selection.select(configuration)
-        tunnel.pushConfiguration(configuration)
-        exporter.schedule()
+        proxySelection.select(configuration)
+        tunnelController.pushConfiguration(configuration)
+        routingExportScheduler.schedule()
     }
 
     func selectChain(_ chain: ProxyChain, configurations: [ProxyConfiguration]) {
-        guard selection.selectChain(chain, configurations: configurations) else { return }
-        if let resolved = selection.selectedConfiguration {
-            tunnel.pushConfiguration(resolved)
+        guard proxySelection.selectChain(chain, configurations: configurations) else { return }
+        if let resolved = proxySelection.selectedConfiguration {
+            tunnelController.pushConfiguration(resolved)
         }
-        exporter.schedule()
+        routingExportScheduler.schedule()
     }
 
     func selectIfNone(_ configuration: ProxyConfiguration) {
-        guard selection.selectIfNone(configuration) else { return }
-        tunnel.pushConfiguration(configuration)
-        exporter.schedule()
+        guard proxySelection.selectIfNone(configuration) else { return }
+        tunnelController.pushConfiguration(configuration)
+        routingExportScheduler.schedule()
     }
 }

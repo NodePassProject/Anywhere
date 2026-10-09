@@ -16,8 +16,6 @@ final class MITMRuleSetStore {
         didSet {
             guard enabled != oldValue else { return }
             AWCore.setMITMEnabled(enabled)
-            MITMSnapshot(ruleSets: ruleSets).exportBinaryToAppGroup()
-            AWNotificationCenter.notifyMITMChanged()
         }
     }
 
@@ -46,7 +44,6 @@ final class MITMRuleSetStore {
         let split = Tombstone.split(ruleSets)
         self.ruleSets = split.live
         self.tombstones = split.tombstones
-        MITMSnapshot(ruleSets: split.live).exportBinaryToAppGroup()
     }
 
     func reload() async {
@@ -65,7 +62,6 @@ final class MITMRuleSetStore {
             let split = Tombstone.split(outcome.ruleSets)
             ruleSets = split.live
             tombstones = split.tombstones
-            MITMSnapshot(ruleSets: split.live).exportBinaryToAppGroup()
             return
         }
     }
@@ -203,7 +199,7 @@ final class MITMRuleSetStore {
         return ruleSets[writeIndex]
     }
     
-    private static func mergedParameterValues(
+    static func mergedParameterValues(
         definitions: [MITMParameter],
         previousValues: [String: String]
     ) -> [String: String] {
@@ -240,8 +236,6 @@ final class MITMRuleSetStore {
         mutationEpoch += 1
         let live = ruleSets
         syncStore.save(.mitm, items: SyncCodec.encodeItems(live + tombstones), order: SyncCodec.order(of: live))
-        MITMSnapshot(ruleSets: live).exportBinaryToAppGroup()
-        AWNotificationCenter.notifyMITMChanged()
     }
 }
 

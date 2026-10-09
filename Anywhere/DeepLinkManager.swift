@@ -12,7 +12,7 @@ import Observation
 @Observable
 final class DeepLinkManager {
     var url: String?
-    var ruleSetLinks: [URL]?
+    var moduleLink: URL?
 
     func handle(url: URL) {
         switch url.scheme?.lowercased() {
@@ -29,8 +29,8 @@ final class DeepLinkManager {
         switch url.host?.lowercased() {
         case "add-proxy":
             handleAddProxy(url)
-        case "add-rule-set":
-            handleAddRuleSet(url)
+        case "add-module":
+            handleAddModule(url)
         default:
             break
         }
@@ -49,15 +49,13 @@ final class DeepLinkManager {
         return rawLink.removingPercentEncoding ?? rawLink
     }
     
-    private func handleAddRuleSet(_ url: URL) {
+    private func handleAddModule(_ url: URL) {
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              let queryItems = components.queryItems else { return }
-        let links: [URL] = queryItems
-            .filter { $0.name.lowercased() == "link" }
-            .compactMap { $0.value?.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-            .compactMap { URL(string: $0) }
-        guard !links.isEmpty else { return }
-        self.ruleSetLinks = links
+              let queryItems = components.queryItems,
+              let raw = queryItems.first(where: { $0.name.lowercased() == "link" })?.value?
+                  .trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty,
+              let link = URL(string: raw) else { return }
+        self.moduleLink = link
     }
 }

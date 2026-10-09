@@ -28,19 +28,12 @@ extension MITMPhase: CustomStringConvertible {
 }
 
 nonisolated enum MITMJSONOperation: Equatable {
-    /// Upsert: create or overwrite the addressed member; an array index appends when index == count.
     case add(path: String, value: String)
-    /// Modify-in-place: a no-op when the addressed member doesn't already exist.
     case replace(path: String, value: String)
     case delete(path: String)
-    /// Overwrite every existing property named `key` at any depth; never creates.
     case replaceRecursive(key: String, value: String)
-    /// Remove every property named `key` at any depth.
     case deleteRecursive(key: String)
-    /// At the array at `path`, drop every object element that contains `key`.
     case removeWhereKeyExists(path: String, key: String)
-    /// At the array at `path`, drop every object element whose `field` equals
-    /// one of `values` (a JSON array literal, or a lone scalar).
     case removeWhereFieldIn(path: String, field: String, values: String)
 }
 
@@ -163,27 +156,13 @@ extension MITMJSONOperation: Codable {
 }
 
 nonisolated enum MITMOperation: Equatable {
-    /// Request-phase only: rewrites the request URL, redirects with a synthesized
-    /// `302`, or rejects with a synthesized `200`, per the `MITMRewriteAction` sub-mode.
     case rewrite(MITMRewriteAction)
     case headerAdd(name: String, value: String)
     case headerDelete(name: String)
-    /// Overwrites every header named `name` (case-insensitive); absent headers are untouched.
     case headerReplace(name: String, value: String)
-    /// JavaScript transform; `scriptBase64` is base64 UTF-8 source defining
-    /// `function process(ctx)`. Single-rule by design: at most one `.script`
-    /// fires per message, last match wins.
     case script(scriptBase64: String)
-    /// Per-frame script for streaming bodies: runs once per HTTP/2 DATA frame or
-    /// HTTP/1 chunk, without buffering or decompression. HTTP/1 Content-Length
-    /// bodies are skipped; beats a matching `script`, otherwise last match wins.
     case streamScript(scriptBase64: String)
-    /// Regex find-and-replace over the buffered, decompressed text body; every
-    /// matching rule fires in rule order. Fail-closed: a non-UTF-8 body or a
-    /// search with no matches leaves the body untouched.
     case bodyReplace(search: String, replacement: String)
-    /// Native JSON body edit over the buffered, decompressed body; every matching
-    /// rule fires in rule order, and a matching `script` runs after the edits.
     case bodyJSON(MITMJSONOperation)
 }
 
@@ -610,7 +589,6 @@ nonisolated struct MITMSnapshot: Codable, Equatable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        // A single corrupt rule set shouldn't take down the whole snapshot.
         self.ruleSets = try c.decodeSkippingInvalid([MITMRuleSet].self, forKey: .ruleSets)
     }
 
@@ -651,12 +629,13 @@ nonisolated struct MITMSnapshot: Codable, Equatable {
     }
 
     private static let legacyMITMDefaultsKey = "mitmData"
-
-    func exportBinaryToAppGroup() {
+    
+    @discardableResult
+    func exportBinaryToAppGroup() -> Bool {
         let data = MITMBinaryWriter.encode(enabled: AWCore.getMITMEnabled(), ruleSets: liveRuleSets)
-        if data != AWCore.getMITMData() {
-            AWCore.setMITMData(data)
-        }
+        guard data != AWCore.getMITMData() else { return false }
+        AWCore.setMITMData(data)
+        return true
     }
 }
 
@@ -724,7 +703,6 @@ nonisolated enum MITMBinaryFormat {
     }
 }
 
-/// Layout must stay in sync with `RoutingBinaryWriter`.
 nonisolated struct MITMBinaryWriter {
     private var bytes: [UInt8] = []
 
@@ -837,16 +815,14 @@ nonisolated struct MITMBinaryWriter {
     }
 
     private mutating func append(_ slice: [UInt8]) { bytes.append(contentsOf: slice) }
-
-    /// UInt16-length-prefixed UTF-8; truncates at 65535 bytes (names/suffixes are short).
+    
     private mutating func str16(_ string: String) {
         var utf8 = Array(string.utf8)
         if utf8.count > Int(UInt16.max) { utf8 = Array(utf8.prefix(Int(UInt16.max))) }
         u16(UInt16(utf8.count))
         bytes.append(contentsOf: utf8)
     }
-
-    /// UInt32-length-prefixed UTF-8; for unbounded payloads (patterns, scripts, bodies).
+    
     private mutating func str32(_ string: String) {
         let utf8 = Array(string.utf8)
         u32(UInt32(utf8.count))

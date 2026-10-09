@@ -12,11 +12,13 @@ struct StoreMutationReaction {
     let configurationStore: ConfigurationStore
     let chainStore: ChainStore
     let routingRuleSetStore: RoutingRuleSetStore
+    let moduleStore: ModuleStore
     let selection: ProxySelection
     let latency: LatencyCenter
     let tunnel: TunnelController
     let appState: AppState
-    let exporter: RoutingExportScheduler
+    let routingExportScheduler: RoutingExportScheduler
+    let mitmExportScheduler: MITMExportScheduler
 
     func run() {
         let configurations = configurationStore.configurations
@@ -32,9 +34,11 @@ struct StoreMutationReaction {
 
         let availableIds = Set(configurations.map { $0.id.uuidString })
             .union(chains.map { $0.id.uuidString })
-        let affected = routingRuleSetStore.clearOrphanedAssignments(availableIds: availableIds)
+        var affected = routingRuleSetStore.clearOrphanedAssignments(availableIds: availableIds)
+        affected += moduleStore.clearOrphanedAssignments(availableIds: availableIds)
         if !affected.isEmpty { appState.orphanedRuleSetNames = affected }
 
-        exporter.schedule()
+        routingExportScheduler.schedule()
+        mitmExportScheduler.schedule()
     }
 }

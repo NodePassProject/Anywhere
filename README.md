@@ -36,6 +36,7 @@ Most iOS proxy clients wrap sing-box or Xray-core in a Go/C++ bridge. Anywhere t
 - **Native QUIC stack** — AnywhereQUIC implemented in Swift, with BBR, CUBIC, and Brutal congestion control, connection migration, DATAGRAM frames, session resumption, and pluggable packet obfuscation. One engine serves Hysteria2, Nowhere, and XHTTP over HTTP/3.
 - **Multi-stage routing** — a five-tier matcher built from domain-suffix tries, keyword automata, and CIDR tries classifies each destination at DNS time through Fake-IP, at connect time before the TCP handshake is accepted, and again mid-connection from the sniffed TLS SNI. Bundled service, ad-block, and country-bypass rule sets are complemented by importable and subscribable `.arrs` rule sets.
 - **Built-in MITM** — HTTPS is terminated with a generated root CA. HTTP/1.1 and HTTP/2 traffic is rewritten by declarative rules or JavaScript, HTTP/2 clients are bridged to HTTP/1.1 upstreams, and script-initiated HTTP requests are dialled through the tunnel's own routing.
+- **Modules** — a single `.amod` file bundles routing and MITM rule sets for a service into one importable, subscribable unit with its own switch, synced as one record so it is never seen half-updated.
 - **Purify and DNS** — a QUIC policy that fails HTTP/3 fast so that routing and MITM act on HTTP/2, WebRTC and UDP blocking, DNS-leak prevention, and independent plain or DoH resolvers for proxy servers, local requests, subscriptions, ECH, and fallback.
 - **Platform integration** — a native Apple TV app, an Apple Watch companion, Control Center toggles for VPN and mode, and iCloud sync through CloudKit.
 - **Engineered for the extension budget** — global buffer ledgers, connection caps, and pressure throttling keep the packet tunnel within the Network Extension memory limit.
@@ -109,15 +110,15 @@ anywhere://add-proxy?link=<link>
 
 > **Note:** The `link` parameter is parsed by taking everything after `?link=` verbatim, so the inner URL does **not** need to be percent-encoded. For example, `anywhere://add-proxy?link=https://example.com/sub?token=abc&foo=bar` works as expected.
 
-### Import Rule Sets
+### Import Module
 
 ```
-anywhere://add-rule-set?link=<arrs-or-amrs-url>&link=<arrs-or-amrs-url>
+anywhere://add-module?link=<amod-url>
 ```
 
-Import one or more routing (`.arrs`) and MITM (`.amrs`) rule sets from remote links. Pass one `link` query item per rule set; routing and MITM links may be mixed freely.
+Subscribe to a module (`.amod`) from a remote link. A module bundles routing and MITM rule sets; the app previews them before importing. See [Documentations/Module.md](Documentations/Module.md) for the file format.
 
-> **Note:** Unlike `add-proxy`, each `link` is a standard URL query item, so multiple links are supported. Percent-encode a link only if it carries its own reserved characters (`&`, `=`, `#`).
+> **Note:** Unlike `add-proxy`, `link` is a standard URL query item. Percent-encode it only if it carries its own reserved characters (`&`, `=`, `#`).
 
 ### Proxy URI Schemes
 

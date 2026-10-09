@@ -27,9 +27,11 @@ final class AppContainer {
     let subscriptionStore: SubscriptionStore
     let routingRuleSetStore: RoutingRuleSetStore
     let mitmRuleSetStore: MITMRuleSetStore
+    let moduleStore: ModuleStore
     let certificateStore: CertificateStore
 
     private let routingExportDebouncer = Debouncer(interval: .seconds(2))
+    private let mitmExportDebouncer = Debouncer(interval: .milliseconds(500))
     private var started = false
 
     init(syncStore: SyncStore = .shared, tunnelProvider: TunnelProviding? = nil) {
@@ -44,17 +46,27 @@ final class AppContainer {
         subscriptionStore = SubscriptionStore(syncStore: syncStore)
         routingRuleSetStore = RoutingRuleSetStore(syncStore: syncStore)
         mitmRuleSetStore = MITMRuleSetStore(syncStore: syncStore)
+        moduleStore = ModuleStore(syncStore: syncStore)
         certificateStore = CertificateStore()
     }
 
     // MARK: - Operation Factories
 
-    var exportScheduler: RoutingExportScheduler {
+    var routingExportScheduler: RoutingExportScheduler {
         RoutingExportScheduler(
             debouncer: routingExportDebouncer,
             ruleSetStore: routingRuleSetStore,
+            moduleStore: moduleStore,
             configurationStore: configurationStore,
             chainStore: chainStore
+        )
+    }
+
+    var mitmExportScheduler: MITMExportScheduler {
+        MITMExportScheduler(
+            debouncer: mitmExportDebouncer,
+            ruleSetStore: mitmRuleSetStore,
+            moduleStore: moduleStore
         )
     }
 
@@ -63,11 +75,13 @@ final class AppContainer {
             configurationStore: configurationStore,
             chainStore: chainStore,
             routingRuleSetStore: routingRuleSetStore,
+            moduleStore: moduleStore,
             selection: selection,
             latency: latency,
             tunnel: tunnel,
             appState: appState,
-            exporter: exportScheduler
+            routingExportScheduler: routingExportScheduler,
+            mitmExportScheduler: mitmExportScheduler
         )
     }
 
@@ -79,7 +93,8 @@ final class AppContainer {
 
         Task { await LoadOperation(configurationStore: configurationStore, reaction: mutationReaction).run() }
         observeTunnelStatus()
-        exportScheduler.schedule()
+        routingExportScheduler.schedule()
+        mitmExportScheduler.schedule()
         tunnel.start()
     }
     

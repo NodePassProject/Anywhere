@@ -8,10 +8,10 @@
 import SwiftUI
 
 struct RuleSetIconView: View {
+    @Environment(\.colorScheme) private var colorScheme
+    
     let iconLight: Data?
     let iconDark: Data?
-
-    @Environment(\.colorScheme) private var colorScheme
 
     private var iconData: Data? {
         switch colorScheme {

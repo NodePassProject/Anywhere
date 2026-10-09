@@ -9,40 +9,56 @@ import Foundation
 
 @MainActor
 struct MITMRuleSetOperations {
-    let store: MITMRuleSetStore
+    let mitmRuleSetStore: MITMRuleSetStore
+    let mitmExportScheduler: MITMExportScheduler
 
     func setEnabled(_ enabled: Bool) {
-        store.enabled = enabled
+        mitmRuleSetStore.enabled = enabled
+        mitmExportScheduler.schedule()
     }
 
     // MARK: - Rule Set CRUD
 
-    func addRuleSet(_ ruleSet: MITMRuleSet) { store.addRuleSet(ruleSet) }
+    func addRuleSet(_ ruleSet: MITMRuleSet) {
+        mitmRuleSetStore.addRuleSet(ruleSet)
+        mitmExportScheduler.schedule()
+    }
 
     func updateRuleSet(_ id: UUID, domainSuffixes: [String], rules: [MITMRule]) {
-        store.updateRuleSet(id, domainSuffixes: domainSuffixes, rules: rules)
+        mitmRuleSetStore.updateRuleSet(id, domainSuffixes: domainSuffixes, rules: rules)
+        mitmExportScheduler.schedule()
     }
 
     func setRuleSet(_ id: UUID, enabled: Bool) {
-        store.setRuleSet(id, enabled: enabled)
+        mitmRuleSetStore.setRuleSet(id, enabled: enabled)
+        mitmExportScheduler.schedule()
     }
 
     func setParameterValue(_ id: UUID, name: String, value: String) {
-        store.setParameterValue(id, name: name, value: value)
+        mitmRuleSetStore.setParameterValue(id, name: name, value: value)
+        mitmExportScheduler.schedule()
     }
 
-    func removeRuleSets(atOffsets offsets: IndexSet) { store.removeRuleSets(atOffsets: offsets) }
-    func removeRuleSet(id: UUID) { store.removeRuleSet(id: id) }
+    func removeRuleSets(atOffsets offsets: IndexSet) {
+        mitmRuleSetStore.removeRuleSets(atOffsets: offsets)
+        mitmExportScheduler.schedule()
+    }
+
+    func removeRuleSet(id: UUID) {
+        mitmRuleSetStore.removeRuleSet(id: id)
+        mitmExportScheduler.schedule()
+    }
 
     func moveRuleSets(fromOffsets source: IndexSet, toOffset destination: Int) {
-        store.moveRuleSets(fromOffsets: source, toOffset: destination)
+        mitmRuleSetStore.moveRuleSets(fromOffsets: source, toOffset: destination)
+        mitmExportScheduler.schedule()
     }
 
     // MARK: - Subscription Refresh
 
     @discardableResult
     func refresh(id: UUID) async throws -> MITMRuleSet {
-        guard let url = store.ruleSet(id: id)?.subscriptionURL else {
+        guard let url = mitmRuleSetStore.ruleSet(id: id)?.subscriptionURL else {
             throw MITMRuleSetRefreshError.missingSubscriptionURL
         }
 
@@ -58,7 +74,7 @@ struct MITMRuleSetOperations {
         guard parsed.rules.count <= MITMRuleSet.maxRuleCount else {
             throw MITMRuleSetRefreshError.tooManyRules
         }
-        guard let updated = store.applyRefreshedContent(
+        guard let updated = mitmRuleSetStore.applyRefreshedContent(
             domainSuffixes: parsed.domainSuffixes,
             rules: parsed.rules,
             parameters: parsed.parameters,
@@ -68,6 +84,7 @@ struct MITMRuleSetOperations {
         ) else {
             throw MITMRuleSetRefreshError.ruleSetRemoved
         }
+        mitmExportScheduler.schedule()
         return updated
     }
 }

@@ -62,6 +62,7 @@ struct AnywhereApp: App {
                 .environment(container.subscriptionStore)
                 .environment(container.routingRuleSetStore)
                 .environment(container.mitmRuleSetStore)
+                .environment(container.moduleStore)
                 .environment(container.certificateStore)
                 .environment(settings)
                 .environment(voyagerStore)

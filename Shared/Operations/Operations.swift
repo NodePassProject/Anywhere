@@ -42,18 +42,32 @@ final class Operations {
     }
 
     var routingRuleSets: RoutingRuleSetOperations {
-        RoutingRuleSetOperations(store: container.routingRuleSetStore, exporter: container.exportScheduler)
+        RoutingRuleSetOperations(
+            routingRuleSetStore: container.routingRuleSetStore,
+            routingExportScheduler: container.routingExportScheduler
+        )
     }
 
     var mitmRuleSets: MITMRuleSetOperations {
-        MITMRuleSetOperations(store: container.mitmRuleSetStore)
+        MITMRuleSetOperations(
+            mitmRuleSetStore: container.mitmRuleSetStore,
+            mitmExportScheduler: container.mitmExportScheduler
+        )
+    }
+
+    var modules: ModuleOperations {
+        ModuleOperations(
+            moduleStore: container.moduleStore,
+            routingExportScheduler: container.routingExportScheduler,
+            mitmExportScheduler: container.mitmExportScheduler
+        )
     }
 
     var selection: SelectionOperations {
         SelectionOperations(
-            selection: container.selection,
-            tunnel: container.tunnel,
-            exporter: container.exportScheduler
+            proxySelection: container.selection,
+            tunnelController: container.tunnel,
+            routingExportScheduler: container.routingExportScheduler
         )
     }
 
@@ -78,6 +92,7 @@ final class Operations {
             (.configurations, container.configurationStore),
             (.customRuleSets, container.routingRuleSetStore),
             (.mitm, container.mitmRuleSetStore),
+            (.modules, container.moduleStore),
         ]
         let affected = stores.filter { keys.contains($0.0) }.map(\.1)
         guard !affected.isEmpty else { return }

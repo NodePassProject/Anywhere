@@ -402,6 +402,7 @@
 			membershipExceptions = (
 				DeepLinkManager.swift,
 				Views/Pages/MITM/MITMRuleSetParser.swift,
+				Views/Pages/Modules/ModuleParser.swift,
 				Views/Pages/Routing/RoutingRuleParser.swift,
 			);
 			target = CB2B549B2F6C3E2700F24AC2 /* Anywhere TV */;
