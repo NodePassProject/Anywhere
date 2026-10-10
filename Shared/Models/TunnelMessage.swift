@@ -8,15 +8,25 @@
 import Foundation
 
 nonisolated enum TunnelMessage: Codable, Sendable {
-    static let optionKey = "tunnelMessage"
-    
-    case setConfiguration(ProxyConfiguration)
     case testLatency(ProxyConfiguration)
     case fetchStats
     case resetStats
     case fetchLogs
     case fetchRequests
     case fetchActivity(TunnelActivityProtocol)
+}
+
+// MARK: - Active Configuration
+
+nonisolated enum ActiveConfiguration {
+    static func load() throws -> ProxyConfiguration? {
+        guard let data = AWCore.getActiveConfigurationData() else { return nil }
+        return try JSONDecoder().decode(ProxyConfiguration.self, from: data)
+    }
+
+    static func store(_ configuration: ProxyConfiguration?) throws {
+        AWCore.setActiveConfigurationData(try configuration.map { try JSONEncoder().encode($0) })
+    }
 }
 
 // MARK: - Responses

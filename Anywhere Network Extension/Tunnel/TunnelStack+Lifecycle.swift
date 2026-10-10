@@ -20,7 +20,6 @@ extension TunnelStack {
         guard transition(to: .starting) else { return false }
         let epoch = claimStartEpoch()
         TransportReclaim.unsealAll()
-        pendingConfigurationSwitch = nil
         makeFreshDutyCycleStreams()
         purgeOutputBuffer()
         AnywhereLogger.installLogSink { [weak self] message, level in
@@ -61,10 +60,6 @@ extension TunnelStack {
         logger.debug("[TunnelStack] Started")
 
         CertificatePolicy.startObserving()
-        if let pending = pendingConfigurationSwitch {
-            pendingConfigurationSwitch = nil
-            switchConfiguration(pending)
-        }
         return true
     }
 
@@ -140,17 +135,13 @@ extension TunnelStack {
         stopWaiters = []
         for waiter in waiters { waiter.resume() }
     }
-
-    func switchConfiguration(_ newConfiguration: ProxyConfiguration) {
-        if phase == .starting {
-            logger.info("[VPN] Configuration switch deferred until start completes")
-            pendingConfigurationSwitch = newConfiguration
-            return
-        }
+    
+    func applyConfiguration(_ newConfiguration: ProxyConfiguration) {
         guard phase == .running else {
             logger.warning("[VPN] Configuration switch ignored: phase is \(phase)")
             return
         }
+        guard newConfiguration != configuration else { return }
         logger.info("[VPN] Configuration switched")
         restartStack(configuration: newConfiguration)
     }
@@ -295,21 +286,40 @@ extension TunnelStack {
     // MARK: - Settings Observation
 
     private func runSettingsObserver() async {
+        let activeConfiguration = AWNotificationCenter.Notification.activeConfigurationChanged as String
         let settings = AWNotificationCenter.Notification.tunnelSettingsChanged as String
         let routing = AWNotificationCenter.Notification.routingChanged as String
         let mitm = AWNotificationCenter.Notification.mitmChanged as String
         for await name in DarwinNotificationConcurrencyBridge.names([
+            AWNotificationCenter.Notification.activeConfigurationChanged,
             AWNotificationCenter.Notification.tunnelSettingsChanged,
             AWNotificationCenter.Notification.routingChanged,
             AWNotificationCenter.Notification.mitmChanged
         ]) {
             switch name {
+            case activeConfiguration: handleActiveConfigurationChanged()
             case settings: handleSettingsChanged()
             case routing: await handleRoutingChanged()
             case mitm: handleMITMChanged()
             default: break
             }
         }
+    }
+
+    private func handleActiveConfigurationChanged() {
+        guard phase == .running else { return }
+        let active: ProxyConfiguration?
+        do {
+            active = try ActiveConfiguration.load()
+        } catch {
+            logger.report(AnywhereError.store(.corrupted(.configurations, detail: AnywhereError.describe(error))))
+            return
+        }
+        guard let active else {
+            logger.warning("[VPN] Active configuration cleared; keeping the running one")
+            return
+        }
+        applyConfiguration(active)
     }
 
     private func handleSettingsChanged() {

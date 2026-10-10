@@ -12,13 +12,18 @@ actor AWNotificationCenter {
     // MARK: - Darwin Notification Names
 
     enum Notification {
-        nonisolated(unsafe) static let tunnelSettingsChanged = "\(AWCore.Identifier.bundle).tunnelSettingsChanged" as CFString
-        nonisolated(unsafe) static let routingChanged = "\(AWCore.Identifier.bundle).routingChanged" as CFString
+        nonisolated(unsafe) static let activeConfigurationChanged = "\(AWCore.Identifier.bundle).activeConfigurationChanged" as CFString
         nonisolated(unsafe) static let certificatePolicyChanged = "\(AWCore.Identifier.bundle).certificatePolicyChanged" as CFString
         nonisolated(unsafe) static let mitmChanged = "\(AWCore.Identifier.bundle).mitmChanged" as CFString
+        nonisolated(unsafe) static let routingChanged = "\(AWCore.Identifier.bundle).routingChanged" as CFString
+        nonisolated(unsafe) static let tunnelSettingsChanged = "\(AWCore.Identifier.bundle).tunnelSettingsChanged" as CFString
     }
 
     // MARK: - Public API
+
+    static func notifyActiveConfigurationChanged() {
+        post(Notification.activeConfigurationChanged)
+    }
 
     static func notifyTunnelSettingsChanged() {
         post(Notification.tunnelSettingsChanged)
@@ -63,7 +68,6 @@ actor AWNotificationCenter {
                 self.fire(name)
             }
         } else {
-            // Leading edge: enough time has elapsed, post immediately.
             lastPostTimes[name] = now
             Self.emit(name)
         }

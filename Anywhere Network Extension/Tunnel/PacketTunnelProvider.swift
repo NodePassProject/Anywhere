@@ -79,7 +79,7 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
             throw AnywhereError.tunnel(.sessionUnavailable)
         }
 
-        guard let configuration = resolveStartConfiguration(options: options) else {
+        guard let configuration = resolveStartConfiguration() else {
             let error = AnywhereError.tunnel(.invalidConfiguration)
             logger.report("[VPN] Start failed", error: error)
             releaseStartClaim(myClaim)
@@ -166,19 +166,9 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
         }
     }
 
-    private func resolveStartConfiguration(options: [String: NSObject]?) -> ProxyConfiguration? {
-        if let messageData = options?[TunnelMessage.optionKey] as? Data {
-            do {
-                if case .setConfiguration(let config) = try JSONDecoder().decode(TunnelMessage.self, from: messageData) {
-                    return config
-                }
-            } catch {
-                logger.report("[VPN] Start options decode failed", error: AnywhereError.tunnel(.ipcFailed(underlying: error)))
-            }
-        }
-        guard let savedData = AWCore.getLastConfigurationData() else { return nil }
+    private func resolveStartConfiguration() -> ProxyConfiguration? {
         do {
-            return try JSONDecoder().decode(ProxyConfiguration.self, from: savedData)
+            return try ActiveConfiguration.load()
         } catch {
             logger.report(AnywhereError.store(.corrupted(.configurations, detail: AnywhereError.describe(error))))
             return nil
@@ -271,10 +261,6 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
         }
 
         switch message {
-        case .setConfiguration(let configuration):
-            await tunnelStack.switchConfiguration(configuration)
-            return nil
-
         case .testLatency(let configuration):
             let response = LatencyTestResponse(await LatencyTester.test(configuration))
             return encodeReply(response)

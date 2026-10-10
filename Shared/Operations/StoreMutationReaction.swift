@@ -15,7 +15,6 @@ struct StoreMutationReaction {
     let moduleStore: ModuleStore
     let selection: ProxySelection
     let latency: LatencyCenter
-    let tunnel: TunnelController
     let appState: AppState
     let routingExportScheduler: RoutingExportScheduler
     let mitmExportScheduler: MITMExportScheduler
@@ -24,10 +23,7 @@ struct StoreMutationReaction {
         let configurations = configurationStore.configurations
         let chains = chainStore.chains
 
-        if selection.revalidate(configurations: configurations, chains: chains),
-           let configuration = selection.selectedConfiguration {
-            tunnel.pushConfiguration(configuration)
-        }
+        selection.revalidate(configurations: configurations, chains: chains)
 
         latency.pruneLatencyState(liveConfigurationIds: Set(configurations.map(\.id)))
         latency.pruneChainLatencyState(liveChainIds: Set(chains.map(\.id)))

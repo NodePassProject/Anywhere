@@ -15,7 +15,6 @@ struct TunnelStartRequest {
     var excludeCellularServices = true
     var excludeDeviceCommunication = true
     var alwaysOn = false
-    var startMessage: Data
 }
 
 @MainActor

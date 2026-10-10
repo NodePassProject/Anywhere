@@ -22,7 +22,7 @@ final class ProxySelection {
         AWCore.setSelectedConfigurationId(configuration.id)
         selectedConfiguration = configuration
     }
-    
+
     @discardableResult
     func selectChain(_ chain: ProxyChain, configurations: [ProxyConfiguration]) -> Bool {
         guard let resolved = chain.resolveComposite(from: configurations) else { return false }
@@ -32,7 +32,7 @@ final class ProxySelection {
         selectedConfiguration = resolved
         return true
     }
-    
+
     @discardableResult
     func selectIfNone(_ configuration: ProxyConfiguration) -> Bool {
         guard selectedConfiguration == nil else { return false }
@@ -42,14 +42,7 @@ final class ProxySelection {
 
     // MARK: - Revalidation
     
-    @discardableResult
-    func revalidate(configurations: [ProxyConfiguration], chains: [ProxyChain]) -> Bool {
-        let previous = selectedConfiguration
-        revalidateState(configurations: configurations, chains: chains)
-        return selectedConfiguration != previous
-    }
-
-    private func revalidateState(configurations: [ProxyConfiguration], chains: [ProxyChain]) {
+    func revalidate(configurations: [ProxyConfiguration], chains: [ProxyChain]) {
         if selectedConfiguration == nil, selectedChainId == nil {
             restoreSelection(configurations: configurations, chains: chains)
             return
@@ -57,24 +50,20 @@ final class ProxySelection {
         if let chainId = selectedChainId {
             if let chain = chains.first(where: { $0.id == chainId }),
                let resolved = chain.resolveComposite(from: configurations) {
-                selectedConfiguration = resolved
+                if resolved != selectedConfiguration {
+                    selectedConfiguration = resolved
+                }
             } else {
                 selectedChainId = nil
                 AWCore.setSelectedChainId(nil)
                 fallBack(to: configurations.first)
             }
-        } else {
-            if let selected = selectedConfiguration {
-                if let refreshed = configurations.first(where: { $0.id == selected.id }) {
-                    if refreshed != selected {
-                        AWCore.setSelectedConfigurationId(refreshed.id)
-                        selectedConfiguration = refreshed
-                    }
-                } else {
-                    fallBack(to: configurations.first)
+        } else if let selected = selectedConfiguration {
+            if let refreshed = configurations.first(where: { $0.id == selected.id }) {
+                if refreshed != selected {
+                    selectedConfiguration = refreshed
                 }
-            }
-            if selectedConfiguration == nil {
+            } else {
                 fallBack(to: configurations.first)
             }
         }

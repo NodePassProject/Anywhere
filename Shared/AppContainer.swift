@@ -78,7 +78,6 @@ final class AppContainer {
             moduleStore: moduleStore,
             selection: selection,
             latency: latency,
-            tunnel: tunnel,
             appState: appState,
             routingExportScheduler: routingExportScheduler,
             mitmExportScheduler: mitmExportScheduler
@@ -93,6 +92,7 @@ final class AppContainer {
 
         Task { await LoadOperation(configurationStore: configurationStore, reaction: mutationReaction).run() }
         observeTunnelStatus()
+        observeSelection()
         routingExportScheduler.schedule()
         mitmExportScheduler.schedule()
         tunnel.start()
@@ -106,6 +106,18 @@ final class AppContainer {
                 guard let self else { return }
                 TunnelSessionReaction(tunnel: self.tunnel, stats: self.stats, selection: self.selection).run()
                 self.observeTunnelStatus()
+            }
+        }
+    }
+    
+    private func observeSelection() {
+        withObservationTracking {
+            _ = selection.selectedConfiguration
+        } onChange: { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.observeSelection()
+                await self.tunnel.publish(self.selection.selectedConfiguration)
             }
         }
     }

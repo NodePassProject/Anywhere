@@ -23,6 +23,7 @@ final class TunnelController {
     @ObservationIgnored private let provider: TunnelProviding
     @ObservationIgnored private var statusObserver: Task<Void, Never>?
     @ObservationIgnored private var reassertingDebounceTask: Task<Void, Never>?
+    @ObservationIgnored private var publishQueue: Task<Void, Never>?
     private static let reassertingDebounceInterval: Duration = .seconds(5)
 
     init(provider: TunnelProviding) {
@@ -54,15 +55,9 @@ final class TunnelController {
     func connect(using configuration: ProxyConfiguration) {
         guard isManagerReady else { return }
         Task {
-            let resolved = await Self.withResolvedIP(configuration)
-
-            if let configData = try? JSONEncoder().encode(resolved) {
-                AWCore.setLastConfigurationData(configData)
-            }
-
+            await publish(configuration, refreshingIP: true)
             do {
-                let messageData = try JSONEncoder().encode(TunnelMessage.setConfiguration(resolved))
-                var request = TunnelStartRequest(startMessage: messageData)
+                var request = TunnelStartRequest()
                 #if !os(tvOS)
                 request.includeAllNetworks = AWCore.getTunnelIncludeAllNetworks()
                 request.excludeLocalNetworks = AWCore.getTunnelExcludeLocalNetworks()
@@ -95,21 +90,47 @@ final class TunnelController {
         return true
     }
 
-    // MARK: - Provider IPC
-
-    func pushConfiguration(_ configuration: ProxyConfiguration) {
-        guard rawStatus == .connected else { return }
-        Task {
-            let resolved = await Self.withResolvedIP(configuration)
-
-            if let configData = try? JSONEncoder().encode(resolved) {
-                AWCore.setLastConfigurationData(configData)
-            }
-
-            guard let data = try? JSONEncoder().encode(TunnelMessage.setConfiguration(resolved)) else { return }
-            _ = await provider.send(data)
+    // MARK: - Active Configuration
+    
+    func publish(_ configuration: ProxyConfiguration?, refreshingIP: Bool = false) async {
+        let previous = publishQueue
+        let task = Task {
+            await previous?.value
+            await Self.reconcileActiveConfiguration(configuration, refreshingIP: refreshingIP)
         }
+        publishQueue = task
+        await task.value
     }
+
+    nonisolated private static func reconcileActiveConfiguration(
+        _ configuration: ProxyConfiguration?,
+        refreshingIP: Bool
+    ) async {
+        guard let configuration else {
+            guard AWCore.getActiveConfigurationData() != nil else { return }
+            try? ActiveConfiguration.store(nil)
+            AWNotificationCenter.notifyActiveConfigurationChanged()
+            return
+        }
+
+        let stored = try? ActiveConfiguration.load()
+        if !refreshingIP, let stored,
+           stored.withResolvedIP(nil) == configuration.withResolvedIP(nil) {
+            return
+        }
+
+        let resolvedIP = await DNSResolver.proxies.resolveHost(configuration.serverAddress, forceFresh: refreshingIP)
+        let resolved = configuration.withResolvedIP(resolvedIP ?? configuration.resolvedIP)
+        do {
+            try ActiveConfiguration.store(resolved)
+        } catch {
+            logger.report("[Tunnel] Active configuration encode failed", error: error)
+            return
+        }
+        AWNotificationCenter.notifyActiveConfigurationChanged()
+    }
+
+    // MARK: - Provider IPC
 
     func send(_ message: TunnelMessage) async -> Data? {
         guard let data = try? JSONEncoder().encode(message) else { return nil }
@@ -138,34 +159,6 @@ final class TunnelController {
         }
 
         rawStatus = status
-    }
-
-    // MARK: - DNS
-
-    nonisolated static func withResolvedIP(
-        _ configuration: ProxyConfiguration,
-        fallback: String? = nil
-    ) async -> ProxyConfiguration {
-        if configuration.resolvedIP != nil { return configuration }
-        let resolvedIP: String?
-        if let fallback {
-            resolvedIP = fallback
-        } else {
-            resolvedIP = await DNSResolver.proxies.resolveHost(configuration.serverAddress)
-        }
-        guard let resolved = resolvedIP else {
-            return configuration
-        }
-        return ProxyConfiguration(
-            id: configuration.id,
-            name: configuration.name,
-            serverAddress: configuration.serverAddress,
-            serverPort: configuration.serverPort,
-            resolvedIP: resolved,
-            subscriptionId: configuration.subscriptionId,
-            outbound: configuration.outbound,
-            chain: configuration.chain
-        )
     }
 }
 

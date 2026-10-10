@@ -39,11 +39,13 @@ nonisolated struct ProxyChain: Identifiable, Codable, Hashable, SoftDeletable {
         guard configs.count == proxyIds.count, configs.count >= 2 else { return nil }
         let exit = configs.last!
         return ProxyConfiguration(
+            id: id,
             name: name,
             serverAddress: exit.serverAddress,
             serverPort: exit.serverPort,
             outbound: exit.outbound,
-            chain: Array(configs.dropLast())
+            chain: Array(configs.dropLast()),
+            updatedAt: configs.reduce(updatedAt) { max($0, $1.updatedAt) }
         )
     }
     

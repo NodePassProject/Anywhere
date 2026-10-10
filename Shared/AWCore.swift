@@ -51,6 +51,7 @@ nonisolated final class AWCore {
     // MARK: - UserDefaults Keys
 
     private enum UserDefaultsKey {
+        static let activeConfiguration = "activeConfiguration"
         static let allowInsecure = "allowInsecure"
         static let alwaysOnEnabled = "alwaysOnEnabled"
         static let alwaysTrustCellular = "alwaysTrustCellular"
@@ -70,7 +71,6 @@ nonisolated final class AWCore {
         static let homeColorScheme = "homeColorScheme"
         static let iCloudSyncEnabled = "iCloudSyncEnabled"
         static let identifier = "identifier"
-        static let lastConfigurationData = "lastConfigurationData"
         static let latencyResults = "latencyResults"
         static let localRequestDNSDoHURL = "localRequestDNSDoHURL"
         static let localRequestDNSMode = "localRequestDNSMode"
@@ -186,12 +186,16 @@ nonisolated final class AWCore {
     }
 
     // Tunnel
-    static func getLastConfigurationData() -> Data? {
-        userDefaults.data(forKey: UserDefaultsKey.lastConfigurationData)
+    static func getActiveConfigurationData() -> Data? {
+        userDefaults.data(forKey: UserDefaultsKey.activeConfiguration)
     }
 
-    static func setLastConfigurationData(_ data: Data) {
-        userDefaults.set(data, forKey: UserDefaultsKey.lastConfigurationData)
+    static func setActiveConfigurationData(_ data: Data?) {
+        if let data {
+            userDefaults.set(data, forKey: UserDefaultsKey.activeConfiguration)
+        } else {
+            userDefaults.removeObject(forKey: UserDefaultsKey.activeConfiguration)
+        }
     }
     
     static func getSelectedConfigurationId() -> UUID? {

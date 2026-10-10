@@ -90,7 +90,7 @@ nonisolated enum OutboundConnector {
 
     private static func resolveConfiguration(for id: UUID, context: RoutingContext) -> ProxyConfiguration? {
         if let resolved = context.domainRouter.resolveConfiguration(action: .proxy(id)) { return resolved }
-        if id == context.defaultConfiguration?.id || .proxy(id) == context.defaultRouteTarget { return context.defaultConfiguration }
+        if context.isDefaultConfiguration(id) { return context.defaultConfiguration }
         return nil
     }
 

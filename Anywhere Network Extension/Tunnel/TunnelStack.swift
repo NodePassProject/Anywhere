@@ -267,7 +267,6 @@ actor TunnelStack {
     var lastRestartTime: TimeInterval = 0
     var deferredRestartGeneration = 0
     var deferredRestartScheduled = false
-    var pendingConfigurationSwitch: ProxyConfiguration?
     var stopWaiters: [CheckedContinuation<Void, Never>] = []
 
     var ipStackTick: Task<Void, Never>?
@@ -501,13 +500,7 @@ actor TunnelStack {
         connectionRouter.preventDNSLeak.store(settings.preventDNSLeak, ordering: .relaxed)
         proxyMode = Self.effectiveProxyMode(settings: settings, network: networkContext)
 
-        if proxyMode == .direct {
-            defaultRouteTarget = .direct
-        } else {
-            defaultRouteTarget = AWCore.getSelectedChainId().map(RouteTarget.proxy)
-            ?? AWCore.getSelectedConfigurationId().map(RouteTarget.proxy)
-            ?? .proxy(configuration.id)
-        }
+        defaultRouteTarget = proxyMode == .direct ? .direct : .proxy(configuration.id)
         requestLog.setDefaultRouteTarget(defaultRouteTarget)
 
         loadMITMSetting()

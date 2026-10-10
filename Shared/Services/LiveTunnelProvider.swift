@@ -79,7 +79,7 @@ final class LiveTunnelProvider: TunnelProviding {
         try await manager.saveToPreferences()
         try await manager.loadFromPreferences()
         loadedFromPreferences = true
-        try manager.connection.startVPNTunnel(options: [TunnelMessage.optionKey: request.startMessage as NSObject])
+        try manager.connection.startVPNTunnel()
     }
 
     func stop(disablingAlwaysOn: Bool) async {

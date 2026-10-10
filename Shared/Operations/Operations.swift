@@ -64,11 +64,7 @@ final class Operations {
     }
 
     var selection: SelectionOperations {
-        SelectionOperations(
-            proxySelection: container.selection,
-            tunnelController: container.tunnel,
-            routingExportScheduler: container.routingExportScheduler
-        )
+        SelectionOperations(proxySelection: container.selection)
     }
 
     var tunnel: TunnelOperations {
