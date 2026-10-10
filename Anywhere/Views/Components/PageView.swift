@@ -11,7 +11,8 @@ struct PageView<Content: View>: View {
     @Binding var selection: Int
     @ViewBuilder let content: Content
 
-    @State private var progress: CGFloat = 0
+    @State private var progress = PageProgress()
+    @State private var indicatorHeight: CGFloat = 0
 
     var body: some View {
         GeometryReader { proxy in
@@ -20,11 +21,14 @@ struct PageView<Content: View>: View {
                 ScrollView(.horizontal) {
                     HStack(spacing: 0) {
                         ForEach(subviews.indices, id: \.self) { index in
-                            subviews[index]
-                                .padding(.leading, safeAreaInsets.leading)
-                                .padding(.trailing, safeAreaInsets.trailing)
-                                .containerRelativeFrame(.horizontal)
-                                .id(index)
+                            PageHost(bottomInset: indicatorHeight) {
+                                subviews[index]
+                            }
+                            .ignoresSafeArea(.container, edges: .vertical)
+                            .padding(.leading, safeAreaInsets.leading)
+                            .padding(.trailing, safeAreaInsets.trailing)
+                            .containerRelativeFrame(.horizontal)
+                            .id(index)
                         }
                     }
                     .scrollTargetLayout()
@@ -37,15 +41,20 @@ struct PageView<Content: View>: View {
                     let lastPage = CGFloat(max(subviews.count - 1, 0))
                     return min(max(geometry.bounds.minX / geometry.bounds.width, 0), lastPage)
                 } action: { _, newValue in
-                    progress = newValue
+                    progress.value = newValue
                 }
                 .ignoresSafeArea(.container, edges: .horizontal)
-                .safeAreaInset(edge: .bottom) {
+                .overlay(alignment: .bottom) {
                     PageIndicator(
                         labels: subviews.map(\.containerValues.pageIndicatorLabel),
                         progress: progress,
                         selection: $selection
                     )
+                    .onGeometryChange(for: CGFloat.self) { proxy in
+                        proxy.size.height
+                    } action: { height in
+                        indicatorHeight = height
+                    }
                 }
             }
         }
@@ -72,6 +81,32 @@ extension View {
     }
 }
 
+@Observable
+private final class PageProgress {
+    var value: CGFloat = 0
+}
+
+private struct PageHost<Page: View>: UIViewControllerRepresentable {
+    let bottomInset: CGFloat
+    @ViewBuilder let page: Page
+
+    func makeUIViewController(context: Context) -> UIHostingController<AnyView> {
+        let controller = UIHostingController(rootView: rootView(context))
+        controller.view.backgroundColor = .clear
+        controller.additionalSafeAreaInsets.bottom = bottomInset
+        return controller
+    }
+
+    func updateUIViewController(_ controller: UIHostingController<AnyView>, context: Context) {
+        controller.rootView = rootView(context)
+        controller.additionalSafeAreaInsets.bottom = bottomInset
+    }
+
+    private func rootView(_ context: Context) -> AnyView {
+        AnyView(page.environment(\.self, context.environment))
+    }
+}
+
 private struct PageIndicator: View {
     private static let dotSize: CGFloat = 6
     private static let dotSpacing: CGFloat = 8
@@ -81,15 +116,17 @@ private struct PageIndicator: View {
     private static let unselectedOpacity: CGFloat = 0.3
 
     let labels: [LocalizedStringKey?]
-    let progress: CGFloat
+    let progress: PageProgress
     @Binding var selection: Int
 
     var body: some View {
         if #available(iOS 26.0, *) {
             dots
                 .glassEffect(.regular.interactive(), in: .capsule)
+                .padding(.bottom)
         } else {
             dots
+                .padding(.bottom)
         }
     }
 
@@ -113,11 +150,10 @@ private struct PageIndicator: View {
             }
         }
         .padding(.horizontal, Self.pillHorizontalInset - Self.dotSpacing / 2)
-        .padding(.bottom)
     }
 
     private func opacity(for index: Int) -> CGFloat {
-        let distance = min(1, abs(progress - CGFloat(index)))
+        let distance = min(1, abs(progress.value - CGFloat(index)))
         return Self.selectedOpacity - (Self.selectedOpacity - Self.unselectedOpacity) * distance
     }
 }
