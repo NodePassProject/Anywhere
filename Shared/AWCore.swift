@@ -69,6 +69,7 @@ nonisolated final class AWCore {
         static let fallbackDNSServer = "fallbackDNSServer"
         static let hideVPNIcon = "hideVPNIcon"
         static let homeColorScheme = "homeColorScheme"
+        static let hostMappings = "hostMappings"
         static let iCloudSyncEnabled = "iCloudSyncEnabled"
         static let identifier = "identifier"
         static let latencyResults = "latencyResults"
@@ -490,6 +491,18 @@ nonisolated final class AWCore {
 
     static func setLocalRequestDNSDoHURL(_ value: String) {
         userDefaults.set(value, forKey: UserDefaultsKey.localRequestDNSDoHURL)
+    }
+
+    static func getHostMappingsData() -> Data? {
+        userDefaults.data(forKey: UserDefaultsKey.hostMappings)
+    }
+
+    static func setHostMappingsData(_ data: Data?) {
+        if let data {
+            userDefaults.set(data, forKey: UserDefaultsKey.hostMappings)
+        } else {
+            userDefaults.removeObject(forKey: UserDefaultsKey.hostMappings)
+        }
     }
 
     static func getFallbackDNSMode() -> FallbackDNSMode {

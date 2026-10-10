@@ -497,6 +497,7 @@ actor TunnelStack {
         precompiledRouting: DomainRouter.CompiledRouting? = nil
     ) {
         settings = TunnelSettings.load()
+        DNSHosts.shared.invalidate()
         connectionRouter.preventDNSLeak.store(settings.preventDNSLeak, ordering: .relaxed)
         proxyMode = Self.effectiveProxyMode(settings: settings, network: networkContext)
 

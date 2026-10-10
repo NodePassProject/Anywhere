@@ -196,6 +196,14 @@ final class AppSettings {
             AWNotificationCenter.notifyTunnelSettingsChanged()
         }
     }
+
+    var hostMappings: [HostMapping] {
+        didSet {
+            HostMapping.store(hostMappings)
+            DNSHosts.shared.invalidate()
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
     
     var proxyDNSMode: DNSMode {
         didSet {
@@ -334,6 +342,7 @@ final class AppSettings {
         localRequestDNSMode = AWCore.getLocalRequestDNSMode()
         localRequestDNSPlainServer = AWCore.getLocalRequestDNSPlainServer()
         localRequestDNSDoHURL = AWCore.getLocalRequestDNSDoHURL()
+        hostMappings = HostMapping.load()
         preventDNSLeak = AWCore.getPreventDNSLeak()
         proxyDNSMode = AWCore.getProxyDNSMode()
         proxyDNSPlainServer = AWCore.getProxyDNSPlainServer()

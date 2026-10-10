@@ -323,6 +323,7 @@ extension TunnelStack {
     }
 
     private func handleSettingsChanged() {
+        DNSHosts.shared.invalidate()
         guard phase == .running, let configuration else { return }
 
         let old = settings

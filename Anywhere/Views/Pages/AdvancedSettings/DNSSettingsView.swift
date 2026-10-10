@@ -62,6 +62,9 @@ struct DNSSettingsView: View {
                 case .doh:
                     dohRow($drafts.localRequestDoH)
                 }
+                NavigationLink("Host Mappings") {
+                    HostMappingsView()
+                }
             }
 
             Section("Proxies") {

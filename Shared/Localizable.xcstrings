@@ -9319,6 +9319,58 @@
         }
       }
     },
+    "Host Mappings" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "تعيينات المضيف"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Host Mappings"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Asignaciones de host"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "نگاشت‌های میزبان"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Сопоставления хостов"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Host Eşlemeleri"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ánh xạ host"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "主机映射"
+          }
+        }
+      }
+    },
     "HTTP" : {
       "shouldTranslate" : false
     },
@@ -10794,6 +10846,59 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "本地请求"
+          }
+        }
+      }
+    },
+    "Local requests to a listed host use its address instead of a DNS lookup." : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "تستخدم الطلبات المحلية إلى مضيف مدرج عنوانه بدلاً من استعلام DNS."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Local requests to a listed host use its address instead of a DNS lookup."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Las solicitudes locales a un host de la lista usan su dirección en lugar de una consulta DNS."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "درخواست‌های محلی به میزبان فهرست‌شده به‌جای جستجوی DNS از آدرس آن استفاده می‌کنند."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Локальные запросы к указанному хосту используют его адрес вместо DNS-запроса."
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Listelenen bir host'a yapılan yerel istekler DNS sorgusu yerine adresini kullanır."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Yêu cầu cục bộ đến host trong danh sách dùng địa chỉ của host đó thay vì tra cứu DNS."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "发往所列主机的本地请求将直接使用其地址，而不进行 DNS 查询。"
           }
         }
       }
@@ -12320,6 +12425,58 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "无数据"
+          }
+        }
+      }
+    },
+    "No host mappings" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "لا توجد تعيينات مضيف"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No host mappings"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No hay asignaciones de host"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "نگاشت میزبانی وجود ندارد"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Нет сопоставлений хостов"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Host eşlemesi yok"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Không có ánh xạ host"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无主机映射"
           }
         }
       }

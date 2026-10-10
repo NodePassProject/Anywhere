@@ -13,6 +13,7 @@ nonisolated final class DNSResolver: Sendable {
     static let proxies = DNSResolver(
         name: "Proxies",
         upstream: { AWCore.getProxyDNSUpstream() },
+        hosts: nil,
         fallsBackToSystem: true,
         servesStaleOnFailure: true,
         waitLimit: nil
@@ -21,6 +22,7 @@ nonisolated final class DNSResolver: Sendable {
     static let localRequests = DNSResolver(
         name: "Local Requests",
         upstream: { AWCore.getLocalRequestDNSUpstream() },
+        hosts: DNSHosts.shared,
         fallsBackToSystem: false,
         servesStaleOnFailure: false,
         waitLimit: .seconds(4)
@@ -36,6 +38,7 @@ nonisolated final class DNSResolver: Sendable {
     }
 
     private let upstreamSource: @Sendable () -> DNSUpstream
+    private let hosts: DNSHosts?
     private let fallsBackToSystem: Bool
     private let cache: DNSLookupCache<Query, [String]>
     private let blockingBridge = DNSSyscallConcurrencyBridge()
@@ -43,11 +46,13 @@ nonisolated final class DNSResolver: Sendable {
     private init(
         name: String,
         upstream: @escaping @Sendable () -> DNSUpstream,
+        hosts: DNSHosts?,
         fallsBackToSystem: Bool,
         servesStaleOnFailure: Bool,
         waitLimit: Duration?
     ) {
         self.upstreamSource = upstream
+        self.hosts = hosts
         self.fallsBackToSystem = fallsBackToSystem
         self.cache = DNSLookupCache(
             name: name,
@@ -65,6 +70,7 @@ nonisolated final class DNSResolver: Sendable {
     func resolveAll(_ host: String, family: DNSAddressFamily = .preferIPv4, forceFresh: Bool = false) async -> [String] {
         let bare = DNSName.stripBrackets(host)
         if DNSName.isIPAddress(bare) { return family.admits(bare) ? [bare] : [] }
+        if let mapped = hosts?.addresses(for: bare, family: family) { return mapped }
         let query = Query(name: DNSName.cacheKey(for: bare), family: family)
         let upstream = upstreamSource()
         return await cache.value(for: query, from: upstream, forceFresh: forceFresh) { [self] in
@@ -78,7 +84,7 @@ nonisolated final class DNSResolver: Sendable {
     
     func prewarm(_ host: String, family: DNSAddressFamily = .preferIPv4) {
         let bare = DNSName.stripBrackets(host)
-        guard !DNSName.isIPAddress(bare) else { return }
+        guard !DNSName.isIPAddress(bare), hosts?.addresses(for: bare, family: family) == nil else { return }
         let query = Query(name: DNSName.cacheKey(for: bare), family: family)
         let upstream = upstreamSource()
         cache.warm(query, from: upstream) { [self] in
@@ -89,6 +95,7 @@ nonisolated final class DNSResolver: Sendable {
     func cachedIPs(for host: String, family: DNSAddressFamily = .preferIPv4) -> [String]? {
         let bare = DNSName.stripBrackets(host)
         if DNSName.isIPAddress(bare) { return family.admits(bare) ? [bare] : nil }
+        if let mapped = hosts?.addresses(for: bare, family: family) { return mapped }
         return cache.cachedValue(for: Query(name: DNSName.cacheKey(for: bare), family: family), from: upstreamSource())
     }
 
