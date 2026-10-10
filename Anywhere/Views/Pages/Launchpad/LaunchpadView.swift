@@ -22,10 +22,10 @@ struct LaunchpadView: View {
     var body: some View {
         PageView(selection: $page) {
             MainControlView(connectionEffectsEnabled: connectionEffectsEnabled)
-                .pageIndicator(symbol: "power", label: "Main Control")
+                .pageIndicator(label: "Main Control")
             
             DashboardView()
-                .pageIndicator(symbol: "rectangle.3.group.fill", label: "Dashboard")
+                .pageIndicator(label: "Dashboard")
         }
         .background(
             BackgroundGradient()

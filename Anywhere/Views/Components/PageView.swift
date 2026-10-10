@@ -14,34 +14,39 @@ struct PageView<Content: View>: View {
     @State private var progress: CGFloat = 0
 
     var body: some View {
-        Group(subviews: content) { subviews in
-            ScrollView(.horizontal) {
-                HStack(spacing: 0) {
-                    ForEach(subviews.indices, id: \.self) { index in
-                        subviews[index]
-                            .containerRelativeFrame(.horizontal)
-                            .id(index)
+        GeometryReader { proxy in
+            let safeAreaInsets = proxy.safeAreaInsets
+            Group(subviews: content) { subviews in
+                ScrollView(.horizontal) {
+                    HStack(spacing: 0) {
+                        ForEach(subviews.indices, id: \.self) { index in
+                            subviews[index]
+                                .padding(.leading, safeAreaInsets.leading)
+                                .padding(.trailing, safeAreaInsets.trailing)
+                                .containerRelativeFrame(.horizontal)
+                                .id(index)
+                        }
                     }
+                    .scrollTargetLayout()
                 }
-                .scrollTargetLayout()
-            }
-            .scrollTargetBehavior(.paging)
-            .scrollIndicators(.hidden)
-            .scrollPosition(id: scrolledPage)
-            .onScrollGeometryChange(for: CGFloat.self) { geometry in
-                guard geometry.bounds.width > 0 else { return 0 }
-                let lastPage = CGFloat(max(subviews.count - 1, 0))
-                return min(max(geometry.bounds.minX / geometry.bounds.width, 0), lastPage)
-            } action: { _, newValue in
-                progress = newValue
-            }
-            .safeAreaInset(edge: .bottom) {
-                PageIndicator(
-                    items: subviews.map(\.containerValues.pageIndicator),
-                    progress: progress,
-                    selection: $selection
-                )
-                .padding(.bottom)
+                .scrollTargetBehavior(.paging)
+                .scrollIndicators(.hidden)
+                .scrollPosition(id: scrolledPage)
+                .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                    guard geometry.bounds.width > 0 else { return 0 }
+                    let lastPage = CGFloat(max(subviews.count - 1, 0))
+                    return min(max(geometry.bounds.minX / geometry.bounds.width, 0), lastPage)
+                } action: { _, newValue in
+                    progress = newValue
+                }
+                .ignoresSafeArea(.container, edges: .horizontal)
+                .safeAreaInset(edge: .bottom) {
+                    PageIndicator(
+                        labels: subviews.map(\.containerValues.pageIndicatorLabel),
+                        progress: progress,
+                        selection: $selection
+                    )
+                }
             }
         }
     }
@@ -57,57 +62,58 @@ struct PageView<Content: View>: View {
     }
 }
 
-struct PageIndicatorItem {
-    let symbol: String
-    let label: LocalizedStringKey
-}
-
 extension ContainerValues {
-    @Entry var pageIndicator: PageIndicatorItem? = nil
+    @Entry var pageIndicatorLabel: LocalizedStringKey? = nil
 }
 
 extension View {
-    func pageIndicator(symbol: String, label: LocalizedStringKey) -> some View {
-        containerValue(\.pageIndicator, PageIndicatorItem(symbol: symbol, label: label))
+    func pageIndicator(label: LocalizedStringKey) -> some View {
+        containerValue(\.pageIndicatorLabel, label)
     }
 }
 
 private struct PageIndicator: View {
+    private static let dotSize: CGFloat = 6
+    private static let dotSpacing: CGFloat = 8
+    private static let pillHeight: CGFloat = 24
+    private static let pillHorizontalInset: CGFloat = 12
     private static let selectedOpacity: CGFloat = 1
-    private static let unselectedOpacity: CGFloat = 0.4
+    private static let unselectedOpacity: CGFloat = 0.3
 
-    let items: [PageIndicatorItem?]
+    let labels: [LocalizedStringKey?]
     let progress: CGFloat
     @Binding var selection: Int
 
     var body: some View {
         if #available(iOS 26.0, *) {
-            indicators
+            dots
                 .glassEffect(.regular.interactive(), in: .capsule)
         } else {
-            indicators
+            dots
         }
     }
-    
-    @ViewBuilder
-    private var indicators: some View {
+
+    private var dots: some View {
         HStack(spacing: 0) {
-            ForEach(items.indices, id: \.self) { index in
+            ForEach(labels.indices, id: \.self) { index in
                 Button {
                     withAnimation(.snappy) {
                         selection = index
                     }
                 } label: {
-                    Image(systemName: items[index]?.symbol ?? "circle.fill")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.primary.opacity(opacity(for: index)))
-                        .frame(width: 40, height: 40)
+                    Circle()
+                        .fill(.primary.opacity(opacity(for: index)))
+                        .frame(width: Self.dotSize, height: Self.dotSize)
+                        .frame(width: Self.dotSize + Self.dotSpacing, height: Self.pillHeight)
+                        .contentShape(.rect)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel(items[index]?.label ?? "")
+                .accessibilityLabel(labels[index] ?? "")
                 .accessibilityAddTraits(selection == index ? .isSelected : [])
             }
         }
+        .padding(.horizontal, Self.pillHorizontalInset - Self.dotSpacing / 2)
+        .padding(.bottom)
     }
 
     private func opacity(for index: Int) -> CGFloat {

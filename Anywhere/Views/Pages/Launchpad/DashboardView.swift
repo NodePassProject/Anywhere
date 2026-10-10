@@ -38,7 +38,7 @@ struct DashboardView: View {
                             .padding(.horizontal, Self.horizontalPadding)
                             .frame(maxWidth: .infinity, minHeight: viewportHeight)
                     }
-                    .contentMargins(.bottom, 50)
+                    .contentMargins(.bottom, 30)
                     .scrollBounceBehavior(.basedOnSize, axes: .vertical)
                     .transition(.blurReplace)
                     .onGeometryChange(for: CGFloat.self) { proxy in
