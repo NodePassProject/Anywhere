@@ -102,23 +102,31 @@ Anywhere registers several URL schemes so external apps and websites can trigger
 
 ### `anywhere://` Scheme
 
+Every `anywhere://` deep link has the same shape: a host naming the action and a single `link`. The `link` is taken verbatim as everything after `?link=`, so the inner URL does **not** need to be percent-encoded, and only one link fits in a deep link. For example, `anywhere://add-proxy?link=https://example.com/sub?token=abc&foo=bar` works as expected.
+
+#### Add Proxy
+
 ```
 anywhere://add-proxy?link=<link>
 ```
 
 `<link>` can be any URL the app supports: a subscription URL, a `nowhere://` link, a `vless://` link, an `ss://` link, etc.
 
-> **Note:** The `link` parameter is parsed by taking everything after `?link=` verbatim, so the inner URL does **not** need to be percent-encoded. For example, `anywhere://add-proxy?link=https://example.com/sub?token=abc&foo=bar` works as expected.
+#### Import Rule Set
 
-### Import Module
+```
+anywhere://add-rule-set?link=<arrs-or-amrs-url>
+```
+
+Subscribe to a single routing (`.arrs`) or MITM (`.amrs`) rule set from a remote link; the kind is taken from the file extension. The app previews the rule set before importing. To ship several rule sets at once, bundle them in a module.
+
+#### Import Module
 
 ```
 anywhere://add-module?link=<amod-url>
 ```
 
 Subscribe to a module (`.amod`) from a remote link. A module bundles routing and MITM rule sets; the app previews them before importing. See [Documentations/Module.md](Documentations/Module.md) for the file format.
-
-> **Note:** Unlike `add-proxy`, `link` is a standard URL query item. Percent-encode it only if it carries its own reserved characters (`&`, `=`, `#`).
 
 ### Proxy URI Schemes
 

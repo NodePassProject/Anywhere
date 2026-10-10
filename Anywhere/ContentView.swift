@@ -16,6 +16,8 @@ struct ContentView: View {
     @State private var showingDeepLinkAddSheet = false
     @State private var showingManualAddSheet = false
     @State private var pendingDeepLinkURL: String?
+    @State private var showingImportRuleSetSheet = false
+    @State private var pendingRuleSetLink: URL?
     @State private var showingImportModuleSheet = false
     @State private var pendingModuleLink: URL?
     
@@ -40,6 +42,11 @@ struct ContentView: View {
                         operations.selection.selectIfNone(configuration)
                     }
                 }
+                .sheet(isPresented: $showingImportRuleSetSheet, onDismiss: { pendingRuleSetLink = nil }) {
+                    if let link = pendingRuleSetLink {
+                        ImportRuleSetView(link: link)
+                    }
+                }
                 .sheet(isPresented: $showingImportModuleSheet, onDismiss: { pendingModuleLink = nil }) {
                     if let link = pendingModuleLink {
                         ImportModuleView(link: link)
@@ -59,6 +66,13 @@ struct ContentView: View {
                         pendingDeepLinkURL = url
                         deepLinkManager.url = nil
                         showingDeepLinkAddSheet = true
+                    }
+                }
+                .onChange(of: deepLinkManager.ruleSetLink) { _, newValue in
+                    if let link = newValue {
+                        pendingRuleSetLink = link
+                        deepLinkManager.ruleSetLink = nil
+                        showingImportRuleSetSheet = true
                     }
                 }
                 .onChange(of: deepLinkManager.moduleLink) { _, newValue in

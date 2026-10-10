@@ -115,9 +115,6 @@ struct ImportModuleView: View {
     @ViewBuilder
     private func routingRow(for ruleSet: ModuleRoutingRuleSet, seed: String?) -> some View {
         HStack {
-            Image(systemName: "arrow.triangle.branch")
-                .foregroundStyle(.secondary)
-                .frame(width: 30, height: 30)
             VStack(alignment: .leading) {
                 Text(ruleSet.name)
                 Text("\(ruleSet.rules.count) rule(s)")
@@ -131,18 +128,13 @@ struct ImportModuleView: View {
 
     @ViewBuilder
     private func mitmRow(for ruleSet: ModuleMITMRuleSet) -> some View {
-        HStack {
-            Image(systemName: "key.horizontal.fill")
+        VStack(alignment: .leading) {
+            Text(ruleSet.name)
+            Text(summary(for: ruleSet))
+                .font(.caption)
                 .foregroundStyle(.secondary)
-                .frame(width: 30, height: 30)
-            VStack(alignment: .leading) {
-                Text(ruleSet.name)
-                Text(summary(for: ruleSet))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .truncationMode(.middle)
-                    .lineLimit(1)
-            }
+                .truncationMode(.middle)
+                .lineLimit(1)
         }
     }
 
