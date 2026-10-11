@@ -27,6 +27,7 @@ extension QUICConnectionCore {
         }
         self.retransmitTimer?.cancel()
         self.retransmitTimer = nil
+        self.cancelCoarseTimer()
         self.usesBrutalCC = false
         self.engine = nil
         self.transportSealContinuation?.finish()

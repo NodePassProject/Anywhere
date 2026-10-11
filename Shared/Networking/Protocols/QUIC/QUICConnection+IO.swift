@@ -138,14 +138,16 @@ extension QUICConnectionCore {
 
     func makeRetransmitTimer() -> BridgeDeadlineTimer {
         BridgeDeadlineTimer(queue: executor.queue) { [weak owner] in
-            owner?.update { core in
-                guard core.phase != .closed, let engine = core.engine else { return }
-                core.lastScheduledExpiry = 0
-                engine.handleTimeout(now: core.currentTimestamp())
-                core.drainEngineEvents(engine)
-                core.writeToUDP()
-            }
+            owner?.update { $0.handleTimerFired() }
         }
+    }
+
+    func handleTimerFired() {
+        guard phase != .closed, let engine else { return }
+        lastScheduledExpiry = 0
+        engine.handleTimeout(now: currentTimestamp())
+        drainEngineEvents(engine)
+        writeToUDP()
     }
 
     func rescheduleTimer() {
@@ -155,9 +157,33 @@ extension QUICConnectionCore {
         lastScheduledExpiry = expiry
         guard expiry != UInt64.max else {
             retransmitTimer.parkUntilRearmed()
+            cancelCoarseTimer()
             return
         }
         let now = currentTimestamp().nanoseconds
-        retransmitTimer.schedule(afterNanoseconds: expiry > now ? expiry - now : 0)
+        let remaining = expiry > now ? expiry - now : 0
+        if remaining >= Self.coarseTimeoutHorizon {
+            retransmitTimer.parkUntilRearmed()
+            cancelCoarseTimer()
+            coarseTimerToken = TickScheduler.shared.schedule(
+                Deadline(at: MonotonicClock.Instant(nanoseconds: expiry), precision: .relaxed)
+            ) { [weak owner] in
+                owner?.update { core in
+                    core.coarseTimerToken = nil
+                    core.handleTimerFired()
+                }
+            }
+        } else {
+            cancelCoarseTimer()
+            retransmitTimer.arm(
+                at: MonotonicClock.Instant(nanoseconds: expiry),
+                precision: remaining >= Self.promptTimeoutHorizon ? .prompt : .exact
+            )
+        }
+    }
+
+    func cancelCoarseTimer() {
+        coarseTimerToken?.cancel()
+        coarseTimerToken = nil
     }
 }

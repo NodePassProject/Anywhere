@@ -43,7 +43,8 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
         var isXUDP = false
         var readyTask: Task<Void, Error>?
         var frameParser = VLESSVisionUDPFrameParser()
-        var idleSince: ContinuousClock.Instant?
+        var idleClose: DeadlineToken?
+        var idleGeneration: UInt64 = 0
         var runTask: Task<Void, Never>?
     }
 
@@ -122,12 +123,7 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
     }
 
     private func startSession(_ connection: ProxyConnection) {
-        let task = Task {
-            await withTaskGroup(of: Void.self) { group in
-                group.addTask { await self.runReadLoop(connection) }
-                group.addTask { await self.runIdleSweep() }
-            }
-        }
+        let task = Task { await self.runReadLoop(connection) }
         state.withLock { state in
             if state.phase == .closed {
                 task.cancel()
@@ -138,29 +134,27 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
     }
 
     private func markIdlenessLocked(_ state: inout State) {
-        state.idleSince = state.streams.isEmpty ? ContinuousClock.now : nil
+        guard state.streams.isEmpty else {
+            state.idleClose?.cancel()
+            state.idleClose = nil
+            return
+        }
+        guard state.idleClose == nil, state.phase == .ready else { return }
+        state.idleGeneration &+= 1
+        let generation = state.idleGeneration
+        state.idleClose = TickScheduler.shared.schedule(
+            in: .seconds(Self.idleTimeout),
+            precision: .relaxed
+        ) { [weak self] in self?.idleTimeoutFired(generation: generation) }
     }
 
-    private func runIdleSweep() async {
-        while !Task.isCancelled {
-            enum Step { case expired; case sleep(Duration) }
-            let step: Step? = state.withLock { state in
-                guard state.phase != .closed else { return nil }
-                guard let since = state.idleSince else { return .sleep(.seconds(Self.idleTimeout)) }
-                let elapsed = since.duration(to: ContinuousClock.now)
-                if elapsed >= .seconds(Self.idleTimeout) { return .expired }
-                return .sleep(.seconds(Self.idleTimeout) - elapsed)
-            }
-            switch step {
-            case nil:
-                return
-            case .expired:
-                close(error: nil)
-                return
-            case .sleep(let duration):
-                try? await Task.sleep(for: duration)
-            }
+    private func idleTimeoutFired(generation: UInt64) {
+        let expired: Bool = state.withLock { state in
+            guard state.idleGeneration == generation else { return false }
+            state.idleClose = nil
+            return state.phase != .closed && state.streams.isEmpty
         }
+        if expired { close(error: nil) }
     }
 
     // MARK: - Streams
@@ -333,6 +327,7 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
             var client: ProxyClient?
             var readyTask: Task<Void, Error>?
             var runTask: Task<Void, Never>?
+            var idleClose: DeadlineToken?
         }
 
         let teardown: Teardown? = state.withLock { state in
@@ -343,19 +338,22 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
                 connection: state.proxyConnection,
                 client: state.proxyClient,
                 readyTask: state.readyTask,
-                runTask: state.runTask
+                runTask: state.runTask,
+                idleClose: state.idleClose
             )
             state.streams.removeAll()
             state.proxyConnection = nil
             state.proxyClient = nil
             state.readyTask = nil
             state.runTask = nil
+            state.idleClose = nil
             state.frameParser.reset()
             return snapshot
         }
         guard let teardown else { return }
 
         teardown.runTask?.cancel()
+        teardown.idleClose?.cancel()
 
         for stream in teardown.streams {
             stream.deliverClose(error: error)

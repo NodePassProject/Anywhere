@@ -306,6 +306,7 @@ nonisolated private final class NowhereMultiplexerPool: Sendable {
             }
             return true
         }
+        if inserted { pool.noteMultiplexersChanged() }
         return (accepted, inserted)
     }
 

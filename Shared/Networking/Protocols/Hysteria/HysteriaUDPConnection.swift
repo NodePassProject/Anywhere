@@ -45,7 +45,7 @@ actor HysteriaUDPConnection {
         var fragments: [Data?]
         var received: Int
         let fragmentCount: Int
-        let createdAt: DispatchTime
+        let createdAt: UInt64
     }
     private var defragSlots: [UInt16: DefragSlot] = [:]
     private nonisolated static let defragSlotTTLNanos: UInt64 = 10 * 1_000_000_000
@@ -135,12 +135,11 @@ actor HysteriaUDPConnection {
     private func assembleFragment(_ message: HysteriaProtocol.UDPMessage) -> Data? {
         guard message.fragID < message.fragCount, message.fragCount > 0 else { return nil }
 
-        let now = DispatchTime.now()
-        let nowNs = now.uptimeNanoseconds
+        let nowNs = MonotonicClock.nanoseconds
         
         let existing = defragSlots[message.packetID]
         let existingIsExpired = existing.map {
-            nowNs &- $0.createdAt.uptimeNanoseconds > Self.defragSlotTTLNanos
+            nowNs &- $0.createdAt > Self.defragSlotTTLNanos
         } ?? false
 
         var slot: DefragSlot
@@ -154,8 +153,8 @@ actor HysteriaUDPConnection {
                     .lazy
                     .map { (key: $0.key, slot: $0.value) }
                     .min { lhs, rhs in
-                        let lhsExpired = nowNs &- lhs.slot.createdAt.uptimeNanoseconds > Self.defragSlotTTLNanos
-                        let rhsExpired = nowNs &- rhs.slot.createdAt.uptimeNanoseconds > Self.defragSlotTTLNanos
+                        let lhsExpired = nowNs &- lhs.slot.createdAt > Self.defragSlotTTLNanos
+                        let rhsExpired = nowNs &- rhs.slot.createdAt > Self.defragSlotTTLNanos
                         if lhsExpired != rhsExpired { return lhsExpired }
                         return lhs.slot.createdAt < rhs.slot.createdAt
                     }?.key
@@ -167,7 +166,7 @@ actor HysteriaUDPConnection {
                 fragments: Array(repeating: nil, count: Int(message.fragCount)),
                 received: 0,
                 fragmentCount: Int(message.fragCount),
-                createdAt: now
+                createdAt: nowNs
             )
         }
 

@@ -275,9 +275,9 @@ actor TunnelStack {
     
     nonisolated let liveIPStack = Mutex<IPStack?>(nil)
 
-    nonisolated let udpCleanupResume = AsyncInbox<Void>(capacity: 1)
+    nonisolated let udpCleanupSource = Mutex<UDPCleanupSource?>(nil)
 
-    nonisolated let tcpIdleSweepPoke = AsyncInbox<Void>(capacity: 1)
+    nonisolated let tcpIdleSweepRegistration = Mutex<DeadlineRegistration?>(nil)
     nonisolated let tcpIdleSweepArmed = Atomic<TimeInterval>(.infinity)
 
     nonisolated let datagramIntake = Mutex<AsyncInbox<[InboundDatagram]>?>(nil)

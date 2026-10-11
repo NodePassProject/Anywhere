@@ -26,7 +26,7 @@ nonisolated enum LatencyTester {
                     return try await Self.performTest(testConfiguration)
                 }
                 group.addTask {
-                    try await Task.sleep(for: Self.timeout)
+                    try await Task.sleep(for: Self.timeout, precision: .relaxed)
                     throw CancellationError()
                 }
 

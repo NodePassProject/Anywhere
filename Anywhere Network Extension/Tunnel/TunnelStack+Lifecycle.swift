@@ -256,7 +256,7 @@ extension TunnelStack {
         delay: TimeInterval,
         generation: Int
     ) async {
-        try? await Task.sleep(for: .seconds(delay))
+        try? await Task.sleep(seconds: delay, precision: .relaxed)
         guard generation == deferredRestartGeneration else { return }
         deferredRestartScheduled = false
         guard !Task.isCancelled, phase == .running else { return }

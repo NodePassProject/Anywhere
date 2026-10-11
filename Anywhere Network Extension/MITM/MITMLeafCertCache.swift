@@ -34,7 +34,7 @@ nonisolated final class MITMLeafCertCache: Sendable {
 
     private struct CacheEntry {
         let leaf: Leaf
-        var lastAccess: Date
+        var lastAccess: TimeInterval
     }
 
     init(store: MITMCertificateStore) throws(AnywhereError) {
@@ -60,7 +60,7 @@ nonisolated final class MITMLeafCertCache: Sendable {
                   entry.leaf.expiry.timeIntervalSince(Date()) > Self.refreshThreshold else {
                 return nil
             }
-            entries[normalized]?.lastAccess = Date()
+            entries[normalized]?.lastAccess = MonotonicClock.now
             return entry.leaf
         }
     }
@@ -68,7 +68,7 @@ nonisolated final class MITMLeafCertCache: Sendable {
     private func mintAndStore(for normalized: String) throws -> Leaf {
         let leaf = try mintLeaf(for: normalized)
         entries.withLock { entries in
-            entries[normalized] = CacheEntry(leaf: leaf, lastAccess: Date())
+            entries[normalized] = CacheEntry(leaf: leaf, lastAccess: MonotonicClock.now)
             Self.evictIfNeeded(&entries)
         }
         return leaf

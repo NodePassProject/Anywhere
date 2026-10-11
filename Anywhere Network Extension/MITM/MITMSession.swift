@@ -573,7 +573,7 @@ actor MITMSession: MITMHTTP1StreamDelegate {
                 let flushed = sender.submit { }
                 await withTaskGroup(of: Void.self) { group in
                     group.addTask { _ = try? await flushed.value() }
-                    group.addTask { try? await Task.sleep(for: .milliseconds(500)) }
+                    group.addTask { try? await Task.sleep(for: .milliseconds(500), precision: .prompt) }
                     _ = await group.next()
                     group.cancelAll()
                 }
@@ -1005,7 +1005,7 @@ actor MITMSession: MITMHTTP1StreamDelegate {
     ) async {
         let timedOut = await withTaskGroup(of: Bool.self) { group in
             group.addTask {
-                do { try await Task.sleep(for: .seconds(TunnelConstants.handshakeTimeout)); return true }
+                do { try await Task.sleep(seconds: TunnelConstants.handshakeTimeout, precision: .relaxed); return true }
                 catch { return false }
             }
             group.addTask {

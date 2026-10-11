@@ -507,7 +507,7 @@ nonisolated final class VLESSEncryptionClient {
 
         let gap = index < gaps.count ? gaps[index] : 0
         if gap > 0 {
-            try await Task.sleep(for: .seconds(gap))
+            try await Task.sleep(for: .seconds(gap), precision: .prompt)
         }
         try await sendFragments(
             over: connection,

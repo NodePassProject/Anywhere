@@ -280,7 +280,7 @@ actor UDPPlane {
     private func insert(_ flow: UDPFlow) {
         flows[flow.flowKey] = flow
         if cleanupDeadline.map({ flow.idleDeadline < $0 }) ?? true {
-            stack.udpCleanupResume.yield(())
+            stack.scheduleUDPCleanup(at: flow.idleDeadline)
         }
     }
 

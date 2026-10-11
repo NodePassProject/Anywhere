@@ -62,6 +62,7 @@ nonisolated final class RFCMultiplexerPool: TransportPool {
             state.lastActivity[ObjectIdentifier(multiplexer)] = MonotonicClock.now
             return multiplexer
         }
+        if adopted != nil { pool.noteMultiplexersChanged() }
 
         guard let multiplexer = adopted else {
             return nil

@@ -60,7 +60,7 @@ nonisolated final class GRPCConnection: Sendable {
 
         var h2FlowGate = H2FlowGate()
 
-        var keepaliveTask: Task<Void, Never>?
+        var keepaliveDeadline: DeadlineToken?
     }
 
     private let state: Mutex<State>
@@ -231,13 +231,13 @@ nonisolated final class GRPCConnection: Sendable {
     // MARK: - Cancel
 
     func cancel() {
-        let keepalive: Task<Void, Never>? = state.withLock { state in
+        let keepalive: DeadlineToken? = state.withLock { state in
             state.transition(to: .cancelled)
             state.h2ReadBuffer.removeAll()
             state.grpcFrameBuffer.removeAll()
             state.decodedBuffer.removeAll()
-            let keepalive = state.keepaliveTask
-            state.keepaliveTask = nil
+            let keepalive = state.keepaliveDeadline
+            state.keepaliveDeadline = nil
             state.h2FlowGate.wakeAll()
             return keepalive
         }
@@ -246,7 +246,7 @@ nonisolated final class GRPCConnection: Sendable {
     }
 
     deinit {
-        state.withLock { $0.keepaliveTask?.cancel() }
+        state.withLock { $0.keepaliveDeadline?.cancel() }
     }
 }
 
@@ -978,14 +978,24 @@ nonisolated extension GRPCConnection {
         guard interval > 0 else { return }
 
         state.withLock { state in
-            guard state.phase == .live, state.keepaliveTask == nil else { return }
-            state.keepaliveTask = Task { [weak self] in
-                while !Task.isCancelled {
-                    try? await Task.sleep(for: .seconds(interval))
-                    guard !Task.isCancelled, let self else { return }
-                    await self.sendKeepalivePing()
-                }
-            }
+            guard state.phase == .live, state.keepaliveDeadline == nil else { return }
+            state.keepaliveDeadline = scheduleKeepalive(after: interval)
+        }
+    }
+
+    private func scheduleKeepalive(after interval: Int) -> DeadlineToken {
+        TickScheduler.shared.schedule(in: .seconds(interval), precision: .relaxed) { [weak self] in
+            guard let self else { return }
+            Task { await self.keepaliveFired(interval: interval) }
+        }
+    }
+
+    private func keepaliveFired(interval: Int) async {
+        guard state.withLock({ $0.phase == .live }) else { return }
+        await sendKeepalivePing()
+        state.withLock { state in
+            guard state.phase == .live, state.keepaliveDeadline != nil else { return }
+            state.keepaliveDeadline = scheduleKeepalive(after: interval)
         }
     }
 

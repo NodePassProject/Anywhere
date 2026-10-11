@@ -96,13 +96,13 @@ nonisolated final class MITMRegexConcurrencyBridge: Sendable {
     
     private static func scanFirstMatch(_ regex: NSRegularExpression, in string: String, abortAfterSeconds: Int) -> ScanResult {
         let range = NSRange(string.startIndex..., in: string)
-        let abortAt = DispatchTime.now().uptimeNanoseconds + UInt64(abortAfterSeconds) * 1_000_000_000
+        let abortAt = MonotonicClock.nanoseconds + UInt64(abortAfterSeconds) * 1_000_000_000
         var outcome = ScanResult.noMatch
         regex.enumerateMatches(in: string, options: [.reportProgress], range: range) { result, _, stop in
             if let result {
                 outcome = .match(result)
                 stop.pointee = true
-            } else if DispatchTime.now().uptimeNanoseconds >= abortAt {
+            } else if MonotonicClock.nanoseconds >= abortAt {
                 outcome = .aborted
                 stop.pointee = true
             }
@@ -152,7 +152,7 @@ nonisolated final class MITMRegexConcurrencyBridge: Sendable {
                 return .timedOut
             }
             group.addTask {
-                try? await Task.sleep(for: .milliseconds(deadlineMillis))
+                try? await Task.sleep(for: .milliseconds(deadlineMillis), precision: .prompt)
                 return .timedOut
             }
             let first = await group.next() ?? .timedOut
@@ -171,8 +171,7 @@ nonisolated final class MITMRegexConcurrencyBridge: Sendable {
         message: @escaping @Sendable () -> String
     ) {
         Task.detached(priority: .utility) {
-            try? await Task.sleep(for: .seconds(hardCapSeconds))
-            // A worker still pinned by catastrophic backtracking never published `finished`.
+            try? await Task.sleep(for: .seconds(hardCapSeconds), precision: .lazy)
             guard !flag.finished.load(ordering: .sequentiallyConsistent) else { return }
             fatalError(message())
         }

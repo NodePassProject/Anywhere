@@ -7,10 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		382A10E4306979F20032C2BF /* AnywhereIP in Frameworks */ = {isa = PBXBuildFile; productRef = 382A10E3306979F20032C2BF /* AnywhereIP */; };
 		382A1871306A04490032C2BF /* AnywhereIP in Frameworks */ = {isa = PBXBuildFile; productRef = 382A1870306A04490032C2BF /* AnywhereIP */; };
-		382A9FE1306823010032C2BF /* AnywhereIP in Frameworks */ = {isa = PBXBuildFile; productRef = 382A9FE0306823010032C2BF /* AnywhereIP */; };
-		385372C13074E90B000675B7 /* AnywhereQUIC in Frameworks */ = {isa = PBXBuildFile; productRef = 385372C03074E90B000675B7 /* AnywhereQUIC */; };
 		3853793F30753251000675B7 /* AnywhereQUIC in Frameworks */ = {isa = PBXBuildFile; productRef = 3853793E30753251000675B7 /* AnywhereQUIC */; };
 		3853794130753258000675B7 /* AnywhereQUIC in Frameworks */ = {isa = PBXBuildFile; productRef = 3853794030753258000675B7 /* AnywhereQUIC */; };
 		385379433075325D000675B7 /* AnywhereQUIC in Frameworks */ = {isa = PBXBuildFile; productRef = 385379423075325D000675B7 /* AnywhereQUIC */; };
@@ -372,6 +369,9 @@
 				Utilities/DeviceCensorship.swift,
 				Utilities/MonotonicClock.swift,
 				"Utilities/String+init.swift",
+				Utilities/Timing/Deadline.swift,
+				Utilities/Timing/TickScheduler.swift,
+				Utilities/Timing/TimerPrecision.swift,
 				"Utilities/UUID+VLESSString.swift",
 				Utilities/VPNStatus.swift,
 			);
@@ -396,6 +396,9 @@
 				Utilities/AnywhereError.swift,
 				Utilities/AnywhereLogger.swift,
 				Utilities/Bridges/SwiftRegexConcurrencyBridge.swift,
+				Utilities/MonotonicClock.swift,
+				Utilities/Timing/Deadline.swift,
+				Utilities/Timing/TimerPrecision.swift,
 			);
 			target = CB71CDC22F837D11002B9E1D /* Anywhere Widget */;
 		};
@@ -509,12 +512,9 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				382A9FE1306823010032C2BF /* AnywhereIP in Frameworks */,
 				CB1C107A2F23B82F00B74CD8 /* NetworkExtension.framework in Frameworks */,
 				382A1871306A04490032C2BF /* AnywhereIP in Frameworks */,
 				3853793F30753251000675B7 /* AnywhereQUIC in Frameworks */,
-				385372C13074E90B000675B7 /* AnywhereQUIC in Frameworks */,
-				382A10E4306979F20032C2BF /* AnywhereIP in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -672,10 +672,7 @@
 			);
 			name = "Anywhere Network Extension";
 			packageProductDependencies = (
-				382A9FE0306823010032C2BF /* AnywhereIP */,
-				382A10E3306979F20032C2BF /* AnywhereIP */,
 				382A1870306A04490032C2BF /* AnywhereIP */,
-				385372C03074E90B000675B7 /* AnywhereQUIC */,
 				3853793E30753251000675B7 /* AnywhereQUIC */,
 			);
 			productName = "Network Extension";
@@ -780,8 +777,8 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				CBFA0DE000000000000000A1 /* XCRemoteSwiftPackageReference "AnywhereRules" */,
-				382A186F306A04490032C2BF /* XCRemoteSwiftPackageReference "AnywhereIP" */,
-				3853793D30753251000675B7 /* XCRemoteSwiftPackageReference "AnywhereQUIC" */,
+				38B2C4A0307A1F0100D4E6F1 /* XCLocalSwiftPackageReference "Packages/AnywhereIP" */,
+				38B2C4A1307A1F0100D4E6F1 /* XCLocalSwiftPackageReference "Packages/AnywhereQUIC" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = CB1C10662F23B81500B74CD8 /* Products */;
@@ -1642,23 +1639,18 @@
 		};
 /* End XCConfigurationList section */
 
+/* Begin XCLocalSwiftPackageReference section */
+		38B2C4A0307A1F0100D4E6F1 /* XCLocalSwiftPackageReference "Packages/AnywhereIP" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/AnywhereIP;
+		};
+		38B2C4A1307A1F0100D4E6F1 /* XCLocalSwiftPackageReference "Packages/AnywhereQUIC" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/AnywhereQUIC;
+		};
+/* End XCLocalSwiftPackageReference section */
+
 /* Begin XCRemoteSwiftPackageReference section */
-		382A186F306A04490032C2BF /* XCRemoteSwiftPackageReference "AnywhereIP" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/NodePassProject/AnywhereIP.git";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 3.1.0;
-			};
-		};
-		3853793D30753251000675B7 /* XCRemoteSwiftPackageReference "AnywhereQUIC" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/NodePassProject/AnywhereQUIC";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 2.1.0;
-			};
-		};
 		CBFA0DE000000000000000A1 /* XCRemoteSwiftPackageReference "AnywhereRules" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/hiDandelion/AnywhereRules.git";
@@ -1670,36 +1662,20 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		382A10E3306979F20032C2BF /* AnywhereIP */ = {
-			isa = XCSwiftPackageProductDependency;
-			productName = AnywhereIP;
-		};
 		382A1870306A04490032C2BF /* AnywhereIP */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = 382A186F306A04490032C2BF /* XCRemoteSwiftPackageReference "AnywhereIP" */;
 			productName = AnywhereIP;
-		};
-		382A9FE0306823010032C2BF /* AnywhereIP */ = {
-			isa = XCSwiftPackageProductDependency;
-			productName = AnywhereIP;
-		};
-		385372C03074E90B000675B7 /* AnywhereQUIC */ = {
-			isa = XCSwiftPackageProductDependency;
-			productName = AnywhereQUIC;
 		};
 		3853793E30753251000675B7 /* AnywhereQUIC */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = 3853793D30753251000675B7 /* XCRemoteSwiftPackageReference "AnywhereQUIC" */;
 			productName = AnywhereQUIC;
 		};
 		3853794030753258000675B7 /* AnywhereQUIC */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = 3853793D30753251000675B7 /* XCRemoteSwiftPackageReference "AnywhereQUIC" */;
 			productName = AnywhereQUIC;
 		};
 		385379423075325D000675B7 /* AnywhereQUIC */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = 3853793D30753251000675B7 /* XCRemoteSwiftPackageReference "AnywhereQUIC" */;
 			productName = AnywhereQUIC;
 		};
 		CBFA0DE000000000000000B1 /* AnywhereRules */ = {

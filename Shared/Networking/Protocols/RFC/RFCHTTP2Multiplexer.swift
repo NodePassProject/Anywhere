@@ -45,7 +45,7 @@ nonisolated final class RFCHTTP2Multiplexer: Multiplexer, Sendable {
     
     private struct PendingOpen {
         let inbox = AsyncInbox<Int>()
-        var watchdog: Task<Void, Never>?
+        var watchdog: DeadlineToken?
     }
 
     private struct State: PhaseHolding {
@@ -279,12 +279,10 @@ nonisolated final class RFCHTTP2Multiplexer: Multiplexer, Sendable {
     }
 
     private func armOpenWatchdog(streamID: UInt32) {
-        let watchdog = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(Self.openTimeout))
-            guard !Task.isCancelled, let self else { return }
-            self.failOpen(streamID: streamID, error: AnywhereError.proxy(.http2, .openTimeout))
+        let watchdog = TickScheduler.shared.schedule(in: .seconds(Self.openTimeout), precision: .relaxed) { [weak self] in
+            self?.failOpen(streamID: streamID, error: AnywhereError.proxy(.http2, .openTimeout))
         }
-        let stale: Task<Void, Never>? = state.withLock { state in
+        let stale: DeadlineToken? = state.withLock { state in
             guard state.pendingOpens[streamID] != nil else { return watchdog }
             let previous = state.pendingOpens[streamID]?.watchdog
             state.pendingOpens[streamID]?.watchdog = watchdog

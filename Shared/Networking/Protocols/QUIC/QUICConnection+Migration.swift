@@ -59,8 +59,8 @@ extension QUICConnectionCore {
             return
         }
         if case .proactiveProbing = new {} else {
-            proactiveDeadlineTask?.cancel()
-            proactiveDeadlineTask = nil
+            proactiveDeadlineToken?.cancel()
+            proactiveDeadlineToken = nil
         }
         migration = new
     }
@@ -147,11 +147,12 @@ extension QUICConnectionCore {
     }
 
     private func scheduleProactiveDeadline(target: QUICDatagramCarrier, validating: Bool) {
-        proactiveDeadlineTask?.cancel()
-        proactiveDeadlineTask = Task { [weak owner, weak target] in
-            do { try await Task.sleep(for: .seconds(Self.proactiveReadyTimeout)) }
-            catch { return }
-            guard !Task.isCancelled, let target else { return }
+        proactiveDeadlineToken?.cancel()
+        proactiveDeadlineToken = TickScheduler.shared.schedule(
+            in: .seconds(Self.proactiveReadyTimeout),
+            precision: .relaxed
+        ) { [weak owner, weak target] in
+            guard let target else { return }
             owner?.update { core in
                 switch core.migration {
                 case .proactiveProbing(let current, _) where !validating && current === target:

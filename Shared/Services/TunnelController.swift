@@ -149,7 +149,7 @@ final class TunnelController {
 
         if status == .reasserting, rawStatus == .connected {
             reassertingDebounceTask = Task { [weak self] in
-                try? await Task.sleep(for: Self.reassertingDebounceInterval)
+                try? await Task.sleep(for: Self.reassertingDebounceInterval, precision: .relaxed)
                 guard !Task.isCancelled, let self else { return }
                 // Re-check the live status: apply only if it never recovered.
                 guard self.provider.status == .reasserting else { return }

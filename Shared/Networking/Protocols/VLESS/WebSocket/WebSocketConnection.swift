@@ -43,7 +43,7 @@ nonisolated final class WebSocketConnection: Sendable {
     private struct ConnectionState: PhaseHolding {
         var phase: Phase = .upgrading
         var receiveBuffer = Data()
-        var heartbeatTask: Task<Void, Never>?
+        var heartbeatDeadline: DeadlineToken?
     }
 
     private let state: Mutex<ConnectionState>
@@ -247,14 +247,14 @@ nonisolated final class WebSocketConnection: Sendable {
         state.withLock {
             $0.transition(to: .cancelled)
             $0.receiveBuffer.removeAll()
-            $0.heartbeatTask?.cancel()
-            $0.heartbeatTask = nil
+            $0.heartbeatDeadline?.cancel()
+            $0.heartbeatDeadline = nil
         }
         transport.cancel()
     }
 
     deinit {
-        state.withLock { $0.heartbeatTask?.cancel() }
+        state.withLock { $0.heartbeatDeadline?.cancel() }
     }
 
     // MARK: - Heartbeat
@@ -263,24 +263,31 @@ nonisolated final class WebSocketConnection: Sendable {
         let period = configuration.heartbeatPeriod
         guard period > 0 else { return }
 
-        let task = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(period))
-                guard !Task.isCancelled, let self, self.isConnected else { return }
-                let pingFrame = self.buildFrame(opcode: 0x09, payload: Data())
-                do {
-                    try await self.transport.send(pingFrame)
-                } catch {
-                    return   // stop the heartbeat on send failure
-                }
-            }
+        state.withLock { state in
+            guard state.phase == .open, state.heartbeatDeadline == nil else { return }
+            state.heartbeatDeadline = scheduleHeartbeat(period: period)
         }
-        let installed: Bool = state.withLock { state in
-            guard state.phase == .open else { return false }
-            state.heartbeatTask = task
-            return true
+    }
+
+    private func scheduleHeartbeat(period: UInt32) -> DeadlineToken {
+        TickScheduler.shared.schedule(in: .seconds(period), precision: .relaxed) { [weak self] in
+            guard let self else { return }
+            Task { await self.heartbeatFired(period: period) }
         }
-        if !installed { task.cancel() }
+    }
+
+    private func heartbeatFired(period: UInt32) async {
+        guard isConnected else { return }
+        let pingFrame = buildFrame(opcode: 0x09, payload: Data())
+        do {
+            try await transport.send(pingFrame)
+        } catch {
+            return
+        }
+        state.withLock { state in
+            guard state.phase == .open, state.heartbeatDeadline != nil else { return }
+            state.heartbeatDeadline = scheduleHeartbeat(period: period)
+        }
     }
 
     // MARK: - Frame Building (Client → Server, MUST be masked)

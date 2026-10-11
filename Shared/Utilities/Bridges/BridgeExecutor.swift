@@ -55,6 +55,16 @@ nonisolated final class BridgeDeadlineTimer: @unchecked Sendable {
         timer.resume()
     }
 
+    func arm(at instant: MonotonicClock.Instant, precision: TimerPrecision) {
+        guard !cancelled.isClaimed else { return }
+        let remaining = max(MonotonicClock.instant.duration(to: instant), .zero)
+        let tolerance = precision.tolerance(forRemaining: remaining)
+        timer.schedule(
+            deadline: .now() + Self.dispatchInterval(remaining),
+            leeway: Self.dispatchInterval(tolerance)
+        )
+    }
+
     func schedule(afterNanoseconds nanoseconds: UInt64) {
         guard !cancelled.isClaimed else { return }
         timer.schedule(
@@ -66,6 +76,10 @@ nonisolated final class BridgeDeadlineTimer: @unchecked Sendable {
     func parkUntilRearmed() {
         guard !cancelled.isClaimed else { return }
         timer.schedule(deadline: .distantFuture, leeway: .nanoseconds(0))
+    }
+
+    private static func dispatchInterval(_ duration: Duration) -> DispatchTimeInterval {
+        .nanoseconds(Int(clamping: max(duration.nanosecondsClamped, 0)))
     }
 
     func cancel() {

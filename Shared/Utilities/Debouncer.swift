@@ -20,7 +20,7 @@ final class Debouncer {
         let previous = task
         previous?.cancel()
         task = Task {
-            try? await Task.sleep(for: interval)
+            try? await Task.sleep(for: interval, precision: .relaxed)
             guard !Task.isCancelled else { return }
             await previous?.value
             guard !Task.isCancelled else { return }

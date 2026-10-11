@@ -35,3 +35,7 @@ build/
 !default.perspectivev3
 *.hmap
 *.moved-aside
+
+# Swift Package Manager (local packages)
+.build/
+.swiftpm/

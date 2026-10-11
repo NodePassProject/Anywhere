@@ -560,6 +560,7 @@ nonisolated final class SudokuConnectionFactory: Sendable {
         var pendingPreparations: [PreparedKey: Int] = [:]
         var preparedClosed = false
         var scheduledTasks: [Int: Task<Void, Never>] = [:]
+        var scheduledDeadlines: [Int: DeadlineToken] = [:]
         var nextScheduledTaskID = 0
         var generation: UInt64 = 0
         var nextWaiterID: UInt64 = 0
@@ -596,7 +597,7 @@ nonisolated final class SudokuConnectionFactory: Sendable {
         guard interval > 0 else { return }
         await withTaskGroup(of: Void.self) { group in
             group.addTask { await self.waitPreparedSignal(observed: observed) }
-            group.addTask { try? await Task.sleep(for: .seconds(interval)) }
+            group.addTask { try? await Task.sleep(seconds: interval, precision: .prompt) }
             _ = await group.next()
             group.cancelAll()
         }
@@ -726,17 +727,20 @@ nonisolated final class SudokuConnectionFactory: Sendable {
 
     func closeAll() {
         var waitersToWake: [AsyncStream<Never>.Continuation] = []
-        let scheduledTasks: [Task<Void, Never>] = preparedState.withLock { state in
+        let scheduled: (tasks: [Task<Void, Never>], deadlines: [DeadlineToken]) = preparedState.withLock { state in
             state.preparedClosed = true
             state.preparedConnections.removeAll()
             state.pendingPreparations.removeAll()
             let tasks = Array(state.scheduledTasks.values)
+            let deadlines = Array(state.scheduledDeadlines.values)
             state.scheduledTasks.removeAll()
+            state.scheduledDeadlines.removeAll()
             waitersToWake = drainPreparedWaitersLocked(&state)
-            return tasks
+            return (tasks, deadlines)
         }
         for cont in waitersToWake { cont.finish() }
-        for task in scheduledTasks { task.cancel() }
+        for task in scheduled.tasks { task.cancel() }
+        for deadline in scheduled.deadlines { deadline.cancel() }
 
         typealias Drained = (toClose: [ProxyConnection], clients: [ProxyClient],
                              tlsClients: [TLSClient], transports: [TCPTransport])
@@ -883,19 +887,18 @@ nonisolated final class SudokuConnectionFactory: Sendable {
             return id
         }
         guard let id else { return }
-        let task = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(delay))
-            guard let self, !Task.isCancelled else { return }
-            let stillTracked = self.preparedState.withLock { $0.scheduledTasks.removeValue(forKey: id) != nil }
+        let deadline = TickScheduler.shared.schedule(in: .seconds(delay), precision: .relaxed) { [weak self] in
+            guard let self else { return }
+            let stillTracked = self.preparedState.withLock { $0.scheduledDeadlines.removeValue(forKey: id) != nil }
             guard stillTracked else { return }
             operation()
         }
         let closedNow = preparedState.withLock { state -> Bool in
             guard !state.preparedClosed else { return true }
-            state.scheduledTasks[id] = task
+            state.scheduledDeadlines[id] = deadline
             return false
         }
-        if closedNow { task.cancel() }
+        if closedNow { deadline.cancel() }
     }
 
     private func openProxyConnection(
@@ -1232,7 +1235,7 @@ nonisolated final class SudokuHTTPMaskTransport: Sendable {
         guard interval > 0 else { return }
         await withTaskGroup(of: Void.self) { group in
             group.addTask { await self.waitSignal(observed: observed) }
-            group.addTask { try? await Task.sleep(for: .seconds(interval)) }
+            group.addTask { try? await Task.sleep(seconds: interval, precision: .prompt) }
             _ = await group.next()
             group.cancelAll()
         }
@@ -1548,7 +1551,7 @@ nonisolated final class SudokuHTTPMaskTransport: Sendable {
     private func waitForHTTPMaskRetry(delayMilliseconds: inout Int) async -> Bool {
         if state.withLock({ $0.phase == .closed }) { return false }
         do {
-            try await Task.sleep(for: .milliseconds(delayMilliseconds))
+            try await Task.sleep(for: .milliseconds(delayMilliseconds), precision: .prompt)
         } catch {
             return false
         }
@@ -2335,6 +2338,7 @@ nonisolated final class SudokuMuxClient: Multiplexer, Sendable {
         var lastPong: ContinuousClock.Instant = ContinuousClock.now
         var phase: SudokuLifecycle = .open
         var runTask: Task<Void, Never>?
+        var keepalive: DeadlineToken?
     }
     private let state = Mutex(State())
 
@@ -2356,20 +2360,23 @@ nonisolated final class SudokuMuxClient: Multiplexer, Sendable {
         self.factory = factory
         self.usesHTTPMaskControlFrames = usesHTTPMaskControlFrames
         self.onClose = onClose
-        let task = Task {
-            await withTaskGroup(of: Void.self) { group in
-                group.addTask { await self.readerLoop() }
-                group.addTask { await self.keepaliveLoop() }
-            }
-        }
+        let task = Task { await self.readerLoop() }
         state.withLock { $0.runTask = task }
+        armKeepalive()
     }
 
-    private func keepaliveLoop() async {
-        while !Task.isCancelled {
-            try? await Task.sleep(for: .seconds(Self.keepaliveInterval))
-            if Task.isCancelled { return }
-            sendKeepaliveIfIdle()
+    private func armKeepalive() {
+        state.withLock { state in
+            guard state.phase == .open else { return }
+            state.keepalive?.cancel()
+            state.keepalive = TickScheduler.shared.schedule(
+                in: .seconds(Self.keepaliveInterval),
+                precision: .relaxed
+            ) { [weak self] in
+                guard let self else { return }
+                self.sendKeepaliveIfIdle()
+                self.armKeepalive()
+            }
         }
     }
 
@@ -2416,17 +2423,20 @@ nonisolated final class SudokuMuxClient: Multiplexer, Sendable {
     }
     
     func close(error: Error? = nil) {
-        typealias Drained = (streams: [SudokuMuxStream], run: Task<Void, Never>?)
+        typealias Drained = (streams: [SudokuMuxStream], run: Task<Void, Never>?, keepalive: DeadlineToken?)
         let drained: Drained? = state.withLock { state in
             guard state.transition(to: .closed) else { return nil }
             let streamsToClose = Array(state.streams.values)
             state.streams.removeAll()
             let run = state.runTask
             state.runTask = nil
-            return (streamsToClose, run)
+            let keepalive = state.keepalive
+            state.keepalive = nil
+            return (streamsToClose, run, keepalive)
         }
         guard let drained else { return }
         drained.run?.cancel()
+        drained.keepalive?.cancel()
         for stream in drained.streams {
             stream.markClosed(discardQueuedData: true, error: error)
         }

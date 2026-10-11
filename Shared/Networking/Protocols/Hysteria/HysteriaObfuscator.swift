@@ -110,7 +110,7 @@ nonisolated final class GeckoObfuscator: QUICPacketObfuscator {
         let sizes = HysteriaObfuscation.normalizedGeckoSizes(min: minPacketSize, max: maxPacketSize)
         self.minPacketSize = sizes.min
         self.maxPacketSize = sizes.max
-        self.table = Mutex(ReassemblyTable(lastSweep: DispatchTime.now().uptimeNanoseconds))
+        self.table = Mutex(ReassemblyTable(lastSweep: MonotonicClock.nanoseconds))
     }
 
     // MARK: Seal
@@ -180,7 +180,7 @@ nonisolated final class GeckoObfuscator: QUICPacketObfuscator {
     
     private func acceptChunk(msgID: UInt8, chunkIdx: Int, totalChunks: Int, payload: [UInt8]) -> Data? {
         table.withLock { table in
-            let now = DispatchTime.now().uptimeNanoseconds
+            let now = MonotonicClock.nanoseconds
             if now &- table.lastSweep >= Self.sweepIntervalNanos {
                 table.entries = table.entries.filter { $0.value.deadline >= now }
                 table.lastSweep = now

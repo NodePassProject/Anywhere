@@ -132,10 +132,15 @@ nonisolated final class QUICConnectionCore: QUICPublishingState {
     var migrationCounter: UInt8 = 0
     var migrationFailures = 0
     static let maxMigrationFailures = 3
-    var proactiveDeadlineTask: Task<Void, Never>?
+    var proactiveDeadlineToken: DeadlineToken?
     static let proactiveReadyTimeout: TimeInterval = 5
 
     var retransmitTimer: BridgeDeadlineTimer?
+
+    var coarseTimerToken: DeadlineToken?
+
+    static let coarseTimeoutHorizon: UInt64 = 5_000_000_000
+    static let promptTimeoutHorizon: UInt64 = 1_000_000_000
 
     var connectContinuation: CheckedContinuation<Void, Error>?
 
@@ -307,13 +312,14 @@ nonisolated final class QUICConnectionCore: QUICPublishingState {
     deinit {
         rootTask?.cancel()
         retransmitTimer?.cancel()
-        proactiveDeadlineTask?.cancel()
+        coarseTimerToken?.cancel()
+        proactiveDeadlineToken?.cancel()
     }
 
     var lastScheduledExpiry: UInt64 = 0
-    
+
     func currentTimestamp() -> QUICInstant {
-        .now
+        QUICInstant(nanoseconds: MonotonicClock.nanoseconds)
     }
 
     func quicPath(local: sockaddr_storage) -> QUICPath {

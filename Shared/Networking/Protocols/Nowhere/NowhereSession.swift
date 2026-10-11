@@ -109,10 +109,11 @@ nonisolated final class NowhereSession: Sendable {
         var udpRoutes: [UInt32: UDPRoute] = [:]
         var udpControlStreams: [Int64: NowhereUDPConnection] = [:]
         var reassembly: [ReassemblyKey: ReassemblySlot] = [:]
-        var reassemblyExpiryTask: Task<Void, Never>?
+        var reassemblyExpiry: DeadlineToken?
+        var reassemblyExpiryAt: ContinuousClock.Instant?
 
-        var idleSince: ContinuousClock.Instant?
-        var idleSweepTask: Task<Void, Never>?
+        var idleClose: DeadlineToken?
+        var idleGeneration: UInt64 = 0
 
         var onClose: (@Sendable () -> Void)?
     }
@@ -424,19 +425,26 @@ nonisolated final class NowhereSession: Sendable {
     }
 
     private func scheduleReassemblyExpiry(_ session: inout State) {
-        session.reassemblyExpiryTask?.cancel()
-        session.reassemblyExpiryTask = nil
-        guard let earliest = session.reassembly.values.map(\.createdAt).min() else { return }
-        let deadline = earliest.advanced(by: Self.reassemblyTTL)
-        session.reassemblyExpiryTask = Task { [weak self] in
-            try? await Task.sleep(until: deadline, clock: .continuous)
-            guard !Task.isCancelled, let self else { return }
-            self.expireAndRescheduleReassembly()
+        guard let earliest = session.reassembly.values.map(\.createdAt).min() else {
+            session.reassemblyExpiry?.cancel()
+            session.reassemblyExpiry = nil
+            session.reassemblyExpiryAt = nil
+            return
         }
+        let deadline = earliest.advanced(by: Self.reassemblyTTL)
+        if session.reassemblyExpiry != nil, session.reassemblyExpiryAt == deadline { return }
+        session.reassemblyExpiry?.cancel()
+        session.reassemblyExpiryAt = deadline
+        session.reassemblyExpiry = TickScheduler.shared.schedule(
+            in: ContinuousClock.now.duration(to: deadline),
+            precision: .relaxed
+        ) { [weak self] in self?.expireAndRescheduleReassembly() }
     }
 
     private func expireAndRescheduleReassembly() {
         state.withLock { session in
+            session.reassemblyExpiry = nil
+            session.reassemblyExpiryAt = nil
             expireReassembly(now: .now, &session)
             scheduleReassemblyExpiry(&session)
         }
@@ -692,44 +700,38 @@ nonisolated final class NowhereSession: Sendable {
     // MARK: - Idle close
 
     private func updateIdleCloseTimer() {
-        state.withLock { session in
+        let stale: DeadlineToken? = state.withLock { session in
             guard session.phase == .ready else {
-                session.idleSince = nil
-                return
+                let stale = session.idleClose
+                session.idleClose = nil
+                return stale
             }
             let idle = session.tcpStreams.isEmpty && session.udpRoutes.isEmpty
-            session.idleSince = idle ? ContinuousClock.now : nil
-            if session.idleSweepTask == nil {
-                session.idleSweepTask = Task { [weak self] in await self?.runIdleSweep() }
+            if idle {
+                guard session.idleClose == nil else { return nil }
+                session.idleGeneration &+= 1
+                let generation = session.idleGeneration
+                session.idleClose = TickScheduler.shared.schedule(
+                    in: .seconds(Self.idleCloseDelay),
+                    precision: .relaxed
+                ) { [weak self] in self?.idleCloseFired(generation: generation) }
+                return nil
             }
+            let stale = session.idleClose
+            session.idleClose = nil
+            return stale
         }
+        stale?.cancel()
     }
 
-    private func runIdleSweep() async {
-        enum Step { case closeNow; case sleep(Duration); case stop }
-        while !Task.isCancelled {
-            let step: Step = state.withLock { session in
-                guard session.phase == .ready else { return .stop }
-                guard let since = session.idleSince else { return .sleep(.seconds(Self.idleCloseDelay)) }
-                let elapsed = since.duration(to: ContinuousClock.now)
-                if elapsed >= .seconds(Self.idleCloseDelay) { return .closeNow }
-                return .sleep(.seconds(Self.idleCloseDelay) - elapsed)
-            }
-            switch step {
-            case .stop:
-                return
-            case .sleep(let duration):
-                try? await Task.sleep(for: duration)
-            case .closeNow:
-                closeIfStillIdle()
-                let done = state.withLock { session -> Bool in
-                    if session.phase == .closed { return true }
-                    session.idleSince = nil
-                    return false
-                }
-                if done { return }
-            }
+    private func idleCloseFired(generation: UInt64) {
+        let current: Bool = state.withLock { session in
+            guard session.idleGeneration == generation else { return false }
+            session.idleClose = nil
+            return true
         }
+        guard current else { return }
+        closeIfStillIdle()
     }
 
     private func closeIfStillIdle() {
@@ -755,8 +757,8 @@ nonisolated final class NowhereSession: Sendable {
             var tcp: [NowhereConnection]
             var udp: [NowhereUDPConnection]
             var openWaiters: [StreamOpenWaiter]
-            var idleSweepTask: Task<Void, Never>?
-            var reassemblyExpiryTask: Task<Void, Never>?
+            var idleClose: DeadlineToken?
+            var reassemblyExpiry: DeadlineToken?
             var onClose: (@Sendable () -> Void)?
         }
         let teardown: Teardown? = state.withLock { session in
@@ -770,13 +772,13 @@ nonisolated final class NowhereSession: Sendable {
                 tcp: Array(session.tcpStreams.values),
                 udp: session.udpRoutes.values.map(\.connection),
                 openWaiters: session.streamOpenWaiters,
-                idleSweepTask: session.idleSweepTask,
-                reassemblyExpiryTask: session.reassemblyExpiryTask,
+                idleClose: session.idleClose,
+                reassemblyExpiry: session.reassemblyExpiry,
                 onClose: session.onClose
             )
-            session.idleSweepTask = nil
-            session.idleSince = nil
-            session.reassemblyExpiryTask = nil
+            session.idleClose = nil
+            session.reassemblyExpiry = nil
+            session.reassemblyExpiryAt = nil
             session.tcpStreams.removeAll()
             session.tcpDeliveredBytes.removeAll()
             session.udpRoutes.removeAll()
@@ -788,8 +790,8 @@ nonisolated final class NowhereSession: Sendable {
         }
         guard let teardown else { return }
 
-        teardown.idleSweepTask?.cancel()
-        teardown.reassemblyExpiryTask?.cancel()
+        teardown.idleClose?.cancel()
+        teardown.reassemblyExpiry?.cancel()
         quic.handlers.withLock { $0.bidiCredit = nil }
 
         transportSignal.finish(throwing: readyError)

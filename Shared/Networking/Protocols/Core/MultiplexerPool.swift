@@ -55,7 +55,7 @@ nonisolated final class MultiplexerPool<S: Multiplexer & Sendable, Extra: Sendab
         
         var lastActivity: [ObjectIdentifier: TimeInterval] = [:]
 
-        var idleTask: Task<Void, Never>?
+        var idleCheck: DeadlineToken?
         var policy: MultiplexerPolicy?
         
         var extra: Extra
@@ -68,7 +68,7 @@ nonisolated final class MultiplexerPool<S: Multiplexer & Sendable, Extra: Sendab
     }
     
     deinit {
-        state.withLock { $0.idleTask?.cancel() }
+        state.withLock { $0.idleCheck?.cancel() }
     }
 
     static func makeKey(host: String, port: UInt16, sni: String) -> String {
@@ -76,19 +76,39 @@ nonisolated final class MultiplexerPool<S: Multiplexer & Sendable, Extra: Sendab
     }
 
     // MARK: - Idle eviction
-    
+
     func startIdleEviction(_ policy: MultiplexerPolicy) {
-        state.withLock { state in
+        let stale: DeadlineToken? = state.withLock { state in
             state.policy = policy
-            state.idleTask?.cancel()
-            state.idleTask = Task { [weak self] in
-                while !Task.isCancelled {
-                    try? await Task.sleep(for: .seconds(policy.idleCheckInterval))
-                    guard !Task.isCancelled, let self else { return }
-                    self.runIdleEviction()
-                }
-            }
+            let stale = state.idleCheck
+            state.idleCheck = nil
+            return stale
         }
+        stale?.cancel()
+        armIdleCheck()
+    }
+
+    func noteMultiplexersChanged() {
+        armIdleCheck()
+    }
+
+    private func armIdleCheck() {
+        state.withLock { state in
+            guard state.phase == .open,
+                  let policy = state.policy,
+                  state.idleCheck == nil,
+                  state.multiplexers.values.contains(where: { !$0.isEmpty }) else { return }
+            state.idleCheck = TickScheduler.shared.schedule(
+                in: .seconds(policy.idleCheckInterval),
+                precision: .relaxed
+            ) { [weak self] in self?.idleCheckFired() }
+        }
+    }
+
+    private func idleCheckFired() {
+        state.withLock { $0.idleCheck = nil }
+        runIdleEviction()
+        armIdleCheck()
     }
 
     private func runIdleEviction() {
@@ -151,13 +171,13 @@ nonisolated final class MultiplexerPool<S: Multiplexer & Sendable, Extra: Sendab
     }
 
     func retire() {
-        let taken: (all: [S], idleTask: Task<Void, Never>?) = state.withLock { state in
+        let taken: (all: [S], idleCheck: DeadlineToken?) = state.withLock { state in
             state.transition(to: .closed)
-            let idleTask = state.idleTask
-            state.idleTask = nil
-            return (takeAll(&state), idleTask)
+            let idleCheck = state.idleCheck
+            state.idleCheck = nil
+            return (takeAll(&state), idleCheck)
         }
-        taken.idleTask?.cancel()
+        taken.idleCheck?.cancel()
         for multiplexer in taken.all {
             multiplexer.close(error: nil)
         }

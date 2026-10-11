@@ -44,7 +44,7 @@ class ConnectionStats {
         guard statsTask == nil else { return }
         statsTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(1))
+                try? await Task.sleep(for: .seconds(1), precision: .relaxed)
                 guard let self, !Task.isCancelled else { break }
                 await self.pollStats()
             }

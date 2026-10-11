@@ -117,7 +117,7 @@ nonisolated final class DNSLookupCache<Key: Hashable & Sendable, Value: Sendable
         return await withTaskGroup(of: Outcome.self) { group in
             group.addTask { await pending.value(orOnCancel: .failed) }
             group.addTask {
-                try? await Task.sleep(for: waitLimit)
+                try? await Task.sleep(for: waitLimit, precision: .relaxed)
                 return .failed
             }
             defer { group.cancelAll() }

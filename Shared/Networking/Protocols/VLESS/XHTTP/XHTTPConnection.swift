@@ -496,15 +496,15 @@ nonisolated final class XHTTPConnection: Sendable {
         if delayMs > 0 {
             let waitMs: Int = state.withLock { state in
                 guard state.packetUpLastFlushTime != 0 else { return 0 }
-                let elapsedNs = DispatchTime.now().uptimeNanoseconds &- state.packetUpLastFlushTime
+                let elapsedNs = MonotonicClock.nanoseconds &- state.packetUpLastFlushTime
                 let elapsedMs = Int(min(elapsedNs / 1_000_000, UInt64(Int.max)))
                 return elapsedMs >= delayMs ? 0 : delayMs - elapsedMs
             }
             if waitMs > 0 {
-                try await Task.sleep(for: .milliseconds(waitMs))
+                try await Task.sleep(for: .milliseconds(waitMs), precision: .prompt)
             }
         }
-        state.withLock { $0.packetUpLastFlushTime = DispatchTime.now().uptimeNanoseconds }
+        state.withLock { $0.packetUpLastFlushTime = MonotonicClock.nanoseconds }
     }
 }
 
@@ -568,11 +568,11 @@ nonisolated final class XHTTPXMUXMultiplexerManager: Sendable {
         var openUsage = 0
         var leftUsage: Int
         var leftRequests: Int
-        let unreusableAt: CFAbsoluteTime?
+        let unreusableAt: TimeInterval?
         var dialTask: Task<XHTTPXMUXMultiplexerPoolable?, Never>?
         var dialWaiters: [(id: UInt64, cont: AsyncStream<Never>.Continuation)] = []
 
-        func isRetired(now: CFAbsoluteTime) -> Bool {
+        func isRetired(now: TimeInterval) -> Bool {
             if phase == .dialing { return false }
             if connection?.isPoolClosed == true { return true }
             if leftUsage == 0 || leftRequests <= 0 { return true }
@@ -606,7 +606,7 @@ nonisolated final class XHTTPXMUXMultiplexerManager: Sendable {
     }
 
     func acquire() async -> XHTTPXMUXMultiplexerLease? {
-        let now = CFAbsoluteTimeGetCurrent()
+        let now = MonotonicClock.now
         var retiredIdle: [XHTTPXMUXMultiplexerPoolable] = []
         pool.withLock { pool in
             let retiredIDs = pool.entries.compactMap { $0.value.isRetired(now: now) ? $0.key : nil }
@@ -641,7 +641,7 @@ nonisolated final class XHTTPXMUXMultiplexerManager: Sendable {
             let reqRand = config.hMaxRequestTimes.random()
             let leftRequests = reqRand > 0 ? reqRand : Int.max
             let secsRand = config.hMaxReusableSecs.random()
-            let unreusableAt: CFAbsoluteTime? = secsRand > 0 ? now + Double(secsRand) : nil
+            let unreusableAt: TimeInterval? = secsRand > 0 ? now + Double(secsRand) : nil
 
             let id = pool.nextID
             pool.nextID &+= 1
@@ -719,7 +719,7 @@ nonisolated final class XHTTPXMUXMultiplexerManager: Sendable {
         return adopted ? connection : nil
     }
 
-    private func selectReusable(in entries: [UInt64: ClientEntry], now: CFAbsoluteTime) -> UInt64? {
+    private func selectReusable(in entries: [UInt64: ClientEntry], now: TimeInterval) -> UInt64? {
         let live = entries.filter { !$0.value.isRetired(now: now) }
         if live.isEmpty { return nil }
         if connections > 0 && live.count < connections { return nil }
@@ -738,7 +738,7 @@ nonisolated final class XHTTPXMUXMultiplexerManager: Sendable {
             guard pool.entries[clientID] != nil else { return pool.entries.isEmpty }
             if pool.entries[clientID]!.openUsage > 0 { pool.entries[clientID]!.openUsage -= 1 }
             if pool.entries[clientID]!.openUsage == 0,
-               orphaned || pool.entries[clientID]!.isRetired(now: CFAbsoluteTimeGetCurrent()) {
+               orphaned || pool.entries[clientID]!.isRetired(now: MonotonicClock.now) {
                 shouldClose = pool.entries[clientID]!.connection
                 pool.entries[clientID] = nil
             }

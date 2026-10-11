@@ -63,7 +63,7 @@ actor AWNotificationCenter {
             // Within the throttle window: coalesce into a single trailing post.
             let delay = Self.throttleInterval - (now - last)
             pendingTasks[name] = Task {
-                try? await Task.sleep(for: delay)
+                try? await Task.sleep(for: delay, precision: .relaxed)
                 guard !Task.isCancelled else { return }
                 self.fire(name)
             }

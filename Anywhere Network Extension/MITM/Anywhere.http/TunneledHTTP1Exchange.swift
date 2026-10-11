@@ -67,7 +67,7 @@ actor TunneledHTTP1Exchange {
         return try await withThrowingTaskGroup(of: MITMScriptHTTPClient.Response.self) { group in
             group.addTask { try await self.runExchange() }
             group.addTask {
-                try await Task.sleep(for: .seconds(timeout))
+                try await Task.sleep(seconds: timeout, precision: .relaxed)
                 throw AnywhereError.transport(.timedOut(.receive, endpoint: nil, detail: "request exceeded \(Int(timeout))s deadline"))
             }
             if request.timeoutInterval > 0 {
@@ -100,7 +100,7 @@ actor TunneledHTTP1Exchange {
             if ContinuousClock().now >= deadline {
                 throw AnywhereError.transport(.timedOut(.receive, endpoint: nil, detail: "request idle for \(Int(interval))s"))
             }
-            try await Task.sleep(until: deadline, clock: .continuous)
+            try await Task.sleep(until: deadline, tolerance: TimerPrecision.relaxed.tolerance(forRemaining: ContinuousClock().now.duration(to: deadline)), clock: .continuous)
         }
     }
 

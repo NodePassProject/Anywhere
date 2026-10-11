@@ -215,7 +215,7 @@ actor CloudSync {
         pendingReloadKeys.formUnion(keys)
         guard reloadTask == nil else { return }
         reloadTask = Task {
-            try? await Task.sleep(for: .seconds(1))
+            try? await Task.sleep(for: .seconds(1), precision: .relaxed)
             await flushReload()
         }
     }

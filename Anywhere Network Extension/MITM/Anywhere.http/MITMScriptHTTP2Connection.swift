@@ -359,7 +359,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
 
     private func runSetupDeadline() async {
         await withTaskGroup(of: Void.self) { group in
-            group.addTask { try? await Task.sleep(for: .seconds(TunnelConstants.handshakeTimeout)) }
+            group.addTask { try? await Task.sleep(seconds: TunnelConstants.handshakeTimeout, precision: .relaxed) }
             group.addTask { _ = try? await self.setupDonePoke.next() }
             _ = await group.next()
             group.cancelAll()

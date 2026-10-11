@@ -226,7 +226,7 @@ actor TCPConnection: MITMSessionHost {
         await withTaskGroup(of: Establishment?.self) { group in
             group.addTask { Optional(await operation()) }
             group.addTask {
-                try? await Task.sleep(for: .seconds(TunnelConstants.handshakeTimeout))
+                try? await Task.sleep(seconds: TunnelConstants.handshakeTimeout, precision: .relaxed)
                 return nil
             }
             defer { group.cancelAll() }
@@ -318,7 +318,7 @@ actor TCPConnection: MITMSessionHost {
         await withTaskGroup(of: Bool.self) { group in
             group.addTask { await loop(); return true }
             group.addTask {
-                try? await Task.sleep(for: .seconds(TunnelConstants.sniffDeadline))
+                try? await Task.sleep(seconds: TunnelConstants.sniffDeadline, precision: .prompt)
                 return false
             }
             defer { group.cancelAll() }

@@ -197,6 +197,7 @@ nonisolated final class SudokuMultiplexerPool: TransportPool {
             st.lastActivity[ObjectIdentifier(multiplexer)] = MonotonicClock.now
             return false
         }
+        if !wasClosed { pool.noteMultiplexersChanged() }
         if wasClosed {
             multiplexer.close(error: nil)
             throw AnywhereError.proxy(.sudoku, .connectionClosed(detail: nil))

@@ -52,7 +52,7 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer, Sendable {
         var buffering: Bool = true
         var outboundBuffer: Data = Data()
 
-        var synDoneTask: Task<Void, Never>?
+        var synDoneDeadline: DeadlineToken?
 
         var readTask: Task<Void, Never>?
 
@@ -138,17 +138,15 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer, Sendable {
     }
 
     private func armSynDoneTimerLocked(_ state: inout State) {
-        state.synDoneTask?.cancel()
-        state.synDoneTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(3))
-            guard !Task.isCancelled else { return }
+        state.synDoneDeadline?.cancel()
+        state.synDoneDeadline = TickScheduler.shared.schedule(in: .seconds(3), precision: .relaxed) { [weak self] in
             self?.close(error: AnywhereError.proxy(.anyTLS, .openTimeout))
         }
     }
 
     private func cancelSynDoneTimerLocked(_ state: inout State) {
-        state.synDoneTask?.cancel()
-        state.synDoneTask = nil
+        state.synDoneDeadline?.cancel()
+        state.synDoneDeadline = nil
     }
 
     // MARK: - Streams
@@ -482,6 +480,6 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer, Sendable {
     }
 
     deinit {
-        state.withLock { $0.synDoneTask?.cancel() }
+        state.withLock { $0.synDoneDeadline?.cancel() }
     }
 }

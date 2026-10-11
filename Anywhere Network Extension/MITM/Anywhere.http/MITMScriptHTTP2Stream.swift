@@ -93,7 +93,7 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
     func runDeadline() async {
         let timedOut = await withTaskGroup(of: Bool.self) { group in
             group.addTask {
-                do { try await Task.sleep(for: .seconds(self.resourceTimeout)); return true }
+                do { try await Task.sleep(seconds: self.resourceTimeout, precision: .relaxed); return true }
                 catch { return false }
             }
             group.addTask {
@@ -114,7 +114,7 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
             let generation = state.withLock { $0.idleGeneration }
             let finished = await withTaskGroup(of: Bool.self) { group in
                 group.addTask {
-                    do { try await Task.sleep(for: .seconds(interval)); return false }
+                    do { try await Task.sleep(seconds: interval, precision: .relaxed); return false }
                     catch { return true }
                 }
                 group.addTask {

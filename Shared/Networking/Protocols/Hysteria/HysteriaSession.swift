@@ -44,8 +44,9 @@ nonisolated final class HysteriaSession: Sendable {
         var udpSessions: [UInt32: HysteriaUDPConnection] = [:]
         var nextUDPSessionID: UInt32 = 1
 
-        var idleSince: ContinuousClock.Instant?
-        var idleSweepTask: Task<Void, Never>?
+        var idleClose: DeadlineToken?
+        var idleGeneration: UInt64 = 0
+        var authDeadline: DeadlineToken?
 
         var udpSupported = false
         var serverRxBytesPerSec: UInt64 = 0
@@ -154,14 +155,28 @@ nonisolated final class HysteriaSession: Sendable {
     }
     
     private func armAuthDeadline() {
-        Task { [weak self] in
-            try? await Task.sleep(for: Self.authResponseTimeout)
+        let token = TickScheduler.shared.schedule(in: Self.authResponseTimeout, precision: .relaxed) { [weak self] in
             guard let self else { return }
             let stalled = self.state.withLock { $0.phase == .authenticating }
             if stalled {
                 self.failSession(AnywhereError.proxy(.hysteria, .connectionClosed(detail: "Auth response timed out")))
             }
         }
+        let stale: DeadlineToken? = state.withLock { session in
+            guard session.phase == .authenticating else { return token }
+            let stale = session.authDeadline
+            session.authDeadline = token
+            return stale
+        }
+        stale?.cancel()
+    }
+
+    private func disarmAuthDeadline() {
+        state.withLock { session -> DeadlineToken? in
+            let armed = session.authDeadline
+            session.authDeadline = nil
+            return armed
+        }?.cancel()
     }
 
     private func openControlAndAuth() -> Bool {
@@ -328,6 +343,7 @@ nonisolated final class HysteriaSession: Sendable {
         case .fail(let error):
             failSession(error)
         case .ready(let brutal, let authStreamID):
+            disarmAuthDeadline()
             switch brutal {
             case .uninstall: quic.uninstallBrutalCC()
             case .setBandwidth(let bps): quic.setBrutalBandwidth(bps)
@@ -444,44 +460,38 @@ nonisolated final class HysteriaSession: Sendable {
     }
 
     private func updateIdleCloseTimer() {
-        state.withLock { session in
+        let stale: DeadlineToken? = state.withLock { session in
             guard session.phase == .ready else {
-                session.idleSince = nil
-                return
+                let stale = session.idleClose
+                session.idleClose = nil
+                return stale
             }
             let idle = session.tcpStreams.isEmpty && session.udpSessions.isEmpty
-            session.idleSince = idle ? ContinuousClock.now : nil
-            if session.idleSweepTask == nil {
-                session.idleSweepTask = Task { [weak self] in await self?.runIdleSweep() }
+            if idle {
+                guard session.idleClose == nil else { return nil }
+                session.idleGeneration &+= 1
+                let generation = session.idleGeneration
+                session.idleClose = TickScheduler.shared.schedule(
+                    in: .seconds(Self.idleCloseDelay),
+                    precision: .relaxed
+                ) { [weak self] in self?.idleCloseFired(generation: generation) }
+                return nil
             }
+            let stale = session.idleClose
+            session.idleClose = nil
+            return stale
         }
+        stale?.cancel()
     }
 
-    private func runIdleSweep() async {
-        enum Step { case closeNow; case sleep(Duration); case stop }
-        while !Task.isCancelled {
-            let step: Step = state.withLock { session in
-                guard session.phase == .ready else { return .stop }
-                guard let since = session.idleSince else { return .sleep(.seconds(Self.idleCloseDelay)) }
-                let elapsed = since.duration(to: ContinuousClock.now)
-                if elapsed >= .seconds(Self.idleCloseDelay) { return .closeNow }
-                return .sleep(.seconds(Self.idleCloseDelay) - elapsed)
-            }
-            switch step {
-            case .stop:
-                return
-            case .sleep(let duration):
-                try? await Task.sleep(for: duration)
-            case .closeNow:
-                closeIfStillIdle()
-                let done = state.withLock { session -> Bool in
-                    if session.phase == .closed { return true }
-                    session.idleSince = nil
-                    return false
-                }
-                if done { return }
-            }
+    private func idleCloseFired(generation: UInt64) {
+        let current: Bool = state.withLock { session in
+            guard session.idleGeneration == generation else { return false }
+            session.idleClose = nil
+            return true
         }
+        guard current else { return }
+        closeIfStillIdle()
     }
 
     private func closeIfStillIdle() {
@@ -517,7 +527,8 @@ nonisolated final class HysteriaSession: Sendable {
         struct Teardown {
             var tcp: [HysteriaConnection]
             var udp: [HysteriaUDPConnection]
-            var idleSweepTask: Task<Void, Never>?
+            var idleClose: DeadlineToken?
+            var authDeadline: DeadlineToken?
             var onClose: (@Sendable () -> Void)?
         }
         let teardown: Teardown? = state.withLock { session in
@@ -530,11 +541,12 @@ nonisolated final class HysteriaSession: Sendable {
             let snapshot = Teardown(
                 tcp: Array(session.tcpStreams.values),
                 udp: Array(session.udpSessions.values),
-                idleSweepTask: session.idleSweepTask,
+                idleClose: session.idleClose,
+                authDeadline: session.authDeadline,
                 onClose: session.onClose
             )
-            session.idleSweepTask = nil
-            session.idleSince = nil
+            session.idleClose = nil
+            session.authDeadline = nil
             session.tcpStreams.removeAll()
             session.udpSessions.removeAll()
             session.rejectedServerStreams.removeAll()
@@ -543,7 +555,8 @@ nonisolated final class HysteriaSession: Sendable {
         }
         guard let teardown else { return }
 
-        teardown.idleSweepTask?.cancel()
+        teardown.idleClose?.cancel()
+        teardown.authDeadline?.cancel()
 
         readySignal.finish(throwing: readyError)
 

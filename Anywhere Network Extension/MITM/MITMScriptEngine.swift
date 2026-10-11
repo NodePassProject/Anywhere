@@ -213,7 +213,7 @@ actor MITMScriptEngine {
     private func runWatchdog(id: UInt64, disarm: AsyncInbox<Void>) async {
         let timedOut = await withTaskGroup(of: Bool.self) { group in
             group.addTask {
-                do { try await Task.sleep(for: .seconds(Self.invocationIdleTimeout)); return true }
+                do { try await Task.sleep(seconds: Self.invocationIdleTimeout, precision: .relaxed); return true }
                 catch { return false }
             }
             group.addTask {

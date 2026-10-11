@@ -103,73 +103,99 @@ extension TunnelStack {
 
     nonisolated func scheduleTCPIdleSweep(at deadline: TimeInterval) {
         let armed = tcpIdleSweepArmed.load(ordering: .sequentiallyConsistent)
-        if armed < 0 || deadline < armed { tcpIdleSweepPoke.yield(()) }
+        if deadline < armed { tcpIdleSweepRegistration.withLock { $0 }?.poke() }
     }
 
     nonisolated func runTCPIdleSweep() async {
-        while !Task.isCancelled {
-            tcpIdleSweepArmed.store(-1, ordering: .sequentiallyConsistent)
-            let now = MonotonicClock.now
-            var next = TimeInterval.infinity
-            for connection in tcpConnections.withLock({ Array($0.connections.values) }) {
-                guard let deadline = connection.idleDeadline else { continue }
-                if deadline <= now {
-                    connection.expireIdle()
-                    next = min(next, now + TunnelConstants.tcpIdleSweepRecheckInterval)
-                } else {
-                    next = min(next, deadline)
-                }
-            }
-            tcpIdleSweepArmed.store(next, ordering: .sequentiallyConsistent)
-            if next.isFinite {
-                await tcpIdleSweepSleep(until: next)
-            } else if (try? await tcpIdleSweepPoke.next()) == nil {
-                return
-            }
-        }
+        let source = TCPIdleSweepSource(stack: self)
+        let registration = TickScheduler.shared.register(source)
+        tcpIdleSweepRegistration.withLock { $0 = registration }
+        await Task.suspendUntilCancelled()
+        tcpIdleSweepRegistration.withLock { if $0 === registration { $0 = nil } }
+        registration.cancel()
+        tcpIdleSweepArmed.store(.infinity, ordering: .sequentiallyConsistent)
     }
 
-    nonisolated private func tcpIdleSweepSleep(until deadline: TimeInterval) async {
-        let delay = deadline - MonotonicClock.now
-        guard delay > 0 else { return }
-        await withTaskGroup(of: Void.self) { group in
-            group.addTask {
-                try? await Task.sleep(
-                    for: .seconds(delay),
-                    tolerance: .milliseconds(TunnelConstants.tcpIdleSweepLeewayMs)
-                )
-            }
-            group.addTask { _ = try? await self.tcpIdleSweepPoke.next() }
-            defer { group.cancelAll() }
-            _ = await group.next()
-        }
+    nonisolated func scheduleUDPCleanup(at deadline: TimeInterval) {
+        udpCleanupSource.withLock { $0 }?.lower(to: deadline)
     }
 
     nonisolated func runUDPCleanupLoop(udpPlane: UDPPlane) async {
-        let coalescing = TimeInterval(TunnelConstants.udpCleanupCoalescingSec)
-        while !Task.isCancelled {
-            if publishedPhase.load(ordering: .relaxed) == .running,
-               let deadline = await udpPlane.cleanup() {
-                await udpCleanupSleep(until: deadline + coalescing)
-            } else {
-                guard (try? await udpCleanupResume.next()) != nil else { return }
-            }
-        }
+        let source = UDPCleanupSource(stack: self, plane: udpPlane)
+        let registration = TickScheduler.shared.register(source)
+        source.attach(registration)
+        udpCleanupSource.withLock { $0 = source }
+        await Task.suspendUntilCancelled()
+        udpCleanupSource.withLock { if $0 === source { $0 = nil } }
+        registration.cancel()
+    }
+}
+
+nonisolated final class TCPIdleSweepSource: DeadlineSource, @unchecked Sendable {
+    private weak var stack: TunnelStack?
+
+    init(stack: TunnelStack) {
+        self.stack = stack
     }
 
-    nonisolated private func udpCleanupSleep(until deadline: TimeInterval) async {
-        let delay = deadline - MonotonicClock.now
-        guard delay > 0 else { return }
-        await withTaskGroup(of: Void.self) { group in
-            group.addTask {
-                try? await Task.sleep(
-                    for: .seconds(delay),
-                    tolerance: .milliseconds(TunnelConstants.udpCleanupLeewayMs)
-                )
-            }
-            group.addTask { _ = try? await self.udpCleanupResume.next() }
-            defer { group.cancelAll() }
-            _ = await group.next()
+    func nextDeadline() -> Deadline? {
+        guard let stack else { return nil }
+        var next = TimeInterval.infinity
+        for connection in stack.tcpConnections.withLock({ Array($0.connections.values) }) {
+            guard let deadline = connection.idleDeadline else { continue }
+            next = min(next, deadline)
+        }
+        stack.tcpIdleSweepArmed.store(next, ordering: .sequentiallyConsistent)
+        guard next.isFinite else { return nil }
+        return Deadline(atSeconds: next, precision: .relaxed)
+    }
+
+    func fire(now: MonotonicClock.Instant) {
+        guard let stack else { return }
+        let seconds = now.seconds
+        for connection in stack.tcpConnections.withLock({ Array($0.connections.values) }) {
+            guard let deadline = connection.idleDeadline, deadline <= seconds else { continue }
+            connection.expireIdle()
+        }
+    }
+}
+
+nonisolated final class UDPCleanupSource: DeadlineSource, @unchecked Sendable {
+    private weak var stack: TunnelStack?
+    private let plane: UDPPlane
+    private let deadline = Mutex<TimeInterval?>(nil)
+    private let registration = Mutex<DeadlineRegistration?>(nil)
+
+    init(stack: TunnelStack, plane: UDPPlane) {
+        self.stack = stack
+        self.plane = plane
+    }
+
+    func attach(_ registration: DeadlineRegistration) {
+        self.registration.withLock { $0 = registration }
+    }
+
+    func lower(to candidate: TimeInterval) {
+        let changed: Bool = deadline.withLock { current in
+            if let current, current <= candidate { return false }
+            current = candidate
+            return true
+        }
+        if changed { registration.withLock { $0 }?.poke() }
+    }
+
+    func nextDeadline() -> Deadline? {
+        deadline.withLock { $0 }.map { Deadline(atSeconds: $0, precision: .relaxed) }
+    }
+
+    func fire(now: MonotonicClock.Instant) {
+        deadline.withLock { $0 = nil }
+        guard let stack else { return }
+        let plane = plane
+        Task { [weak self, weak stack] in
+            guard let stack, stack.publishedPhase.load(ordering: .relaxed) == .running else { return }
+            guard let next = await plane.cleanup() else { return }
+            self?.lower(to: next + TimeInterval(TunnelConstants.udpCleanupCoalescingSec))
         }
     }
 }

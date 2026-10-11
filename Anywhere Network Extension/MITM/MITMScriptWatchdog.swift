@@ -10,50 +10,45 @@ import Synchronization
 
 nonisolated enum MITMScriptWatchdog {
     static let hardCapSeconds = 30
-    
-    private static let checkIntervalSeconds = 5
 
     private struct Span {
-        var start: TimeInterval?
+        var generation: UInt64 = 0
         var label = ""
+        var deadline: DeadlineToken?
     }
     private static let span = Mutex(Span())
-    
-    private static var uptimeSeconds: TimeInterval {
-        Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000
-    }
-    
-    private static let sampler: Task<Void, Never> = {
-        Task.detached(priority: .high) {
-            while true {
-                try? await Task.sleep(for: .seconds(checkIntervalSeconds))
-                checkInFlightSpan()
-            }
-        }
-    }()
-    
+
     static func begin(_ label: String) {
-        _ = sampler
-        span.withLock { span in
-            span.start = Self.uptimeSeconds
+        let stale: DeadlineToken? = span.withLock { span in
+            let previous = span.deadline
+            span.generation &+= 1
             span.label = label
+            let generation = span.generation
+            span.deadline = TickScheduler.shared.schedule(in: .seconds(hardCapSeconds), precision: .lazy) {
+                checkInFlightSpan(generation: generation)
+            }
+            return previous
         }
+        stale?.cancel()
     }
 
     static func end() {
-        span.withLock { span in
-            span.start = nil
+        let armed: DeadlineToken? = span.withLock { span in
+            let armed = span.deadline
+            span.deadline = nil
             span.label = ""
+            return armed
         }
+        armed?.cancel()
     }
 
-    private static func checkInFlightSpan() {
-        let (start, label) = span.withLock { ($0.start, $0.label) }
-        guard let start else { return }
-        let elapsed = uptimeSeconds - start
-        guard elapsed >= Double(hardCapSeconds) else { return }
-        let seconds = Int(elapsed)
+    private static func checkInFlightSpan(generation: UInt64) {
+        let label: String? = span.withLock { span in
+            guard span.deadline != nil, span.generation == generation else { return nil }
+            return span.label
+        }
+        guard let label else { return }
         let shown = label.count > 200 ? String(label.prefix(200)) + "…" : label
-        fatalError("A JavaScript script span ran \(seconds)s without returning. Offending script: \(shown)")
+        fatalError("A JavaScript script span ran \(hardCapSeconds)s without returning. Offending script: \(shown)")
     }
 }

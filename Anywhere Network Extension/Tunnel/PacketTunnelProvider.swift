@@ -313,10 +313,12 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
     override func sleep() async {
         statsRecorder.noteSleep()
         await tunnelStack.sleep()
+        TickScheduler.shared.suspend()
     }
 
     override func wake() {
         statsRecorder.noteWake()
+        TickScheduler.shared.resume()
     }
 
     // MARK: - Provider task tree

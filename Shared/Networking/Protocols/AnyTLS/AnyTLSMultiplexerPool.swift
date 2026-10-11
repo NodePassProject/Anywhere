@@ -97,6 +97,7 @@ nonisolated final class AnyTLSMultiplexerPool: TransportPool {
             state.lastActivity[ObjectIdentifier(multiplexer)] = MonotonicClock.now
             return (multiplexer, true)
         }
+        if adopted?.pooled == true { pool.noteMultiplexersChanged() }
         guard let adopted else {
             connection.cancel()
             throw AnywhereError.transport(.terminated)
