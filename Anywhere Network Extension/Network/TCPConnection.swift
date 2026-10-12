@@ -625,46 +625,86 @@ actor TCPConnection: MITMSessionHost {
         }
     }
     
+    private static let uploadCoalescingLimit = 256 * 1024
+    private static let downloadPrefetchDepth = 1
+
     @concurrent
     private nonisolated func runUploadRelay(_ connection: ProxyConnection, _ stream: AnywhereIP.Stream, context: RelayContext) async {
-        while let chunk = try? await uploadInbox.next() {
-            do {
-                try await connection.send(chunk)
-            } catch {
-                await relayFailed("Send", error: error)
-                return
+        while let batch = try? await uploadInbox.nextBatch() {
+            var index = 0
+            while index < batch.count {
+                var end = index + 1
+                var byteCount = batch[index].count
+                while end < batch.count, byteCount + batch[end].count <= Self.uploadCoalescingLimit {
+                    byteCount += batch[end].count
+                    end += 1
+                }
+                let payload = Self.coalesce(batch[index..<end], byteCount: byteCount)
+                do {
+                    try await connection.send(payload)
+                } catch {
+                    await relayFailed("Send", error: error)
+                    return
+                }
+                markActivity()
+                context.meter?.addBytesOut(payload.count)
+                activityRecord.addBytesOut(payload.count)
+                stream.didConsume(payload.count)
+                index = end
             }
-            markActivity()
-            context.meter?.addBytesOut(chunk.count)
-            activityRecord.addBytesOut(chunk.count)
-            stream.didConsume(chunk.count)
         }
+    }
+
+    private nonisolated static func coalesce(_ chunks: ArraySlice<Data>, byteCount: Int) -> Data {
+        if chunks.count == 1 { return chunks[chunks.startIndex] }
+        var joined = Data(capacity: byteCount)
+        for chunk in chunks { joined.append(chunk) }
+        return joined
     }
 
     @concurrent
     private nonisolated func runDownloadRelay(_ connection: ProxyConnection, _ stream: AnywhereIP.Stream, context: RelayContext) async {
-        while true {
-            let data: Data?
-            do {
-                data = try await connection.receive()
-            } catch {
-                await relayFailed("Receive", error: error)
-                return
+        let handoff = BoundedAsyncQueue<Data>(capacity: Self.downloadPrefetchDepth)
+        let ended = await withTaskGroup(of: Void.self, returning: Bool.self) { group in
+            group.addTask {
+                while true {
+                    let data: Data?
+                    do {
+                        data = try await connection.receive()
+                    } catch {
+                        handoff.finish(throwing: error)
+                        return
+                    }
+                    guard let data, !data.isEmpty else {
+                        handoff.finish()
+                        return
+                    }
+                    guard await handoff.put(data) else { return }
+                }
             }
-            guard let data, !data.isEmpty else {
-                await boundDownlinkDrain()
-                break
+            defer { group.cancelAll() }
+            while true {
+                let data: Data?
+                do {
+                    data = try await handoff.take()
+                } catch {
+                    await relayFailed("Receive", error: error)
+                    return false
+                }
+                guard let data else { return true }
+                do {
+                    try await stream.send(data)
+                } catch {
+                    await relayFailed("Write", error: error)
+                    return false
+                }
+                markActivity()
+                context.meter?.addBytesIn(data.count)
+                activityRecord.addBytesIn(data.count)
             }
-            do {
-                try await stream.send(data)
-            } catch {
-                await relayFailed("Write", error: error)
-                return
-            }
-            markActivity()
-            context.meter?.addBytesIn(data.count)
-            activityRecord.addBytesIn(data.count)
         }
+        guard ended else { return }
+        await boundDownlinkDrain()
         try? await stream.waitUntilAcknowledged()
     }
 

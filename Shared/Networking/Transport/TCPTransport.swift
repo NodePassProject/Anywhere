@@ -14,7 +14,7 @@ nonisolated final class TCPTransport: ByteTransport, Sendable {
     // MARK: Constants
 
     private static let connectTimeout: UInt32 = 16
-    private static let maxReceiveLength = 65535
+    private static let maxReceiveLength = 128 * 1024
 
     // MARK: State
 
