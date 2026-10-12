@@ -19,7 +19,10 @@ extension TunnelStack {
             configuration: .init(
                 maximumConnections: TunnelLimits.tcpMaxConnections,
                 pendingSendBytes: TunnelConstants.tcpWindowSize,
-                acknowledgmentDelay: TunnelConstants.tcpAcknowledgmentDelay
+                acknowledgmentDelay: TunnelConstants.tcpAcknowledgmentDelay,
+                maximumWindow: TunnelConstants.tcpMaximumWindow,
+                maximumSendBuffer: TunnelConstants.tcpMaximumSendBuffer,
+                bufferGrowthBudget: TunnelConstants.tcpBufferGrowthBudget
             ),
             output: { [weak self] packets in
                 self?.enqueueTCPOutput(packets, generation: generation)

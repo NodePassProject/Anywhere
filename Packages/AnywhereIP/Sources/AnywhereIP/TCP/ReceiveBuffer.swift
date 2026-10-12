@@ -21,9 +21,9 @@ struct ReceiveBuffer {
         offset < chunks.count && (flushing || isTailSealed || offset < chunks.count - 1)
     }
 
-    mutating func append(_ bytes: UnsafeRawBufferPointer, push: Bool, ticks: UInt32) {
+    mutating func append(_ bytes: UnsafeRawBufferPointer, push: Bool, ticks: UInt32, limit: Int) {
         guard let base = bytes.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
-        let limit = Constants.receiveChunkSize
+        let limit = max(limit, Int(Constants.maximumSegmentSize) * 2)
         if offset < chunks.count, !isTailSealed, chunks[chunks.count - 1].count + bytes.count <= limit {
             chunks[chunks.count - 1].append(base, count: bytes.count)
         } else if push {

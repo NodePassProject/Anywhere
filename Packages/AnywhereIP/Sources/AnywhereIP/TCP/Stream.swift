@@ -67,8 +67,14 @@ public final class Stream: Sendable {
 
     private struct State {
         let core: ControlBlock
-        let pendingLimit: Int
-        let writeThreshold: Int
+        let basePendingLimit: Int
+
+        var pendingLimit: Int { max(basePendingLimit, Int(core.sendBufferLimit)) }
+        var writeThreshold: Int { max(1, pendingLimit / 2) }
+
+        var receiveChunkLimit: Int {
+            min(Constants.receiveChunkSize, max(Constants.minimumReceiveChunkSize, Int(core.windowLimit) / 4))
+        }
         var started = false
         var admission = Admission.handshake
         var admissionTick: UInt32 = 0
@@ -91,7 +97,7 @@ public final class Stream: Sendable {
         var publications: [Publication] = []
         var draining = false
 
-        init(packet: InboundTCP, initialSequenceNumber: UInt32, ticks: UInt32, pendingLimit: Int, delaysAcknowledgment: Bool) {
+        init(packet: InboundTCP, initialSequenceNumber: UInt32, ticks: UInt32, pendingLimit: Int, delaysAcknowledgment: Bool, growth: GrowthPolicy) {
             let context = Context(key: packet.key, initialSequenceNumber: initialSequenceNumber, ticks: ticks)
             core = ControlBlock(
                 stack: context,
@@ -99,10 +105,10 @@ public final class Stream: Sendable {
                 initialSequenceNumber: packet.header.sequenceNumber,
                 peerWindow: packet.header.window,
                 options: packet.options,
-                delaysAcknowledgment: delaysAcknowledgment
+                delaysAcknowledgment: delaysAcknowledgment,
+                growth: growth
             )
-            self.pendingLimit = pendingLimit
-            writeThreshold = max(1, pendingLimit / 2)
+            basePendingLimit = pendingLimit
         }
 
         var deadline: UInt32? {
@@ -198,13 +204,14 @@ public final class Stream: Sendable {
         }
 
         mutating func absorb(_ bytes: UnsafeRawBufferPointer, push: Bool) {
-            input.append(bytes, push: push, ticks: core.stack.ticks)
+            input.append(bytes, push: push, ticks: core.stack.ticks, limit: receiveChunkLimit)
             if input.hasReadableChunk(flushing: false) { wakeReaders() }
         }
 
         mutating func finish(_ error: ConnectionError?) {
             if !ended { failure = error }
             ended = true
+            core.releaseGrowth()
             if error != nil {
                 admission = .rejected
                 input.removeAll()
@@ -298,6 +305,7 @@ public final class Stream: Sendable {
         generation: UInt64,
         pendingLimit: Int,
         delaysAcknowledgment: Bool,
+        growth: GrowthPolicy,
         output: @escaping @Sendable ([OutboundPacket]) -> Void,
         ready: @escaping @Sendable (PendingConnection) -> Void,
         removed: @escaping @Sendable (Stream) -> Void,
@@ -314,7 +322,7 @@ public final class Stream: Sendable {
         self.schedule = schedule
         self.delayAcknowledgment = delayAcknowledgment
         self.clock = clock
-        state = Mutex(State(packet: packet, initialSequenceNumber: initialSequenceNumber, ticks: clock.now, pendingLimit: pendingLimit, delaysAcknowledgment: delaysAcknowledgment))
+        state = Mutex(State(packet: packet, initialSequenceNumber: initialSequenceNumber, ticks: clock.now, pendingLimit: pendingLimit, delaysAcknowledgment: delaysAcknowledgment, growth: growth))
     }
 
     private func update<T: Sendable>(_ body: (inout State) -> T) -> T {

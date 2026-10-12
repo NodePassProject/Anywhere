@@ -49,6 +49,7 @@ final class ControlBlock {
     let key: ConnectionKey
     let delaysAcknowledgment: Bool
     let receiveMSS: Int
+    private var observedSegmentSize = 0
     private(set) var acknowledgmentHeld = false
     var state = State.synReceived
     var flags: Flags = []
@@ -86,6 +87,15 @@ final class ControlBlock {
     var isProcessingInput = false
     var closeAfterInput = false
 
+    // MARK: Buffer growth
+
+    let growth: GrowthPolicy
+    private(set) var windowLimit: UInt32 = Constants.window
+    private(set) var sendBufferLimit: UInt32 = Constants.sendBufferSize
+    private var reservedGrowth = 0
+    private var windowExhaustedAt: UInt64?
+    private var fastWindowTurnovers: UInt8 = 0
+
     // MARK: Out-of-order reassembly
 
     private struct OutOfOrderSegment {
@@ -100,12 +110,15 @@ final class ControlBlock {
     private var outOfOrder: [OutOfOrderSegment] = []
     private var outOfOrderBytes = 0
     private var contiguousDeliveries: [(payload: Data, push: Bool)] = []
+    private static let fastTurnoverNanoseconds: UInt64 = 2_000_000
+    private static let turnoversBeforeGrowth: UInt8 = 4
 
-    init(stack: Context, key: ConnectionKey, initialSequenceNumber: UInt32, peerWindow: UInt16, options: UnsafeRawBufferPointer, delaysAcknowledgment: Bool) {
+    init(stack: Context, key: ConnectionKey, initialSequenceNumber: UInt32, peerWindow: UInt16, options: UnsafeRawBufferPointer, delaysAcknowledgment: Bool, growth: GrowthPolicy) {
         self.stack = stack
         arena = stack.arena
         self.key = key
         self.delaysAcknowledgment = delaysAcknowledgment
+        self.growth = growth
         receiveMSS = min(Int(Constants.maximumSegmentSize), Constants.mtu - (key.local.address.isIPv6 ? IPv6Header.length : IPv4Header.length) - TCPHeader.length)
         source = key.remote
         destination = key.local
@@ -124,6 +137,10 @@ final class ControlBlock {
         mss = effectiveSendMSS(mss)
     }
 
+    deinit {
+        releaseGrowth()
+    }
+
     var sendBufferSpace: Int {
         Int(sndBuf)
     }
@@ -135,18 +152,75 @@ final class ControlBlock {
     @discardableResult
     func write(_ bytes: UnsafeRawBufferPointer) -> Int {
         guard isAttached, let base = bytes.baseAddress else { return 0 }
+        var count = writableCount(for: bytes.count)
+        if count == 0, !bytes.isEmpty, growSendBuffer() {
+            count = writableCount(for: bytes.count)
+        }
+        guard count > 0 else { return 0 }
+        guard enqueue(UnsafeRawBufferPointer(start: base, count: count)) else { return 0 }
+        return count
+    }
+
+    private func writableCount(for byteCount: Int) -> Int {
         let segmentSize = sendSegmentSize
         let tailRoom = min(unsentOversize, max(0, segmentSize - (unsent.last?.length ?? segmentSize)))
-        let queueRoom = max(0, Constants.sendQueueLimit - sendQueueLength) * segmentSize + tailRoom
-        let count = min(bytes.count, Int(sndBuf), queueRoom)
-        guard count > 0, enqueue(UnsafeRawBufferPointer(start: base, count: count)) else { return 0 }
-        return count
+        let queueRoom = max(0, sendQueueLimit - sendQueueLength) * segmentSize + tailRoom
+        return min(byteCount, Int(sndBuf), queueRoom)
+    }
+
+    var sendQueueLimit: Int {
+        max(Constants.sendQueueLimit, Int(sendBufferLimit) / max(1, Int(mss)) * 2)
+    }
+
+    private var peerVisibleWindow: UInt32 {
+        Sequence.lessThan(rcvNxt, rcvAnnRightEdge) ? rcvAnnRightEdge &- rcvNxt : 0
+    }
+
+    // MARK: - Buffer growth
+
+    private func noteWindowRefilled() {
+        guard let exhaustedAt = windowExhaustedAt else { return }
+        windowExhaustedAt = nil
+        guard DispatchTime.now().uptimeNanoseconds &- exhaustedAt <= Self.fastTurnoverNanoseconds else {
+            fastWindowTurnovers = 0
+            return
+        }
+        fastWindowTurnovers += 1
+        guard fastWindowTurnovers >= Self.turnoversBeforeGrowth else { return }
+        fastWindowTurnovers = 0
+        growReceiveWindow()
+    }
+
+    private func growReceiveWindow() {
+        guard flags.contains(.windowScale), windowLimit < growth.maximumWindow else { return }
+        let delta = min(windowLimit, growth.maximumWindow - windowLimit)
+        guard delta > 0, growth.budget.reserve(Int(delta)) else { return }
+        reservedGrowth += Int(delta)
+        windowLimit += delta
+        rcvWnd += delta
+    }
+
+    private func growSendBuffer() -> Bool {
+        guard sendBufferLimit < growth.maximumSendBuffer, sndWnd > sendBufferLimit else { return false }
+        let delta = min(sendBufferLimit, growth.maximumSendBuffer - sendBufferLimit)
+        guard delta > 0, growth.budget.reserve(Int(delta) * 2) else { return false }
+        reservedGrowth += Int(delta) * 2
+        sendBufferLimit += delta
+        sndBuf += delta
+        return true
+    }
+
+    func releaseGrowth() {
+        guard reservedGrowth > 0 else { return }
+        growth.budget.release(reservedGrowth)
+        reservedGrowth = 0
     }
 
     func didConsume(_ count: Int) {
         guard isAttached, state != .timeWait, state != .closed, count > 0 else { return }
         let announced = Sequence.lessThan(rcvNxt, rcvAnnRightEdge) ? rcvAnnRightEdge &- rcvNxt : 0
         rcvWnd = UInt32(min(UInt64(rcvWnd) + UInt64(count), UInt64(windowMax)))
+        noteWindowRefilled()
         updateAnnouncedWindow()
         guard announced <= windowMax / 2, rcvAnnWnd > 0, rcvAnnWnd >= announced * 2 else { return }
         flags.insert(.ackNow)
@@ -178,7 +252,7 @@ final class ControlBlock {
     }
 
     var windowMax: UInt32 {
-        flags.contains(.windowScale) ? Constants.window : 0xFFFF
+        flags.contains(.windowScale) ? windowLimit : 0xFFFF
     }
 
     func detach() {
@@ -199,8 +273,8 @@ final class ControlBlock {
             sndScale = min(scale, 14)
             rcvScale = Constants.receiveScale
             flags.insert(.windowScale)
-            rcvWnd = Constants.window
-            rcvAnnWnd = Constants.window
+            rcvWnd = windowLimit
+            rcvAnnWnd = windowLimit
         }
     }
 
@@ -248,7 +322,7 @@ final class ControlBlock {
             position = min(segmentSize - last.length, min(oversize, length))
             oversize -= position
         }
-        guard sendQueueLength + (length - position + segmentSize - 1) / segmentSize <= Constants.sendQueueLimit else { return false }
+        guard sendQueueLength + (length - position + segmentSize - 1) / segmentSize <= sendQueueLimit else { return false }
         if position > 0 {
             unsent.last.unsafelyUnwrapped.appendPayload(UnsafeRawBufferPointer(rebasing: bytes[..<position]))
         }
@@ -300,6 +374,7 @@ final class ControlBlock {
             sendReset(sequenceNumber: sndNxt, acknowledgmentNumber: rcvNxt)
         }
         purge()
+        releaseGrowth()
         state = .closed
         stack.effects.append(.removed)
         if let error, isAttached {
@@ -366,7 +441,7 @@ final class ControlBlock {
             end = nextStart
             break
         }
-        guard end > start, outOfOrderBytes + bytes.count <= Int(windowMax) else { return false }
+        guard end > start, outOfOrderBytes + bytes.count <= Int(windowLimit) else { return false }
         outOfOrder.insert(
             OutOfOrderSegment(sequenceNumber: rcvNxt &+ start, payload: Data(bytes), hasFIN: hasFIN, push: segmentFlags.contains(.psh)),
             at: index
@@ -417,6 +492,7 @@ final class ControlBlock {
 
     private func enterTimeWait() {
         purge()
+        releaseGrowth()
         state = .timeWait
         stack.effects.append(.timeWait)
     }
@@ -942,7 +1018,11 @@ final class ControlBlock {
                     rcvNxt = seqno &+ tcpLength
                     rcvWnd -= tcpLength
                     updateAnnouncedWindow()
+                    if min(rcvWnd, peerVisibleWindow) < UInt32(max(observedSegmentSize, 1)) * 2, windowExhaustedAt == nil {
+                        windowExhaustedAt = DispatchTime.now().uptimeNanoseconds
+                    }
                     if dataLength > 0 {
+                        if dataLength > observedSegmentSize { observedSegmentSize = dataLength }
                         data = UnsafeRawBufferPointer(rebasing: payload[dataOffset..<(dataOffset + dataLength)])
                         if segmentFlags.contains(.psh) {
                             received.insert(.push)
@@ -951,7 +1031,7 @@ final class ControlBlock {
                     if segmentFlags.contains(.fin) {
                         received.insert(.gotFin)
                     }
-                    if delaysAcknowledgment, !acknowledgmentHeld, state == .established, dataLength >= receiveMSS,
+                    if delaysAcknowledgment, !acknowledgmentHeld, state == .established, dataLength >= observedSegmentSize,
                        segmentFlags.isDisjoint(with: [.psh, .fin]), rcvWnd >= windowMax / 2 {
                         acknowledgmentHeld = true
                     } else {

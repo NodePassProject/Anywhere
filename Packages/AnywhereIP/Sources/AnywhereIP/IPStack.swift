@@ -10,23 +10,37 @@ import Synchronization
 
 public final class IPStack: Sendable {
     public struct Configuration: Sendable {
+        public static let baselineWindow = Int(Constants.window)
+
         public var maximumConnections: Int
         public var pendingSendBytes: Int
         public var parallelism: Int
         public var acknowledgmentDelay: Duration?
+        public var maximumWindow: Int
+        public var maximumSendBuffer: Int
+        public var bufferGrowthBudget: Int
 
         public init(
             maximumConnections: Int = 1024,
             pendingSendBytes: Int = 64 * 1024,
             parallelism: Int = 4,
-            acknowledgmentDelay: Duration? = nil
+            acknowledgmentDelay: Duration? = nil,
+            maximumWindow: Int = Configuration.baselineWindow,
+            maximumSendBuffer: Int = Configuration.baselineWindow,
+            bufferGrowthBudget: Int = 0
         ) {
             precondition(maximumConnections > 0 && pendingSendBytes > 0 && parallelism > 0)
             precondition(acknowledgmentDelay.map { $0 > .zero } ?? true)
+            precondition(maximumWindow >= Configuration.baselineWindow && maximumWindow <= Int(UInt32.max))
+            precondition(maximumSendBuffer >= Configuration.baselineWindow && maximumSendBuffer <= Int(UInt32.max))
+            precondition(bufferGrowthBudget >= 0)
             self.maximumConnections = maximumConnections
             self.pendingSendBytes = pendingSendBytes
             self.parallelism = parallelism
             self.acknowledgmentDelay = acknowledgmentDelay
+            self.maximumWindow = maximumWindow
+            self.maximumSendBuffer = maximumSendBuffer
+            self.bufferGrowthBudget = bufferGrowthBudget
         }
     }
 
@@ -67,6 +81,7 @@ public final class IPStack: Sendable {
     private let synFilter: @Sendable (IPEndpoint, IPEndpoint) -> AcceptVerdict
     private let strayFilter: @Sendable (IPEndpoint, IPEndpoint) -> Bool
     private let clock = TickClock()
+    private let growth: GrowthPolicy
     private let initialSequence = Atomic<UInt32>(UInt32.random(in: .min ... .max))
     private let timerDriver = Mutex(TimerDriver())
     private let acknowledgments = Mutex(AcknowledgmentQueue())
@@ -93,6 +108,11 @@ public final class IPStack: Sendable {
         datagramHandler = datagrams
         self.synFilter = synFilter
         self.strayFilter = strayFilter
+        growth = GrowthPolicy(
+            budget: BufferBudget(bytes: configuration.bufferGrowthBudget),
+            maximumWindow: UInt32(configuration.maximumWindow),
+            maximumSendBuffer: UInt32(configuration.maximumSendBuffer)
+        )
         shards = (0..<max(16, configuration.parallelism * 4)).map { _ in Shard() }
     }
     
@@ -213,6 +233,7 @@ public final class IPStack: Sendable {
                 generation: generation,
                 pendingLimit: configuration.pendingSendBytes,
                 delaysAcknowledgment: configuration.acknowledgmentDelay != nil,
+                growth: growth,
                 output: { [weak self] packets in self?.outputHandler(packets) },
                 ready: { [weak self] pending in
                     guard let self else { pending.reject(); return }
