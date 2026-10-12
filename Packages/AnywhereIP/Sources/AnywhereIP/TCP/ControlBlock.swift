@@ -421,7 +421,7 @@ final class ControlBlock {
         }
         guard end > start else { return false }
 
-        var index = outOfOrder.firstIndex { ($0.sequenceNumber &- rcvNxt) > start } ?? outOfOrder.count
+        let index = outOfOrder.firstIndex { ($0.sequenceNumber &- rcvNxt) > start } ?? outOfOrder.count
         if index > 0 {
             let previous = outOfOrder[index - 1]
             let previousEnd = (previous.sequenceNumber &- rcvNxt) + previous.tcpLength

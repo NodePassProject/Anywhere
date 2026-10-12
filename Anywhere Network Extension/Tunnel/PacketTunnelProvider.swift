@@ -215,9 +215,11 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
             case AF_INET:
                 var ipv4 = socketAddress.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee.sin_addr }
                 var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
-                if inet_ntop(AF_INET, &ipv4, &buffer, socklen_t(INET_ADDRSTRLEN)) != nil,
-                   String(cString: buffer) == address {
-                    owner = name
+                if inet_ntop(AF_INET, &ipv4, &buffer, socklen_t(INET_ADDRSTRLEN)) != nil {
+                    let bytes = buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+                    if String(decoding: bytes, as: UTF8.self) == address {
+                        owner = name
+                    }
                 }
             default:
                 break
