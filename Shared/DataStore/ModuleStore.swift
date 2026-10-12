@@ -321,6 +321,7 @@ final class ModuleStore {
         }
 
         var module = previous
+        module.description = content.description
         module.iconLight = content.iconLight
         module.iconDark = content.iconDark
         module.routingRuleSets = routingRuleSets

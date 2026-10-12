@@ -99,6 +99,8 @@ enum ModuleParser {
             switch key {
             case "name":
                 content.name = value
+            case "description":
+                content.description = value.isEmpty ? nil : value
             case "icon-light":
                 content.iconLight = icon(value)
             case "icon-dark":

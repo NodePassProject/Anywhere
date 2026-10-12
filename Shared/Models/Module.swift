@@ -115,6 +115,7 @@ nonisolated struct Module: Codable, Equatable, Identifiable, SoftDeletable {
 
     let id: UUID
     var name: String
+    var description: String?
     var enabled: Bool
     var subscriptionURL: URL?
     var iconLight: Data?
@@ -127,6 +128,7 @@ nonisolated struct Module: Codable, Equatable, Identifiable, SoftDeletable {
     init(
         id: UUID = UUID(),
         name: String,
+        description: String? = nil,
         enabled: Bool = true,
         subscriptionURL: URL? = nil,
         iconLight: Data? = nil,
@@ -137,6 +139,7 @@ nonisolated struct Module: Codable, Equatable, Identifiable, SoftDeletable {
     ) {
         self.id = id
         self.name = name
+        self.description = description
         self.enabled = enabled
         self.subscriptionURL = subscriptionURL
         self.iconLight = iconLight
@@ -147,7 +150,7 @@ nonisolated struct Module: Codable, Equatable, Identifiable, SoftDeletable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, enabled, subscriptionURL, iconLight, iconDark
+        case id, name, description, enabled, subscriptionURL, iconLight, iconDark
         case routingRuleSets, mitmRuleSets, updatedAt, deletedAt
     }
 
@@ -155,6 +158,7 @@ nonisolated struct Module: Codable, Equatable, Identifiable, SoftDeletable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(UUID.self, forKey: .id)
         name = try c.decodeIfPresent(String.self, forKey: .name) ?? ""
+        description = try c.decodeIfPresent(String.self, forKey: .description)
         enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
         subscriptionURL = try c.decodeIfPresent(URL.self, forKey: .subscriptionURL)
         iconLight = try c.decodeIfPresent(Data.self, forKey: .iconLight)
@@ -169,6 +173,7 @@ nonisolated struct Module: Codable, Equatable, Identifiable, SoftDeletable {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(id, forKey: .id)
         try c.encode(name, forKey: .name)
+        try c.encodeIfPresent(description, forKey: .description)
         try c.encode(enabled, forKey: .enabled)
         try c.encodeIfPresent(subscriptionURL, forKey: .subscriptionURL)
         try c.encodeIfPresent(iconLight, forKey: .iconLight)
@@ -243,6 +248,7 @@ nonisolated struct Module: Codable, Equatable, Identifiable, SoftDeletable {
 
 nonisolated struct ModuleContent {
     var name: String
+    var description: String?
     var iconLight: Data?
     var iconDark: Data?
     var routingRuleSets: [ModuleRoutingRuleSet]
@@ -251,6 +257,7 @@ nonisolated struct ModuleContent {
 
     init(
         name: String = "",
+        description: String? = nil,
         iconLight: Data? = nil,
         iconDark: Data? = nil,
         routingRuleSets: [ModuleRoutingRuleSet] = [],
@@ -258,6 +265,7 @@ nonisolated struct ModuleContent {
         mitmRuleSets: [ModuleMITMRuleSet] = []
     ) {
         self.name = name
+        self.description = description
         self.iconLight = iconLight
         self.iconDark = iconDark
         self.routingRuleSets = routingRuleSets
@@ -270,6 +278,7 @@ nonisolated struct ModuleContent {
     func makeModule(name: String, subscriptionURL: URL? = nil) -> Module {
         Module(
             name: name,
+            description: description,
             subscriptionURL: subscriptionURL,
             iconLight: iconLight,
             iconDark: iconDark,

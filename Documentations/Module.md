@@ -58,6 +58,7 @@ listed first.
 | Field             | Meaning |
 | ----------------- | ------- |
 | `name`            | Display name. Kept locally; a subscription refresh never renames the module. |
+| `description`     | Optional one-line summary from the file, shown above the module's switch. |
 | `enabled`         | Master switch. Off, the module's rule sets leave both payloads but keep their data. |
 | `subscriptionURL` | Set when the module was subscribed; its rule sets are then read-only. |
 | `iconLight` / `iconDark` | Optional icons from the file, at most **64 KB** each. |
@@ -94,11 +95,12 @@ may appear any number of times, in any order.
 
 Shape: `<key> = <value>`, case-insensitive key, trimmed value.
 
-| Key          | Meaning |
-| ------------ | ------- |
-| `name`       | Display name for the module. Falls back to the file or URL basename. |
-| `icon-light` | Base64-encoded image for light appearance, at most **64 KB** decoded. |
-| `icon-dark`  | Base64-encoded image for dark appearance, same cap. |
+| Key           | Meaning |
+| ------------- | ------- |
+| `name`        | Display name for the module. Falls back to the file or URL basename. |
+| `description` | One-line summary shown above the module's switch. Omitted or empty, no description is shown. |
+| `icon-light`  | Base64-encoded image for light appearance, at most **64 KB** decoded. |
+| `icon-dark`   | Base64-encoded image for dark appearance, same cap. |
 
 Unrecognized keys are dropped. An icon that is not valid base64 or exceeds the
 cap is dropped; when the current appearance has no icon the other is used.
@@ -136,7 +138,7 @@ as a whole, in one write:
    set, its `routing` seed.
 3. A set that disappeared is gone, and its assignment is dropped.
 4. The module's **name**, **switch**, and subscription URL are untouched; its
-   icons are replaced.
+   description and icons are replaced.
 
 A refresh whose result is identical to what is stored is a no-op. A file that
 fails the limits is rejected in full and the stored module is left as it was.
@@ -174,6 +176,7 @@ domain-suffix rule costs roughly 35 bytes.
 ```
 # My Service module
 name = My Service
+description = Direct CDN, blocked telemetry, and API rewrites for My Service.
 icon-light = iVBORw0KGgo…
 
 [Routing]

@@ -26,6 +26,15 @@ struct ModuleDetailView: View {
         List {
             if let module {
                 Section {
+                    VStack(alignment: .leading) {
+                        ModuleIconView(iconLight: module.iconLight, iconDark: module.iconDark, size: 60, cornerRadius: 16)
+                        Text(module.name)
+                            .font(.headline)
+                        if let description = module.description, !description.isEmpty {
+                            Text(description)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                     Toggle("Enable", isOn: Binding(
                         get: { module.enabled },
                         set: { operations.modules.setEnabled(id: moduleId, enabled: $0) }

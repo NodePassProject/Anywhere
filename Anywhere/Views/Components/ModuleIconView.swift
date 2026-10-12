@@ -12,6 +12,8 @@ struct ModuleIconView: View {
     
     let iconLight: Data?
     let iconDark: Data?
+    var size: CGFloat = 30
+    var cornerRadius: CGFloat = 8
 
     private var iconData: Data? {
         switch colorScheme {
@@ -26,12 +28,12 @@ struct ModuleIconView: View {
                 .interpolation(.high)
                 .resizable()
                 .scaledToFit()
-                .frame(width: 30, height: 30)
-                .clipShape(.rect(cornerRadius: 8))
+                .frame(width: size, height: size)
+                .clipShape(.rect(cornerRadius: cornerRadius))
         } else {
             Image(systemName: "shippingbox")
                 .foregroundStyle(.secondary)
-                .frame(width: 30, height: 30)
+                .frame(width: size, height: size)
         }
     }
 }
