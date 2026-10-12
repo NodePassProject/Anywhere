@@ -24,6 +24,7 @@ final class PhoneSession: NSObject {
     @ObservationIgnored private var pendingExpiryTask: Task<Void, Never>?
     @ObservationIgnored private var refreshTask: Task<Void, Never>?
     @ObservationIgnored private var unreachableGraceTask: Task<Void, Never>?
+    @ObservationIgnored private var retryTask: Task<Void, Never>?
 
     override init() {
         super.init()
@@ -65,6 +66,7 @@ final class PhoneSession: NSObject {
             self.unreachableGraceTask = nil
             if !WCSession.default.isReachable {
                 self.lastError = "iPhone not reachable"
+                self.scheduleRetry()
             }
         }
     }
@@ -72,6 +74,21 @@ final class PhoneSession: NSObject {
     private func cancelUnreachableGrace() {
         unreachableGraceTask?.cancel()
         unreachableGraceTask = nil
+    }
+
+    private func scheduleRetry() {
+        guard retryTask == nil else { return }
+        retryTask = Task { [weak self] in
+            while true {
+                try? await Task.sleep(for: .seconds(3))
+                guard !Task.isCancelled, let self else { return }
+                guard self.lastError != nil else {
+                    self.retryTask = nil
+                    return
+                }
+                self.refresh()
+            }
+        }
     }
 
     func toggleVPN() {
@@ -107,6 +124,7 @@ final class PhoneSession: NSObject {
                 guard let self else { return }
                 self.clearPending()
                 self.lastError = error.localizedDescription
+                self.scheduleRetry()
             }
         }
     }

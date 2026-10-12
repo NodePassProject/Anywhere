@@ -13,23 +13,13 @@ struct ContentView: View {
     
     @State private var showingPicker = false
     
-    let formatter: RelativeDateTimeFormatter = {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .full
-        return formatter
-    }()
-    
     var body: some View {
         NavigationStack {
             ZStack {
-                BackgroundGradient(isConnected: phone.isConnected)
+                BackgroundGradient()
                     .ignoresSafeArea()
 
-                if phone.snapshot == nil {
-                    SyncPlaceholder(lastError: phone.lastError)
-                } else {
-                    home
-                }
+                content
             }
         }
         .animation(.easeInOut(duration: 0.6), value: phone.isConnected)
@@ -41,24 +31,45 @@ struct ContentView: View {
         }
     }
 
-    private var home: some View {
+    @ViewBuilder
+    private var content: some View {
+        if let snapshot = phone.snapshot, phone.lastError == nil {
+            if snapshot.hasConfigurations {
+                controls
+            } else {
+                Placeholder("Add a configuration on your iPhone.") {
+                    Image(systemName: "plus.circle")
+                }
+            }
+        } else if phone.snapshot == nil, phone.lastError != nil {
+            Placeholder("Open Anywhere on your iPhone to sync.") {
+                Image(systemName: "iphone.slash")
+            }
+        } else {
+            Placeholder("Syncing with iPhone") {
+                ProgressView()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var controls: some View {
         VStack(spacing: 12) {
             PowerButton(
                 isConnected: phone.isConnected,
-                isTransitioning: phone.isTransitioning,
-                isDisabled: !(phone.snapshot?.hasConfigurations ?? false)
+                isTransitioning: phone.isTransitioning
             ) {
                 phone.toggleVPN()
             }
 
-            Text(phone.status.localizedText)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-
-            if phone.lastError != nil, let snapshotDate = phone.snapshotDate {
-                Text(formatter.localizedString(for: snapshotDate, relativeTo: .now))
-                    .font(.system(size: 12))
-                    .foregroundStyle(.orange)
+            HStack(spacing: 4) {
+                if phone.isTransitioning {
+                    ProgressView()
+                        .frame(width: 14, height: 14)
+                }
+                Text(phone.status.localizedText)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
 
             ConfigurationCapsule(showingPicker: $showingPicker)
@@ -71,28 +82,15 @@ struct ContentView: View {
 // MARK: - Background
 
 private struct BackgroundGradient: View {
-    let isConnected: Bool
-
     var body: some View {
-        if isConnected {
-            LinearGradient(
-                colors: [
-                    Color.connectedBackgroundStart,
-                    Color.connectedBackgroundEnd,
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        } else {
-            LinearGradient(
-                colors: [
-                    Color.disconnectedBackgroundStart,
-                    Color.disconnectedBackgroundEnd,
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        }
+        LinearGradient(
+            colors: [
+                Color.homeBackgroundStart,
+                Color.homeBackgroundEnd,
+            ],
+            startPoint: .top,
+            endPoint: .bottom
+        )
     }
 }
 
@@ -101,8 +99,13 @@ private struct BackgroundGradient: View {
 private struct PowerButton: View {
     let isConnected: Bool
     let isTransitioning: Bool
-    let isDisabled: Bool
     let action: () -> Void
+
+    private var indicatorColor: Color {
+        if isConnected { return .green }
+        if isTransitioning { return .orange }
+        return .gray.opacity(0.8)
+    }
 
     var body: some View {
         Button(action: action) {
@@ -117,14 +120,19 @@ private struct PowerButton: View {
                         .glassEffect(.clear, in: .circle)
                 } else {
                     Circle()
-                        .fill(.white.opacity(0.2))
-                        .shadow(color: isConnected ? .cyan.opacity(0.4) : .black.opacity(0.08), radius: isConnected ? 16 : 6)
+                        .fill(Color.statCardBackground)
                 }
-                if isTransitioning {
-                    ProgressView()
-                } else {
+                ZStack {
                     Image(systemName: "power")
-                        .font(.system(size: 30, weight: .light))
+                        .resizable()
+                        .scaledToFit()
+                        .frame(height: 24)
+                    Image(systemName: "circle.fill")
+                        .resizable()
+                        .scaledToFit()
+                        .frame(height: 4)
+                        .foregroundStyle(indicatorColor)
+                        .offset(y: 26)
                 }
             }
             .frame(width: 78, height: 78)
@@ -132,7 +140,7 @@ private struct PowerButton: View {
         }
         .buttonStyle(.plain)
         .handGestureShortcut(.primaryAction)
-        .disabled(isDisabled || isTransitioning)
+        .disabled(isTransitioning)
     }
 }
 
@@ -144,28 +152,21 @@ private struct ConfigurationCapsule: View {
     @Binding var showingPicker: Bool
     
     var body: some View {
-        if phone.snapshot?.hasConfigurations ?? false {
-            Button {
-                showingPicker = true
-            } label: {
-                ProminentCapsule {
-                    HStack(spacing: 6) {
-                        Text(phone.snapshot?.selectedName ?? String(localized: "Not Configured"))
-                            .font(.footnote.weight(.medium))
-                            .lineLimit(1)
-                        Image(systemName: "chevron.up.chevron.down")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                    }
+        Button {
+            showingPicker = true
+        } label: {
+            ProminentCapsule {
+                HStack(spacing: 6) {
+                    Text(phone.snapshot?.selectedName ?? String(localized: "Not Configured"))
+                        .font(.footnote.weight(.medium))
+                        .lineLimit(1)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
                 }
             }
-            .buttonStyle(.plain)
-        } else {
-            Text("Add a configuration on your iPhone.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
         }
+        .buttonStyle(.plain)
     }
 }
 
@@ -196,7 +197,7 @@ private struct ProminentCapsule<Content: View>: View {
                 .contentShape(Capsule())
                 .background(
                     Capsule()
-                        .fill(.white.opacity(0.2))
+                        .fill(Color.statCardBackground)
                 )
         }
     }
@@ -248,25 +249,25 @@ private struct ConfigurationPicker: View {
 
 // MARK: - Placeholder
 
-private struct SyncPlaceholder: View {
-    let lastError: String?
+private struct Placeholder<Icon: View>: View {
+    private let message: LocalizedStringKey
+    private let icon: Icon
+
+    init(_ message: LocalizedStringKey, @ViewBuilder icon: () -> Icon) {
+        self.message = message
+        self.icon = icon()
+    }
 
     var body: some View {
         VStack(spacing: 10) {
-            if lastError == nil {
-                ProgressView()
-                Text("Syncing with iPhone")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            } else {
-                Image(systemName: "iphone.slash")
-                    .font(.title3)
-                    .foregroundStyle(.secondary)
-                Text("Open Anywhere on your iPhone to sync.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-            }
+            icon
+                .font(.title3)
+                .foregroundStyle(.secondary)
+                .frame(width: 24, height: 24)
+            Text(message)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
         }
         .padding(.horizontal, 8)
     }
