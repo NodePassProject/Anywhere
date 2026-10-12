@@ -86,10 +86,8 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
             throw error
         }
 
-        let settings = buildTunnelSettings()
-
         do {
-            try await setTunnelNetworkSettings(settings)
+            try await applyTunnelSettings()
         } catch {
             let wrapped = AnywhereError.tunnel(.settingsApplyFailed(underlying: error))
             logger.report("[VPN]", error: wrapped)
@@ -177,7 +175,59 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
 
     // MARK: - Tunnel Settings
 
-    private func buildTunnelSettings() -> NEPacketTunnelNetworkSettings {
+    private let discoveredMTU = Mutex<Int?>(nil)
+
+    private func applyTunnelSettings() async throws {
+        if let mtu = discoveredMTU.withLock({ $0 }) {
+            try await setTunnelNetworkSettings(buildTunnelSettings(mtu: mtu))
+            return
+        }
+        var mtu = TunnelConstants.fallbackMTU
+        for candidate in TunnelConstants.tunnelMTUCandidates {
+            guard (try? await setTunnelNetworkSettings(buildTunnelSettings(mtu: candidate))) != nil,
+                  Self.interfaceMTU(forAddress: TunnelAddress.ipv4) == candidate else { continue }
+            mtu = candidate
+            break
+        }
+        if mtu == TunnelConstants.fallbackMTU {
+            try await setTunnelNetworkSettings(buildTunnelSettings(mtu: mtu))
+        }
+        discoveredMTU.withLock { $0 = mtu }
+        logger.info("[VPN] Tunnel MTU \(mtu)")
+    }
+
+    private static func interfaceMTU(forAddress address: String) -> Int? {
+        var first: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&first) == 0, let first else { return nil }
+        defer { freeifaddrs(first) }
+        var mtus: [String: Int] = [:]
+        var owner: String?
+        var cursor: UnsafeMutablePointer<ifaddrs>? = first
+        while let entry = cursor {
+            cursor = entry.pointee.ifa_next
+            let name = String(cString: entry.pointee.ifa_name)
+            guard let socketAddress = entry.pointee.ifa_addr else { continue }
+            switch Int32(socketAddress.pointee.sa_family) {
+            case AF_LINK:
+                if let data = entry.pointee.ifa_data?.assumingMemoryBound(to: if_data.self) {
+                    mtus[name] = Int(data.pointee.ifi_mtu)
+                }
+            case AF_INET:
+                var ipv4 = socketAddress.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee.sin_addr }
+                var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+                if inet_ntop(AF_INET, &ipv4, &buffer, socklen_t(INET_ADDRSTRLEN)) != nil,
+                   String(cString: buffer) == address {
+                    owner = name
+                }
+            default:
+                break
+            }
+        }
+        guard let owner else { return nil }
+        return mtus[owner]
+    }
+
+    private func buildTunnelSettings(mtu: Int) -> NEPacketTunnelNetworkSettings {
         let tunnelAddressIPv4 = TunnelAddress.ipv4
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: tunnelAddressIPv4)
 
@@ -200,7 +250,7 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
         settings.ipv4Settings = ipv4Settings
 
         settings.dnsSettings = NEDNSSettings(servers: [tunnelAddressIPv4])
-        settings.mtu = 1500
+        settings.mtu = NSNumber(value: mtu)
 
         return settings
     }
@@ -216,9 +266,8 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
     }
 
     private func reapplyTunnelSettings() async {
-        let settings = buildTunnelSettings()
         do {
-            try await setTunnelNetworkSettings(settings)
+            try await applyTunnelSettings()
             logger.info("[VPN] Tunnel settings reapplied")
         } catch {
             guard !Task.isCancelled else { return }

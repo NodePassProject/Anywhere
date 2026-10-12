@@ -6,7 +6,7 @@
 //
 
 extension Constants {
-    static let maximumSegmentSize: UInt16 = 1460
+    static let maximumSegmentSize = UInt16(Constants.mtu - IPv4Header.length - TCPHeader.length)
     static let window: UInt32 = 64 * 1460
     static let sendBufferSize: UInt32 = 64 * 1460
     static let sendQueueLimit = 256

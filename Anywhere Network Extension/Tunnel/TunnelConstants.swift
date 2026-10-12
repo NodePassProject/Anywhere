@@ -17,6 +17,11 @@ nonisolated enum TunnelConstants {
     static let sniffDeadline: TimeInterval = 0.5
     static let pressureIdleTimeout: TimeInterval = 10
 
+    // MARK: - Tunnel MTU
+
+    static let tunnelMTUCandidates = [4064, 4032, 3072, 2016]
+    static let fallbackMTU = 1500
+
     // MARK: - Inbound Queue
 
     static let inboundQueueLimit = 2 * 1024 * 1024

@@ -7,5 +7,5 @@
 
 enum Constants {
     static let hopLimit: UInt8 = 255
-    static let mtu = 1500
+    static let mtu = 4064
 }
