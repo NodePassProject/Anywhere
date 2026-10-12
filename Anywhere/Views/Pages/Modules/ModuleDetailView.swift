@@ -97,7 +97,8 @@ struct ModuleDetailView: View {
                     EditButton()
                 }
             }
-            if #available(iOS 27.0, *) {
+            if #available(iOS 27.0, *),
+               !ProcessInfo.processInfo.isiOSAppOnMac /* Workaround */ {
                 ToolbarOverflowMenu {
                     menuItems
                 }

@@ -129,7 +129,8 @@ struct CustomRuleSetDetailView: View {
                 }
             }
             if !isReadOnly || canRename {
-                if #available(iOS 27.0, *) {
+                if #available(iOS 27.0, *),
+                   !ProcessInfo.processInfo.isiOSAppOnMac /* Workaround */ {
                     ToolbarOverflowMenu {
                         menuItems
                     }

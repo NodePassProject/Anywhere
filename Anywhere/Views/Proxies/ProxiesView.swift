@@ -274,7 +274,8 @@ struct ProxiesView: View {
             }
         }
         
-        if #available(iOS 27.0, *) {
+        if #available(iOS 27.0, *),
+           !ProcessInfo.processInfo.isiOSAppOnMac /* Workaround */ {
             ToolbarOverflowMenu {
                 Section {
                     Picker("Proxy Type", selection: $proxyType) {
