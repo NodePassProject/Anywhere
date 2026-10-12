@@ -178,10 +178,9 @@ public final class Stream: Sendable {
                         publications.append(.output(packet))
                     }
                 case .received(let bytes, let push):
-                    if !ended {
-                        input.append(bytes, push: push, ticks: core.stack.ticks)
-                        if input.hasReadableChunk(flushing: false) { wakeReaders() }
-                    }
+                    if !ended { absorb(bytes, push: push) }
+                case .receivedBuffered(let data, let push):
+                    if !ended { data.withUnsafeBytes { absorb($0, push: push) } }
                 case .acknowledged: wakeWriters()
                 case .ready:
                     if case .handshake = admission {
@@ -196,6 +195,11 @@ public final class Stream: Sendable {
                 case .timeWait: break
                 }
             }
+        }
+
+        mutating func absorb(_ bytes: UnsafeRawBufferPointer, push: Bool) {
+            input.append(bytes, push: push, ticks: core.stack.ticks)
+            if input.hasReadableChunk(flushing: false) { wakeReaders() }
         }
 
         mutating func finish(_ error: ConnectionError?) {

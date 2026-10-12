@@ -12,6 +12,7 @@ final class Context {
     enum CoreEffect {
         case packet(OutboundPacket)
         case received(UnsafeRawBufferPointer, push: Bool)
+        case receivedBuffered(Data, push: Bool)
         case acknowledged(Int)
         case ready, fin, ended, removed, timeWait
         case failed(ConnectionError)
@@ -37,6 +38,11 @@ final class Context {
     func receive(_ bytes: UnsafeRawBufferPointer, push: Bool) {
         guard !bytes.isEmpty else { return }
         effects.append(.received(bytes, push: push))
+    }
+
+    func receiveBuffered(_ data: Data, push: Bool) {
+        guard !data.isEmpty else { return }
+        effects.append(.receivedBuffered(data, push: push))
     }
 
     func sendReset(from local: IPEndpoint, to remote: IPEndpoint, sequenceNumber: UInt32, acknowledgmentNumber: UInt32) {

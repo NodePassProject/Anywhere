@@ -86,6 +86,21 @@ final class ControlBlock {
     var isProcessingInput = false
     var closeAfterInput = false
 
+    // MARK: Out-of-order reassembly
+
+    private struct OutOfOrderSegment {
+        var sequenceNumber: UInt32
+        var payload: Data
+        var hasFIN: Bool
+        var push: Bool
+
+        var tcpLength: UInt32 { UInt32(payload.count) + (hasFIN ? 1 : 0) }
+    }
+
+    private var outOfOrder: [OutOfOrderSegment] = []
+    private var outOfOrderBytes = 0
+    private var contiguousDeliveries: [(payload: Data, push: Bool)] = []
+
     init(stack: Context, key: ConnectionKey, initialSequenceNumber: UInt32, peerWindow: UInt16, options: UnsafeRawBufferPointer, delaysAcknowledgment: Bool) {
         self.stack = stack
         arena = stack.arena
@@ -302,6 +317,102 @@ final class ControlBlock {
         }
         unsentOversize = 0
         rtoStart = nil
+        discardOutOfOrder()
+        contiguousDeliveries.removeAll()
+    }
+
+    // MARK: - Out-of-order reassembly
+
+    private func discardOutOfOrder() {
+        outOfOrder.removeAll()
+        outOfOrderBytes = 0
+    }
+
+    private func bufferOutOfOrder(sequenceNumber: UInt32, payload: UnsafeRawBufferPointer, flags segmentFlags: TCPHeader.Flags) -> Bool {
+        let windowEnd = rcvWnd
+        var start = sequenceNumber &- rcvNxt
+        guard start < windowEnd else { return false }
+        var bytes = payload
+        var hasFIN = segmentFlags.contains(.fin)
+        var end = start &+ UInt32(bytes.count) &+ (hasFIN ? 1 : 0)
+        if end > windowEnd {
+            hasFIN = false
+            bytes = UnsafeRawBufferPointer(rebasing: bytes[..<Int(windowEnd - start)])
+            end = windowEnd
+        }
+        guard end > start else { return false }
+
+        var index = outOfOrder.firstIndex { ($0.sequenceNumber &- rcvNxt) > start } ?? outOfOrder.count
+        if index > 0 {
+            let previous = outOfOrder[index - 1]
+            let previousEnd = (previous.sequenceNumber &- rcvNxt) + previous.tcpLength
+            if previousEnd >= end || previous.hasFIN { return false }
+            if previousEnd > start {
+                bytes = UnsafeRawBufferPointer(rebasing: bytes[Int(previousEnd - start)...])
+                start = previousEnd
+            }
+        }
+        while index < outOfOrder.count {
+            let next = outOfOrder[index]
+            let nextStart = next.sequenceNumber &- rcvNxt
+            if end <= nextStart { break }
+            if nextStart + next.tcpLength <= end {
+                outOfOrderBytes -= next.payload.count
+                outOfOrder.remove(at: index)
+                continue
+            }
+            hasFIN = false
+            bytes = UnsafeRawBufferPointer(rebasing: bytes[..<Int(nextStart - start)])
+            end = nextStart
+            break
+        }
+        guard end > start, outOfOrderBytes + bytes.count <= Int(windowMax) else { return false }
+        outOfOrder.insert(
+            OutOfOrderSegment(sequenceNumber: rcvNxt &+ start, payload: Data(bytes), hasFIN: hasFIN, push: segmentFlags.contains(.psh)),
+            at: index
+        )
+        outOfOrderBytes += bytes.count
+        return true
+    }
+
+    private func deliverContiguousOutOfOrder(received: inout ReceiveFlags) {
+        var delivered = false
+        while var head = outOfOrder.first {
+            if Sequence.lessThan(head.sequenceNumber, rcvNxt) {
+                let stale = rcvNxt &- head.sequenceNumber
+                if stale >= head.tcpLength {
+                    outOfOrderBytes -= head.payload.count
+                    outOfOrder.removeFirst()
+                    continue
+                }
+                let drop = Int(min(stale, UInt32(head.payload.count)))
+                outOfOrderBytes -= drop
+                head.payload = head.payload.dropFirst(drop)
+                head.sequenceNumber = rcvNxt
+                outOfOrder[0] = head
+            } else if head.sequenceNumber != rcvNxt {
+                break
+            }
+            guard head.tcpLength <= rcvWnd else { break }
+            outOfOrder.removeFirst()
+            outOfOrderBytes -= head.payload.count
+            rcvNxt &+= head.tcpLength
+            rcvWnd -= head.tcpLength
+            if !head.payload.isEmpty {
+                contiguousDeliveries.append((payload: head.payload, push: head.push))
+            }
+            delivered = true
+            if head.hasFIN {
+                received.insert(.gotFin)
+                discardOutOfOrder()
+                break
+            }
+        }
+        if delivered {
+            updateAnnouncedWindow()
+            acknowledgmentHeld = false
+            flags.insert(.ackNow)
+        }
     }
 
     private func enterTimeWait() {
@@ -586,6 +697,7 @@ final class ControlBlock {
         let stack = self.stack
         isProcessingInput = true
         defer { isProcessingInput = false }
+        contiguousDeliveries.removeAll(keepingCapacity: true)
 
         if segmentFlags.contains(.rst) {
             if seqno == rcvNxt {
@@ -696,6 +808,16 @@ final class ControlBlock {
             }
             stack.receive(data, push: received.contains(.push))
             if state == .closed { return }
+        }
+        if !contiguousDeliveries.isEmpty {
+            if flags.contains(.receiveClosed) {
+                terminate(sendingReset: true, error: nil)
+                return
+            }
+            for delivery in contiguousDeliveries {
+                stack.receiveBuffered(delivery.payload, push: delivery.push)
+            }
+            contiguousDeliveries.removeAll(keepingCapacity: true)
         }
         if received.contains(.gotFin) {
             if rcvWnd != windowMax {
@@ -835,6 +957,17 @@ final class ControlBlock {
                     } else {
                         flags.insert(.ackNow)
                     }
+                    if segmentFlags.contains(.fin) {
+                        discardOutOfOrder()
+                    } else if !outOfOrder.isEmpty {
+                        deliverContiguousOutOfOrder(received: &received)
+                    }
+                } else if bufferOutOfOrder(
+                    sequenceNumber: seqno,
+                    payload: UnsafeRawBufferPointer(rebasing: payload[dataOffset..<(dataOffset + dataLength)]),
+                    flags: segmentFlags
+                ) {
+                    sendEmptyAck(stack)
                 } else {
                     sendEmptyAck(stack)
                 }
