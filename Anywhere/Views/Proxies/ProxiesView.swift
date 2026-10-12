@@ -453,18 +453,120 @@ struct ProxiesView: View {
     
     @ViewBuilder
     private func proxyRow(_ item: ProxyListItem, group: ProxyGroup? = nil) -> some View {
-        let isGroupable = item.subscriptionId == nil
-        ProxyRowView(
-            item: item,
-            onSelect: { if let configuration = config(item.id) { operations.selection.select(configuration) } },
-            onTestLatency: { if let configuration = config(item.id) { operations.latency.test(configuration) } },
-            onCopyLink: { if let configuration = config(item.id) { UIPasteboard.general.string = configuration.toURL() } },
-            onEdit: { configurationToEdit = config(item.id) },
-            onAddToGroup: isGroupable && group == nil ? { operations.groups.addMember(item.id, to: $0) } : nil,
-            groupOptions: isGroupable && group == nil ? serverGroups.map { PickerItem(id: $0.id, name: $0.name) } : [],
-            onRemoveFromGroup: group.map { group in { operations.groups.removeMember(item.id, from: group.id) } },
-            onDelete: { if let configuration = config(item.id) { operations.configurations.delete(configuration) } }
-        )
+        Button {
+            if let configuration = config(item.id) { operations.selection.select(configuration) }
+        } label: {
+            HStack {
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack {
+                        Text(item.name)
+                            .font(.body.weight(.medium))
+                        if item.isSelected {
+                            Image(systemName: "checkmark")
+                                .font(.caption.bold())
+                                .foregroundStyle(.tint)
+                        }
+                    }
+                    HStack(spacing: 5) {
+                        TagBadge(text: item.protocolName, color: .blue)
+                        if let networkTag = item.networkTag {
+                            TagBadge(text: networkTag, color: .green)
+                        }
+                        if let transportLayerTag = item.transportLayerTag {
+                            TagBadge(text: transportLayerTag, color: .teal)
+                        }
+                        if let securityLayerTag = item.securityLayerTag {
+                            TagBadge(text: securityLayerTag, color: .orange)
+                        }
+                        if item.isVision {
+                            TagBadge(text: "Vision", color: .purple)
+                        }
+                        if item.isMorph {
+                            TagBadge(text: "Morph", color: .indigo)
+                        }
+                    }
+                }
+
+                Spacer()
+
+                LatencyLabel(latency: item.latency)
+                    .onTapGesture {
+                        if let configuration = config(item.id) { operations.latency.test(configuration) }
+                    }
+            }
+            .padding()
+            .background {
+                RoundedRectangle(cornerRadius: 24)
+                    .fill(Color(.secondarySystemGroupedBackground))
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 24))
+            .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 24))
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Section {
+                if group == nil, item.subscriptionId == nil, !serverGroups.isEmpty {
+                    Menu {
+                        ForEach(serverGroups) { candidate in
+                            Button(candidate.name) { operations.groups.addMember(item.id, to: candidate.id) }
+                        }
+                    } label: {
+                        Label("Add to Group", systemImage: "folder.badge.plus")
+                    }
+                }
+                if let group {
+                    Button {
+                        operations.groups.removeMember(item.id, from: group.id)
+                    } label: {
+                        Label("Remove from Group", systemImage: "folder.badge.minus")
+                    }
+                }
+            }
+            Section {
+                Button {
+                    if let configuration = config(item.id) { operations.latency.test(configuration) }
+                } label: {
+                    Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
+                }
+            }
+            Section {
+                Button {
+                    if let configuration = config(item.id) { UIPasteboard.general.string = configuration.toURL() }
+                } label: {
+                    Label("Copy Link", systemImage: "doc.on.doc")
+                }
+                if let link = config(item.id)?.toURL(), !link.isEmpty {
+                    ShareLink(item: link, preview: SharePreview(item.name)) {
+                        Label("Share", systemImage: "square.and.arrow.up")
+                    }
+                }
+            }
+            Section {
+                Button {
+                    configurationToEdit = config(item.id)
+                } label: {
+                    Label("Edit", systemImage: "pencil")
+                }
+                Button(role: .destructive) {
+                    if let configuration = config(item.id) { operations.configurations.delete(configuration) }
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+            }
+        }
+        .swipeActions(edge: .trailing) {
+            Button(role: .destructive) {
+                if let configuration = config(item.id) { operations.configurations.delete(configuration) }
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+            Button {
+                configurationToEdit = config(item.id)
+            } label: {
+                Label("Edit", systemImage: "pencil")
+            }
+            .tint(.orange)
+        }
     }
     
     private func chain(_ id: UUID) -> ProxyChain? {
@@ -473,21 +575,119 @@ struct ProxiesView: View {
     
     @ViewBuilder
     private func chainRow(_ item: ChainListItem, group: ProxyGroup? = nil) -> some View {
-        ChainRowView(
-            item: item,
-            onSelect: {
-                guard item.isValid, let chain = chain(item.id) else { return }
-                operations.selection.selectChain(chain, configurations: configurationStore.configurations)
-            },
-            onTestLatency: {
-                guard let chain = chain(item.id) else { return }
-                operations.latency.testChain(chain)
-            },
-            onEdit: { chainToEdit = chain(item.id) },
-            onAddToGroup: group == nil ? { operations.groups.addMember(item.id, to: $0) } : nil,
-            groupOptions: group == nil ? chainGroups.map { PickerItem(id: $0.id, name: $0.name) } : [],
-            onRemoveFromGroup: group.map { group in { operations.groups.removeMember(item.id, from: group.id) } },
-            onDelete: { if let chain = chain(item.id) { operations.chains.delete(chain) } }
-        )
+        Button {
+            guard item.isValid, let chain = chain(item.id) else { return }
+            operations.selection.selectChain(chain, configurations: configurationStore.configurations)
+        } label: {
+            HStack {
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack {
+                        Text(item.name)
+                            .font(.body.weight(.medium))
+                        if item.isSelected {
+                            Image(systemName: "checkmark")
+                                .font(.caption.bold())
+                                .foregroundStyle(.tint)
+                        }
+                    }
+
+                    if item.isValid {
+                        HStack(spacing: 4) {
+                            ForEach(Array(item.proxyNames.enumerated()), id: \.offset) { index, proxyName in
+                                if index > 0 {
+                                    Image(systemName: "arrow.right")
+                                        .font(.system(size: 8))
+                                }
+                                Text(proxyName)
+                                    .lineLimit(1)
+                            }
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    } else {
+                        Text("Invalid chain — some proxies are missing")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+
+                    HStack(spacing: 4) {
+                        Text("\(item.proxyNames.count) proxie(s)")
+                        if let entry = item.entryAddress, let exit = item.exitAddress {
+                            Text("·")
+                            Text("\(entry) → \(exit)")
+                                .lineLimit(1)
+                        }
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                }
+
+                Spacer()
+
+                if item.isValid {
+                    LatencyLabel(latency: item.latency)
+                        .onTapGesture {
+                            if let chain = chain(item.id) { operations.latency.testChain(chain) }
+                        }
+                }
+            }
+            .padding()
+            .background {
+                RoundedRectangle(cornerRadius: 24)
+                    .fill(Color(.secondarySystemGroupedBackground))
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 24))
+            .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 24))
+        }
+        .buttonStyle(.plain)
+        .opacity(item.isValid ? 1 : 0.6)
+        .contextMenu {
+            if item.isValid {
+                Button {
+                    if let chain = chain(item.id) { operations.latency.testChain(chain) }
+                } label: {
+                    Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
+                }
+            }
+            Button {
+                chainToEdit = chain(item.id)
+            } label: {
+                Label("Edit", systemImage: "pencil")
+            }
+            if group == nil, !chainGroups.isEmpty {
+                Menu {
+                    ForEach(chainGroups) { candidate in
+                        Button(candidate.name) { operations.groups.addMember(item.id, to: candidate.id) }
+                    }
+                } label: {
+                    Label("Add to Group", systemImage: "folder.badge.plus")
+                }
+            }
+            if let group {
+                Button {
+                    operations.groups.removeMember(item.id, from: group.id)
+                } label: {
+                    Label("Remove from Group", systemImage: "folder.badge.minus")
+                }
+            }
+            Button(role: .destructive) {
+                if let chain = chain(item.id) { operations.chains.delete(chain) }
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+        }
+        .swipeActions(edge: .trailing) {
+            Button(role: .destructive) {
+                if let chain = chain(item.id) { operations.chains.delete(chain) }
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+            Button {
+                chainToEdit = chain(item.id)
+            } label: {
+                Label("Edit", systemImage: "pencil")
+            }
+            .tint(.orange)
+        }
     }
 }
