@@ -181,12 +181,8 @@ struct MITMRuleSetDetailView: View {
     }
 
     private func setParameterValue(name: String, value: String) {
-        switch target {
-        case .standalone(let id):
-            operations.mitmRuleSets.setParameterValue(id, name: name, value: value)
-        case .module(let moduleId, let ruleSetId):
-            operations.modules.setMITMParameterValue(ruleSetId, in: moduleId, name: name, value: value)
-        }
+        guard case .standalone(let id) = target else { return }
+        operations.mitmRuleSets.setParameterValue(id, name: name, value: value)
     }
 
     @ViewBuilder
@@ -368,6 +364,7 @@ struct MITMRuleSetDetailView: View {
         enabled = ruleSet.enabled
         suffixDrafts = ruleSet.domainSuffixes.map { MITMDomainSuffixDraft(value: $0) }
         rules = ruleSet.rules
+        guard case .standalone = target else { return }
         parameters = ruleSet.parameters
         parameterValues = Dictionary(
             uniqueKeysWithValues: ruleSet.parameters.map {

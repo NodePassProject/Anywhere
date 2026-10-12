@@ -202,20 +202,23 @@ final class ModuleStore {
             return true
         }
     }
-
-    func setMITMParameterValue(_ ruleSetId: UUID, in moduleId: UUID, name: String, value: String) {
+    
+    func setMITMParameterValue(in moduleId: UUID, name: String, value: String) {
         mutate(id: moduleId) { module in
-            guard let index = module.mitmRuleSets.firstIndex(where: { $0.id == ruleSetId }),
-                  let definition = module.mitmRuleSets[index].parameters.first(where: { $0.name == name })
-            else { return false }
-            if definition.defaultValue == value {
-                guard module.mitmRuleSets[index].parameterValues[name] != nil else { return false }
-                module.mitmRuleSets[index].parameterValues.removeValue(forKey: name)
-            } else {
-                guard module.mitmRuleSets[index].parameterValues[name] != value else { return false }
-                module.mitmRuleSets[index].parameterValues[name] = value
+            var changed = false
+            for index in module.mitmRuleSets.indices {
+                guard let definition = module.mitmRuleSets[index].parameters.first(where: { $0.name == name })
+                else { continue }
+                if definition.defaultValue == value {
+                    guard module.mitmRuleSets[index].parameterValues[name] != nil else { continue }
+                    module.mitmRuleSets[index].parameterValues.removeValue(forKey: name)
+                } else {
+                    guard module.mitmRuleSets[index].parameterValues[name] != value else { continue }
+                    module.mitmRuleSets[index].parameterValues[name] = value
+                }
+                changed = true
             }
-            return true
+            return changed
         }
     }
 

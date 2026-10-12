@@ -100,8 +100,8 @@ struct ModuleOperations {
         mitmExportScheduler.schedule()
     }
 
-    func setMITMParameterValue(_ ruleSetId: UUID, in moduleId: UUID, name: String, value: String) {
-        moduleStore.setMITMParameterValue(ruleSetId, in: moduleId, name: name, value: value)
+    func setMITMParameterValue(in moduleId: UUID, name: String, value: String) {
+        moduleStore.setMITMParameterValue(in: moduleId, name: name, value: value)
         mitmExportScheduler.schedule()
     }
 

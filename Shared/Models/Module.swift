@@ -191,6 +191,23 @@ nonisolated struct Module: Codable, Equatable, Identifiable, SoftDeletable {
         mitmRuleSets.first { $0.id == id }
     }
     
+    var mitmParameters: [MITMParameter] {
+        var seen: Set<String> = []
+        var merged: [MITMParameter] = []
+        for parameter in mitmRuleSets.flatMap(\.parameters) where seen.insert(parameter.name).inserted {
+            merged.append(parameter)
+        }
+        return merged
+    }
+    
+    func mitmParameterValue(name: String) -> String? {
+        for ruleSet in mitmRuleSets {
+            guard let definition = ruleSet.parameters.first(where: { $0.name == name }) else { continue }
+            return definition.effectiveValue(ruleSet.parameterValues[name])
+        }
+        return nil
+    }
+    
     func qualifiedName(for ruleSetName: String) -> String {
         "\(name) · \(ruleSetName)"
     }

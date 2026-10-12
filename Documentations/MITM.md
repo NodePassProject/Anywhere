@@ -28,7 +28,6 @@ expressions, and JavaScript, and does not cover the settings UI.
 - [Limits and safety](#limits-and-safety)
 - [Worked examples](#worked-examples)
 - [Behavior reference](#behavior-reference)
-- [Code map](#code-map)
 
 ---
 
@@ -1084,26 +1083,3 @@ function process(ctx) {
 - **Scripts never change the head.** In both `script` and `stream-script`, only
   `ctx.body` is adopted — header/method/URL/status edits come from rules, not
   scripts. On the HTTP/2 legs even a response-phase `Anywhere.respond` is ignored.
-
----
-
-## Code map
-
-| Area | Location |
-| ---- | -------- |
-| `.amrs` parsing (rules, params, sub-modes) | `Anywhere/Views/Pages/MITM/MITMRuleSetParser.swift` |
-| Import / subscribe UI | `Anywhere/Views/Pages/MITM/MITMView.swift` |
-| Rule / operation / parameter model, binary payload (`AMR1`) | `Shared/Models/MITMRule.swift` |
-| Rule-set storage, 10,000-rule cap, refresh merge | `Shared/DataStore/MITMRuleSetStore.swift` |
-| Subscription refresh | `Shared/Operations/MITMRuleSetOperations.swift` |
-| Host gating, suffix trie, rule compilation | `Anywhere Network Extension/MITM/MITMRewritePolicy.swift` |
-| TLS interception, leaf mint, deferred dial | `Anywhere Network Extension/MITM/MITMSession.swift`, `MITMLeafCertCache.swift` |
-| HTTP/1.1 framing & rewrite | `Anywhere Network Extension/MITM/MITMHTTP1Stream.swift` |
-| HTTP/2 rewrite & bridge | `Anywhere Network Extension/MITM/MITMHTTP2Rewriter.swift`, `MITMBridgeClientLeg.swift`, `MITMHTTP2UpstreamLeg.swift` |
-| `rewrite` sub-modes, capture templates, gate regex | `MITMRewritePolicy.swift`, `MITMCaptureTemplate.swift`, `MITMGateRegex.swift` |
-| `body-replace` / `body-json` native transforms | `MITMBodyReplace.swift`, `MITMJSONPatch.swift` |
-| Synthesized `302` / reject / respond | `MITMRespondBuilder.swift`, `MITMSynthesizedResponse.swift` |
-| Script engine, `ctx`, `Anywhere` API, watchdogs | `MITMScriptEngine.swift`, `MITMScriptTransform.swift`, `MITMScriptWatchdog.swift` |
-| `Anywhere.store` backings | `MITMScriptStore.swift`, `MITMScriptDiskStore.swift` |
-| `Anywhere.http` fetch path | `Anywhere Network Extension/MITM/Anywhere.http/` |
-| Body (de)compression | `MITMBodyCodec.swift` |

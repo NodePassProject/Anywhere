@@ -19,7 +19,6 @@ module reuses unchanged.
 - [Limits](#limits)
 - [Worked example](#worked-example)
 - [Behavior reference](#behavior-reference)
-- [Code map](#code-map)
 
 ---
 
@@ -52,11 +51,6 @@ wins**: the user's own configuration beats anything distributed. Among
 modules, the one higher in the Modules list wins, and within a module the set
 listed first.
 
-A module's routing sets are assigned a target one by one, under the module's
-detail page, with the same **Default / PROXY / DIRECT / REJECT / proxy /
-chain** choices as any other set. Assignments are device-local, like all
-routing assignments, and are stored apart from the standalone ones.
-
 ---
 
 ## The module
@@ -73,8 +67,8 @@ routing assignments, and are stored apart from the standalone ones.
 A rule set's `id` is stable across refreshes (see [Subscriptions](#subscriptions)),
 which is what keeps its routing assignment, its switch, and its parameter
 values attached. A module created in the app starts empty; add routing and
-MITM rule sets from its detail page and edit them rule by rule, as with
-standalone sets.
+MITM rule sets from its Module Content page and edit them rule by rule, as
+with standalone sets.
 
 ---
 
@@ -231,22 +225,8 @@ on restores them with their assignments and the chosen region intact.
   assigned proxy or chain is deleted.
 - **Subscribed is read-only.** Rules and names come from the file; switches,
   parameter values, and assignments are yours.
+- **Parameters are per module.** MITM parameters are merged by name across
+  the module's sets and edited on the module page; one value feeds every set
+  that declares the name.
 - **Limits are hard.** A module that cannot sync is not imported.
 
----
-
-## Code map
-
-| Area | Location |
-| ---- | -------- |
-| Module, rule set, and content model; limits; `ModuleImportError` | `Shared/Models/Module.swift` |
-| Storage, child edits, assignments, refresh merge, MITM export projection | `Shared/DataStore/ModuleStore.swift` |
-| Add / remove / edit / refresh, import helpers, export scheduling | `Shared/Operations/ModuleOperations.swift` |
-| `.amod` section splitting | `Anywhere/Views/Pages/Modules/ModuleParser.swift` |
-| Routing payload, module entries and tie order | `Shared/Operations/RoutingExportOperation.swift` |
-| MITM payload, module sets and tie order | `Shared/Operations/MITMExportOperation.swift` |
-| Module list, import / subscribe UI | `Anywhere/Views/Pages/Modules/ModulesView.swift` |
-| Module detail, per-set assignment and switches | `Anywhere/Views/Pages/Modules/ModuleDetailView.swift` |
-| Rule set editors shared with standalone sets | `Anywhere/Views/Pages/Routing/CustomRuleSetDetailView.swift`, `Anywhere/Views/Pages/MITM/MITMRuleSetDetailView.swift` |
-| Deep-link preview and import | `Anywhere/Views/ImportModuleView.swift`, `Anywhere/DeepLinkManager.swift` |
-| Device-local assignment storage | `Shared/AWCore.swift` (`moduleRuleSetAssignments`) |

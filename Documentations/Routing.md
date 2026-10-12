@@ -25,7 +25,6 @@ assumes familiarity with domain names and CIDR notation.
 - [Limits](#limits)
 - [Worked examples](#worked-examples)
 - [Behavior reference](#behavior-reference)
-- [Code map](#code-map)
 
 ---
 
