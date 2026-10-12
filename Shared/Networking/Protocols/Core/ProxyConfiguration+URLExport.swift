@@ -48,30 +48,8 @@ extension ProxyConfiguration {
         let usernameCharacters = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
         let encodedKey = configuration.key.addingPercentEncoding(withAllowedCharacters: usernameCharacters) ?? ""
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
-        var parameters: [String] = ["up=\(configuration.uplink.rawValue)", "down=\(configuration.downlink.rawValue)"]
-        if configuration.multiplex {
-            parameters.append("mux=1")
-        }
-        if configuration.serverName != serverAddress {
-            parameters.append("sni=\(encodedQueryValue(configuration.serverName))")
-        }
-        if configuration.morph {
-            parameters.append("morph=1")
-        }
-        let endpoint: String
-        if configuration.tcpPort == nil && configuration.udpPort == nil {
-            endpoint = "\(bracketedServerAddress):\(serverPort)"
-        } else if let tcpPort = configuration.tcpPort,
-           let udpPort = configuration.udpPort,
-           tcpPort == udpPort {
-            endpoint = "\(bracketedServerAddress):\(tcpPort)"
-        } else {
-            var carriers: [String] = []
-            if let tcpPort = configuration.tcpPort { carriers.append("tcp:\(tcpPort)") }
-            if let udpPort = configuration.udpPort { carriers.append("udp:\(udpPort)") }
-            endpoint = "\(bracketedServerAddress)/\(carriers.joined(separator: "/"))"
-        }
-        return "nowhere://\(encodedKey)@\(endpoint)?\(parameters.joined(separator: "&"))#\(fragment)"
+        let parameters = ["net=\(configuration.network.rawValue)", "morph=\(configuration.morph ? 1 : 0)"]
+        return "nowhere://\(encodedKey)@\(bracketedServerAddress):\(serverPort)?\(parameters.joined(separator: "&"))#\(fragment)"
     }
 
     private func toVLESSURL() -> String {

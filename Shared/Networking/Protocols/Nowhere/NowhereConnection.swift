@@ -8,21 +8,10 @@
 import Foundation
 import Synchronization
 
-nonisolated enum NowhereTCPRelayMode {
-    case tcp
-    case udp
-}
-
-nonisolated protocol NowhereTerminationObservable: AnyObject {
-    nonisolated func setNowhereTerminationHandler(_ handler: (@Sendable (Error?) -> Void)?)
-}
-
 actor NowhereConnection {
     private let session: NowhereSession
     private let destination: NowhereProtocol.Target
-    private let flowHeader: NowhereProtocol.FlowHeader
     private let initialData: Data?
-    private weak var attempt: NowhereFlowOpenAttempt?
 
     private enum Phase: PhaseTransitionable {
         case idle
@@ -63,15 +52,11 @@ actor NowhereConnection {
     init(
         session: NowhereSession,
         destination: NowhereProtocol.Target,
-        flowHeader: NowhereProtocol.FlowHeader,
-        initialData: Data?,
-        attempt: NowhereFlowOpenAttempt?
+        initialData: Data?
     ) {
         self.session = session
         self.destination = destination
-        self.flowHeader = flowHeader
         self.initialData = initialData
-        self.attempt = attempt
     }
 
     nonisolated var isConnected: Bool {
@@ -116,27 +101,13 @@ actor NowhereConnection {
     }
 
     private func performOpen() async throws {
-        let frame = try NowhereProtocol.encodeFlowRequest(
-            header: flowHeader,
-            target: flowHeader.carriesTarget ? destination : nil,
-            initialData: flowHeader.role == .attach ? nil : initialData
-        )
-        let sid = try await session.openTCPStream(
-            for: self,
-            request: frame,
-            earlyDataAttempt: initialData?.isEmpty == false ? attempt : nil
-        )
+        let frame = NowhereProtocol.encodeFlowRequest(kind: .tcp, target: destination)
+        let sid = try await session.openTCPStream(for: self, request: frame)
         let adopted = phase.withLock { Phase.transition(&$0, to: .open(sid: sid, ready: false, credited: 0)) }
         guard adopted else {
             session.shutdownStream(sid)
             session.releaseTCPStream(sid, credited: 0)
             throw AnywhereError.proxy(.nowhere, .streamClosed)
-        }
-
-        if flowHeader.role == .open {
-            pendingData = Data()
-            guard becomeReady() else { throw AnywhereError.proxy(.nowhere, .streamClosed) }
-            return
         }
 
         var buffer = Data()
@@ -154,6 +125,9 @@ actor NowhereConnection {
             case .ready:
                 pendingData = Data(buffer.dropFirst(NowhereProtocol.flowResultSize))
                 guard becomeReady() else { throw AnywhereError.proxy(.nowhere, .streamClosed) }
+                if let initialData, !initialData.isEmpty {
+                    try await session.writeStream(sid, data: initialData)
+                }
                 return
             case .reject(let code):
                 throw AnywhereError.proxy(.nowhere, .flowRejected(code: code.rawValue))
@@ -170,9 +144,8 @@ actor NowhereConnection {
         if fin { rawInbox.finish() }
     }
 
-    nonisolated func handleStreamTermination(error: Error?, cause: QUICConnection.StreamTerminationCause) {
+    nonisolated func handleStreamTermination(error: Error?) {
         if let error { rawInbox.finish(throwing: error) } else { rawInbox.finish() }
-        guard cause == .closed || error != nil else { return }
         if let released = closeLifecycle() {
             session.shutdownStream(released.sid)
             session.releaseTCPStream(released.sid, credited: released.credited)
@@ -272,10 +245,9 @@ actor NowhereConnection {
     }
 }
 
-nonisolated final class NowhereTCPUDPConnection: ProxyConnection, NowhereTerminationObservable {
+nonisolated final class NowhereTCPUDPConnection: ProxyConnection {
     private let inner: ProxyConnection
     private let udpState = Mutex(UDPFramingState())
-    private let termination = TerminationLatch()
 
     init(inner: ProxyConnection) {
         self.inner = inner
@@ -284,17 +256,6 @@ nonisolated final class NowhereTCPUDPConnection: ProxyConnection, NowhereTermina
     var isConnected: Bool { inner.isConnected }
     var outerTLSVersion: TLSVersion? { inner.outerTLSVersion }
     var deliversDatagrams: Bool { true }
-
-    func setNowhereTerminationHandler(_ handler: (@Sendable (Error?) -> Void)?) {
-        let live = termination.install(handler)
-        if handler == nil {
-            (inner as? NowhereTerminationObservable)?.setNowhereTerminationHandler(nil)
-        } else if live {
-            (inner as? NowhereTerminationObservable)?.setNowhereTerminationHandler { [weak self] error in
-                self?.termination.fire(error)
-            }
-        }
-    }
 
     func sendRaw(_ data: Data) async throws {
         let frame: Data
@@ -335,119 +296,20 @@ nonisolated final class NowhereTCPUDPConnection: ProxyConnection, NowhereTermina
             case .deliver(let packet):
                 return packet
             case .needMore:
-                let data: Data?
-                do {
-                    data = try await inner.receive()
-                } catch {
-                    termination.fire(error)
-                    throw error
-                }
+                let data = try await inner.receive()
                 guard let data else {
+                    inner.cancel()
                     let truncated = udpState.withLock {
                         $0.buffer.count - $0.bufferOffset != 0
                     }
                     if truncated {
-                        let error = AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Truncated UoT packet"))
-                        termination.fire(error)
-                        throw error
+                        throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Truncated UoT packet"))
                     }
-                    termination.fire(nil)
                     return nil
                 }
                 if data.isEmpty { continue }
                 udpState.withLock { $0.buffer.append(data) }
             }
-        }
-    }
-
-    func cancel() {
-        finish(error: nil, abortive: false)
-    }
-
-    func abort() {
-        finish(
-            error: AnywhereError.proxy(.nowhere, .streamClosed),
-            abortive: true
-        )
-    }
-
-    private func finish(error: Error?, abortive: Bool) {
-        termination.fire(error)
-        udpState.withLock {
-            $0.buffer = Data()
-            $0.bufferOffset = 0
-        }
-        if abortive {
-            inner.abort()
-        } else {
-            inner.cancel()
-        }
-    }
-}
-
-nonisolated final class NowhereDirectionalConnection: ProxyConnection {
-    private let uplink: ProxyConnection
-    private let downlink: ProxyConnection
-    private let kind: NowhereProtocol.FlowKind
-    private let termination = TerminationLatch()
-
-    init(
-        uplink: ProxyConnection,
-        downlink: ProxyConnection,
-        kind: NowhereProtocol.FlowKind
-    ) {
-        self.uplink = uplink
-        self.downlink = downlink
-        self.kind = kind
-        if kind == .udp {
-            (uplink as? NowhereTerminationObservable)?.setNowhereTerminationHandler {
-                [weak self] _ in self?.hardFail()
-            }
-            if downlink !== uplink {
-                (downlink as? NowhereTerminationObservable)?.setNowhereTerminationHandler {
-                    [weak self] _ in self?.hardFail()
-                }
-            }
-        }
-    }
-
-    var isConnected: Bool {
-        !termination.isTerminated && uplink.isConnected && downlink.isConnected
-    }
-    var outerTLSVersion: TLSVersion? { uplink.outerTLSVersion ?? downlink.outerTLSVersion }
-    var deliversDatagrams: Bool { uplink.deliversDatagrams || downlink.deliversDatagrams }
-
-    // MARK: - ProxyConnection overrides
-
-    func send(_ data: Data) async throws {
-        do { try await uplink.send(data) }
-        catch { hardFail(); throw error }
-    }
-
-    func sendRaw(_ data: Data) async throws {
-        do { try await uplink.sendRaw(data) }
-        catch { hardFail(); throw error }
-    }
-
-    func receive() async throws -> Data? {
-        do {
-            let data = try await downlink.receive()
-            if kind == .udp, data == nil { hardFail() }
-            return data
-        } catch {
-            hardFail()
-            throw error
-        }
-    }
-
-    func receiveRaw() async throws -> Data? {
-        do {
-            let data = try await downlink.receiveRaw()
-            if kind == .udp, data == nil { hardFail() }
-            return data
-        } catch {
-            hardFail()
-            throw error
         }
     }
 
@@ -459,26 +321,15 @@ nonisolated final class NowhereDirectionalConnection: ProxyConnection {
         finish(abortive: true)
     }
 
-    private func hardFail() {
-        finish(abortive: true)
-    }
-
     private func finish(abortive: Bool) {
-        guard termination.fire(nil) else { return }
-        clearTerminationObservers()
-        if abortive {
-            uplink.abort()
-            if uplink !== downlink { downlink.abort() }
-        } else {
-            uplink.cancel()
-            if uplink !== downlink { downlink.cancel() }
+        udpState.withLock {
+            $0.buffer = Data()
+            $0.bufferOffset = 0
         }
-    }
-
-    private func clearTerminationObservers() {
-        (uplink as? NowhereTerminationObservable)?.setNowhereTerminationHandler(nil)
-        if downlink !== uplink {
-            (downlink as? NowhereTerminationObservable)?.setNowhereTerminationHandler(nil)
+        if abortive {
+            inner.abort()
+        } else {
+            inner.cancel()
         }
     }
 }

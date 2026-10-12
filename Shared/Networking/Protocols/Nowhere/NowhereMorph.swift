@@ -23,19 +23,15 @@ nonisolated enum NowhereMorph {
         let udpServerToClient: Data
     }
 
-    static func deriveKeys(sharedKey: String) throws -> Keys {
-        let input = Data(sharedKey.utf8)
-        guard !input.isEmpty, input.count <= UInt8.max else {
-            throw AnywhereError.proxy(.nowhere, .protocolViolation(detail: "Invalid Morph shared key"))
-        }
+    static func deriveKeys(sharedKey: String) -> Keys {
+        let root = Data(HMAC<SHA256>.authenticationCode(
+            for: Data(sharedKey.utf8),
+            using: SymmetricKey(data: Data("nowhere/nw3/morph".utf8))
+        ))
         func derive(_ label: String) -> Data {
-            let key = HKDF<SHA256>.deriveKey(
-                inputKeyMaterial: SymmetricKey(data: input),
-                salt: Data("nowhere/morph".utf8),
-                info: Data(label.utf8),
-                outputByteCount: 32
-            )
-            return key.withUnsafeBytes { Data($0) }
+            var input = Data(label.utf8)
+            input.append(0x01)
+            return Data(HMAC<SHA256>.authenticationCode(for: input, using: SymmetricKey(data: root)))
         }
         return Keys(
             tcpClientToServer: derive("tcp c2s"),

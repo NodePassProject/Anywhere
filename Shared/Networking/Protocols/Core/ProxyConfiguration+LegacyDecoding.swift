@@ -13,7 +13,6 @@ nonisolated extension Outbound {
     private enum LegacyCodingKeys: String, CodingKey {
         case serverPort
         case outboundProtocol
-        case nowhereKey, nowhereSNI, nowhereTCPPort, nowhereUDPPort, up, down, mux, morph
         case hysteriaPassword, hysteriaCongestionControl, hysteriaUploadMbps, hysteriaDownloadMbps
         case hysteriaObfs, hysteriaObfsPassword, hysteriaObfsMinPacketSize, hysteriaObfsMaxPacketSize
         case hysteriaSNI
@@ -32,76 +31,11 @@ nonisolated extension Outbound {
 
         switch `protocol` {
         case .nowhere:
-            let explicitSNI = try container.decodeIfPresent(String.self, forKey: .nowhereSNI)
-            let hasCarrierPorts = container.contains(.nowhereTCPPort) || container.contains(.nowhereUDPPort)
-            let storedTCPPort = try container.decodeIfPresent(UInt16.self, forKey: .nowhereTCPPort)
-            let storedUDPPort = try container.decodeIfPresent(UInt16.self, forKey: .nowhereUDPPort)
-            let usesSeparatePorts = hasCarrierPorts && storedTCPPort != storedUDPPort
-            let tcpPort = usesSeparatePorts ? storedTCPPort : serverPort
-            let udpPort = usesSeparatePorts ? storedUDPPort : serverPort
-            if serverPort == 0 {
-                throw DecodingError.dataCorruptedError(
-                    forKey: .serverPort,
-                    in: container,
-                    debugDescription: "Invalid zero Nowhere port"
-                )
-            }
-            if storedTCPPort == 0 {
-                throw DecodingError.dataCorruptedError(
-                    forKey: .nowhereTCPPort,
-                    in: container,
-                    debugDescription: "Invalid zero Nowhere TCP port"
-                )
-            }
-            if storedUDPPort == 0 {
-                throw DecodingError.dataCorruptedError(
-                    forKey: .nowhereUDPPort,
-                    in: container,
-                    debugDescription: "Invalid zero Nowhere UDP port"
-                )
-            }
-            let rawUp = try container.decodeIfPresent(String.self, forKey: .up)
-            let rawDown = try container.decodeIfPresent(String.self, forKey: .down)
-            func decodeCarrier(_ value: String?, forKey key: LegacyCodingKeys) throws -> NowhereNetwork {
-                guard let value else { return .tcp }
-                guard let network = NowhereNetwork(rawValue: value) else {
-                    throw DecodingError.dataCorruptedError(
-                        forKey: key,
-                        in: container,
-                        debugDescription: "Invalid Nowhere \(key.stringValue) value"
-                    )
-                }
-                return network
-            }
-            let uplink = try decodeCarrier(rawUp, forKey: .up)
-            let downlink = try decodeCarrier(rawDown, forKey: .down)
-            let decodedMultiplex = try Self.decodeLegacyFlag(in: container, forKey: .mux, label: "mux")
-            let decodedMorph = try Self.decodeLegacyFlag(in: container, forKey: .morph, label: "morph")
-            guard tcpPort != nil || udpPort != nil else {
-                throw DecodingError.dataCorruptedError(
-                    forKey: .serverPort,
-                    in: container,
-                    debugDescription: "Nowhere requires at least one carrier port"
-                )
-            }
-            guard (uplink == .tcp ? tcpPort : udpPort) != nil,
-                  (downlink == .tcp ? tcpPort : udpPort) != nil else {
-                throw DecodingError.dataCorruptedError(
-                    forKey: .up,
-                    in: container,
-                    debugDescription: "Nowhere route uses an unavailable carrier"
-                )
-            }
-            self = .nowhere(NowhereConfiguration(
-                key: try container.decodeIfPresent(String.self, forKey: .nowhereKey) ?? "",
-                tcpPort: usesSeparatePorts ? storedTCPPort : nil,
-                udpPort: usesSeparatePorts ? storedUDPPort : nil,
-                uplink: uplink,
-                downlink: downlink,
-                multiplex: decodedMultiplex,
-                morph: decodedMorph,
-                serverName: (explicitSNI?.isEmpty == false && explicitSNI != "none" ? explicitSNI : nil) ?? serverAddress
-            ))
+            throw DecodingError.dataCorruptedError(
+                forKey: .outboundProtocol,
+                in: container,
+                debugDescription: "Unsupported Nowhere configuration"
+            )
 
         case .vless:
             self = .vless(try VLESSConfiguration(from: decoder))
@@ -179,22 +113,6 @@ nonisolated extension Outbound {
         }
     }
     
-    private static func decodeLegacyFlag(
-        in container: KeyedDecodingContainer<LegacyCodingKeys>,
-        forKey key: LegacyCodingKeys,
-        label: String
-    ) throws -> Bool {
-        guard container.contains(key), try !container.decodeNil(forKey: key) else { return false }
-        if let value = try? container.decode(Bool.self, forKey: key) { return value }
-        if let value = try? container.decode(Int.self, forKey: key), value == 0 || value == 1 {
-            return value == 1
-        }
-        throw DecodingError.dataCorruptedError(
-            forKey: key,
-            in: container,
-            debugDescription: "Invalid Nowhere \(label) value"
-        )
-    }
 }
 
 nonisolated extension ProxyConfiguration {

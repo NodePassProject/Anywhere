@@ -42,6 +42,9 @@ extension QUICConnectionCore {
                     handleStreamReset(streamId: Int64(id.rawValue), appErrorCode: code)
                 case .streamSendingStopped(let id, let code):
                     failStreamSendQueue(streamId: Int64(id.rawValue), error: AnywhereError.quic(.streamReset(applicationCode: code)))
+                    if let handler = handlers.withLock({ $0.streamSendingStopped }) {
+                        publish { handler(Int64(id.rawValue), AnywhereError.quic(.streamReset(applicationCode: code))) }
+                    }
                 case .streamClosed(let id, let code):
                     handleStreamClose(streamId: Int64(id.rawValue), appErrorCode: code ?? 0, hasAppError: code != nil)
                 case .pathValidated(let path):

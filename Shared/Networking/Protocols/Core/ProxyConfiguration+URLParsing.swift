@@ -70,7 +70,7 @@ nonisolated extension ProxyConfiguration {
             remaining = String(remaining[..<questionIndex])
         }
         if let queryString {
-            let validatedKeys: Set<String> = ["up", "down", "mux", "morph"]
+            let validatedKeys: Set<String> = ["net", "morph"]
             var seenKeys = Set<String>()
             for parameter in queryString.split(separator: "&", omittingEmptySubsequences: false) {
                 let keyValue = parameter.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
@@ -90,129 +90,45 @@ nonisolated extension ProxyConfiguration {
         guard !userInfo.contains(":"), let key = userInfo.removingPercentEncoding else {
             throw AnywhereError.parse(.invalidURL("Invalid Nowhere key encoding"))
         }
-        guard !key.isEmpty, key.utf8.count <= UInt8.max else {
+        guard !key.isEmpty else {
             throw AnywhereError.parse(.invalidURL("Missing Nowhere key"))
         }
 
-        let parsedEndpoint = try parseNowhereEndpoint(endpoint)
-        let fallbackNetwork: NowhereNetwork = parsedEndpoint.tcpPort != nil ? .tcp : .udp
-
-        let rawUp = parameters["up"]
-        let rawDown = parameters["down"]
-        func carrier(_ explicit: String?, name: String) throws -> NowhereNetwork {
-            if let explicit {
-                guard let value = NowhereNetwork(rawValue: explicit) else {
-                    throw AnywhereError.parse(.invalidURL("Invalid Nowhere \(name) value"))
-                }
-                return value
+        guard !endpoint.contains("/") else {
+            throw AnywhereError.parse(.invalidURL("Invalid Nowhere endpoint"))
+        }
+        let (host, port) = try parseHostPort(endpoint)
+        guard !host.isEmpty, port != 0 else {
+            throw AnywhereError.parse(.invalidURL("Invalid Nowhere endpoint"))
+        }
+        let network: NowhereNetwork
+        if let rawNetwork = parameters["net"] {
+            guard let parsed = NowhereNetwork(rawValue: rawNetwork) else {
+                throw AnywhereError.parse(.invalidURL("Invalid Nowhere net value"))
             }
-            return fallbackNetwork
-        }
-        let uplink = try carrier(rawUp, name: "up")
-        let downlink = try carrier(rawDown, name: "down")
-        guard (uplink == .tcp ? parsedEndpoint.tcpPort : parsedEndpoint.udpPort) != nil,
-              (downlink == .tcp ? parsedEndpoint.tcpPort : parsedEndpoint.udpPort) != nil else {
-            throw AnywhereError.parse(.invalidURL("Nowhere route uses an unavailable carrier"))
-        }
-        let multiplex: Bool
-        switch parameters["mux"] {
-        case nil, "0":
-            multiplex = false
-        case "1":
-            multiplex = uplink == .tcp || downlink == .tcp
-        default:
-            throw AnywhereError.parse(.invalidURL("Invalid Nowhere mux value"))
+            network = parsed
+        } else {
+            network = .tcp
         }
         let morph: Bool
         switch parameters["morph"] {
-        case nil, "0":
-            morph = false
-        case "1":
-            morph = true
-        default:
-            throw AnywhereError.parse(.invalidURL("Invalid Nowhere morph value"))
+        case nil, "1": morph = true
+        case "0": morph = false
+        default: throw AnywhereError.parse(.invalidURL("Invalid Nowhere morph value"))
         }
-
-        let rawSNI = parameters["sni"]
-        let sni: String
-        if let rawSNI, !rawSNI.isEmpty, rawSNI != "none" {
-            sni = rawSNI
-        } else {
-            sni = parsedEndpoint.host
-        }
-        let usesSeparatePorts = parsedEndpoint.tcpPort != parsedEndpoint.udpPort
 
         return ProxyConfiguration(
             name: fragment ?? "Nowhere",
-            serverAddress: parsedEndpoint.host,
-            serverPort: parsedEndpoint.tcpPort ?? parsedEndpoint.udpPort!,
+            serverAddress: host,
+            serverPort: port,
             outbound: .nowhere(
                 NowhereConfiguration(
                     key: key,
-                    tcpPort: usesSeparatePorts ? parsedEndpoint.tcpPort : nil,
-                    udpPort: usesSeparatePorts ? parsedEndpoint.udpPort : nil,
-                    uplink: uplink,
-                    downlink: downlink,
-                    multiplex: multiplex,
-                    morph: morph,
-                    serverName: sni
+                    network: network,
+                    morph: morph
                 )
             )
         )
-    }
-
-    private static func parseNowhereEndpoint(_ endpoint: String) throws -> (host: String, tcpPort: UInt16?, udpPort: UInt16?) {
-        if let slashIndex = endpoint.firstIndex(of: "/") {
-            let hostPart = String(endpoint[..<slashIndex])
-            let path = String(endpoint[endpoint.index(after: slashIndex)...])
-            let host: String
-            if hostPart.hasPrefix("[") {
-                guard hostPart.hasSuffix("]"), hostPart.count > 2 else {
-                    throw AnywhereError.parse(.invalidURL("Invalid Nowhere IPv6 host"))
-                }
-                host = String(hostPart.dropFirst().dropLast())
-            } else {
-                guard !hostPart.isEmpty, !hostPart.contains(":") else {
-                    throw AnywhereError.parse(.invalidURL("Nowhere explicit endpoint must not contain an authority port"))
-                }
-                host = hostPart
-            }
-            let segments = path.split(separator: "/", omittingEmptySubsequences: false)
-            guard !segments.isEmpty, segments.allSatisfy({ !$0.isEmpty }) else {
-                throw AnywhereError.parse(.invalidURL("Invalid Nowhere carrier path"))
-            }
-            var tcpPort: UInt16?
-            var udpPort: UInt16?
-            for segment in segments {
-                let pair = segment.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
-                guard pair.count == 2, let port = UInt16(pair[1]), port != 0 else {
-                    throw AnywhereError.parse(.invalidURL("Invalid Nowhere carrier port"))
-                }
-                switch pair[0] {
-                case "tcp":
-                    guard tcpPort == nil else {
-                        throw AnywhereError.parse(.invalidURL("Duplicate Nowhere TCP carrier"))
-                    }
-                    tcpPort = port
-                case "udp":
-                    guard udpPort == nil else {
-                        throw AnywhereError.parse(.invalidURL("Duplicate Nowhere UDP carrier"))
-                    }
-                    udpPort = port
-                default:
-                    throw AnywhereError.parse(.invalidURL("Unsupported Nowhere carrier"))
-                }
-            }
-            guard tcpPort != nil || udpPort != nil else {
-                throw AnywhereError.parse(.invalidURL("Nowhere endpoint has no carrier"))
-            }
-            return (host, tcpPort, udpPort)
-        }
-        let (host, port) = try parseHostPort(endpoint)
-        guard port != 0 else {
-            throw AnywhereError.parse(.invalidURL("Invalid Nowhere carrier port"))
-        }
-        return (host, port, port)
     }
     
     private static func parseVLESS(url: String) throws -> ProxyConfiguration {

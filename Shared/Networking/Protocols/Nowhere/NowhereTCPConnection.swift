@@ -8,7 +8,7 @@
 import Foundation
 import Synchronization
 
-actor NowhereTCPConnection: ProxyConnection, NowhereTerminationObservable {
+actor NowhereTCPConnection: ProxyConnection {
     private enum Phase: PhaseTransitionable {
         case idle
         case opening
@@ -34,10 +34,7 @@ actor NowhereTCPConnection: ProxyConnection, NowhereTerminationObservable {
         var transport: (any ByteTransport)?
         var tlsVersion: TLSVersion?
         var terminalError: Error?
-        var monitorTask: Task<Void, Never>?
         var bootstrapTask: Task<TLSRecordConnection, Error>?
-        var flowKind: NowhereProtocol.FlowKind?
-        var flowRole: NowhereProtocol.FlowRole?
     }
 
     private let configuration: NowhereRuntimeConfiguration
@@ -45,7 +42,6 @@ actor NowhereTCPConnection: ProxyConnection, NowhereTerminationObservable {
     private let tunnel: ProxyConnection?
 
     private nonisolated let lifecycle = Mutex(Lifecycle())
-    private nonisolated let termination = TerminationLatch()
 
     private var pendingData = Data()
     private var receiveInProgress = false
@@ -74,24 +70,12 @@ actor NowhereTCPConnection: ProxyConnection, NowhereTerminationObservable {
         lifecycle.withLock { $0.tlsVersion }
     }
 
-    nonisolated func setNowhereTerminationHandler(
-        _ handler: (@Sendable (Error?) -> Void)?
-    ) {
-        guard termination.install(handler), handler != nil else { return }
-        startUplinkMonitorIfNeeded()
-    }
-
     func openFresh(
         destination: NowhereProtocol.Target,
-        flowHeader: NowhereProtocol.FlowHeader,
-        initialData: Data? = nil,
-        attempt: NowhereFlowOpenAttempt? = nil
+        kind: NowhereProtocol.FlowKind,
+        initialData: Data? = nil
     ) async throws {
-        let request = try NowhereProtocol.encodeFlowRequest(
-            header: flowHeader,
-            target: flowHeader.carriesTarget ? destination : nil,
-            initialData: flowHeader.role == .attach ? nil : initialData
-        )
+        let request = NowhereProtocol.encodeFlowRequest(kind: kind, target: destination)
         guard lifecycle.withLock({ $0.transition(to: .opening) }) else {
             throw AnywhereError.proxy(.nowhere, .notReady)
         }
@@ -100,8 +84,6 @@ actor NowhereTCPConnection: ProxyConnection, NowhereTerminationObservable {
         let adoptedClient = lifecycle.withLock { state -> Bool in
             guard state.phase == .opening else { return false }
             state.tlsClient = client
-            state.flowKind = flowHeader.kind
-            state.flowRole = flowHeader.role
             return true
         }
         guard adoptedClient else {
@@ -120,7 +102,7 @@ actor NowhereTCPConnection: ProxyConnection, NowhereTerminationObservable {
                 } else {
                     let tcp = TCPTransport(
                         host: connectHost,
-                        port: try configuration.proxyPort(for: .tcp),
+                        port: configuration.proxyPort,
                         resolution: .proxies
                     )
                     base = tcp
@@ -173,7 +155,7 @@ actor NowhereTCPConnection: ProxyConnection, NowhereTerminationObservable {
             } else {
                 record = try await client.connect(
                     host: connectHost,
-                    port: try configuration.proxyPort(for: .tcp)
+                    port: configuration.proxyPort
                 )
             }
 
@@ -184,15 +166,14 @@ actor NowhereTCPConnection: ProxyConnection, NowhereTerminationObservable {
                 ))
             }
             let exporter = try record.exportKeyingMaterial(
-                label: "EXPORTER-Nowhere-Auth",
+                label: NowhereProtocol.authExporterLabel,
                 context: Data(),
                 length: 32
             )
             let auth = try NowhereProtocol.makeAuthFrame(
                 authKey: configuration.authKey,
                 transport: .tlsTCP,
-                exporter: exporter,
-                sessionID: configuration.sessionID
+                exporter: exporter
             )
 
             let transport = TLSByteTransport(record)
@@ -210,17 +191,14 @@ actor NowhereTCPConnection: ProxyConnection, NowhereTerminationObservable {
 
             var bootstrap = auth
             bootstrap.append(request)
-            if initialData?.isEmpty == false { attempt?.markEarlyDataWriteStarted() }
             try await transport.send(bootstrap)
-
-            if flowHeader.role != .open {
-                pendingData = try await receiveFlowResult(from: transport)
-            }
-
+            pendingData = try await receiveFlowResult(from: transport)
             guard lifecycle.withLock({ $0.transition(to: .ready) }) else {
                 throw terminalError()
             }
-            startUplinkMonitorIfNeeded()
+            if let initialData, !initialData.isEmpty {
+                try await transport.send(initialData)
+            }
         } catch {
             let resolved = terminalError(fallback: error)
             fail(resolved)
@@ -290,7 +268,6 @@ actor NowhereTCPConnection: ProxyConnection, NowhereTerminationObservable {
             case .bytes(let data):
                 return data
             case .end:
-                finish(error: nil)
                 return nil
             }
         } catch {
@@ -309,38 +286,6 @@ actor NowhereTCPConnection: ProxyConnection, NowhereTerminationObservable {
         }
     }
 
-    private nonisolated func startUplinkMonitorIfNeeded() {
-        guard termination.hasHandler else { return }
-        lifecycle.withLock { state in
-            guard state.phase == .ready,
-                  state.flowKind == .udp,
-                  state.flowRole == .open,
-                  state.monitorTask == nil,
-                  let transport = state.transport else {
-                return
-            }
-            state.monitorTask = Task { [weak self] in
-                do {
-                    switch try await transport.receive() {
-                    case .bytes:
-                        throw AnywhereError.proxy(
-                            .nowhere,
-                            .connectionClosed(detail: "Unexpected reverse UoT payload")
-                        )
-                    case .end:
-                        self?.finish(error: nil)
-                    }
-                } catch is CancellationError {
-                    guard let self, self.isConnected else { return }
-                    self.fail(AnywhereError.proxy(.nowhere, .streamClosed))
-                } catch {
-                    guard let self else { return }
-                    self.fail(self.terminalError(fallback: error))
-                }
-            }
-        }
-    }
-
     private nonisolated func terminalError(
         fallback: Error = AnywhereError.proxy(.nowhere, .streamClosed)
     ) -> Error {
@@ -352,23 +297,20 @@ actor NowhereTCPConnection: ProxyConnection, NowhereTerminationObservable {
     }
 
     private nonisolated func finish(error: Error?) {
-        let resources: (TLSClient?, (any ByteTransport)?, Task<Void, Never>?, Task<TLSRecordConnection, Error>?)? = lifecycle.withLock { state in
+        let resources: (TLSClient?, (any ByteTransport)?, Task<TLSRecordConnection, Error>?)? = lifecycle.withLock { state in
             guard state.transition(to: .closed) else { return nil }
             state.terminalError = error
-            let resources = (state.tlsClient, state.transport, state.monitorTask, state.bootstrapTask)
+            let resources = (state.tlsClient, state.transport, state.bootstrapTask)
             state.tlsClient = nil
             state.transport = nil
-            state.monitorTask = nil
             state.bootstrapTask = nil
             return resources
         }
         guard let resources else { return }
         resources.2?.cancel()
-        resources.3?.cancel()
         resources.0?.cancel()
         resources.1?.cancel()
         tunnel?.cancel()
-        termination.fire(error)
     }
 
     nonisolated func cancel() {

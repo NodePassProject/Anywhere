@@ -148,15 +148,6 @@ nonisolated final class ProxyClient: Sendable {
             return try await connectWithOutbound(request)
         }
         
-        if configuration.outboundProtocol == .nowhere, configuration.nowhereMultiplex {
-            return try await connectWithOutbound(request)
-        }
-
-        if configuration.outboundProtocol == .nowhere,
-           configuration.nowhereUplink != configuration.nowhereDownlink {
-            throw AnywhereError.proxy(.nowhere, .protocolViolation(detail: "Asymmetric Nowhere carriers do not support proxy chains"))
-        }
-
         if configuration.isQUICTransport {
             return try await connectWithOutbound(request)
         }
@@ -237,13 +228,7 @@ nonisolated final class ProxyClient: Sendable {
         if let finalDestination {
             resolvedDestination = finalDestination
         } else {
-            guard let network = hopNetworks.last,
-                  let port = configuration.endpointPort(for: network) else {
-                throw AnywhereError.proxy(configuration.outboundProtocol.wire, .protocolViolation(
-                    detail: "Chain command cannot reach \(configuration.outboundProtocol.name) endpoint"
-                ))
-            }
-            resolvedDestination = (configuration.serverAddress, port)
+            resolvedDestination = (configuration.serverAddress, configuration.serverPort)
         }
         let resolvedTrack: (ProxyClient) -> Void = track ?? { _ in }
         return try await Self.dialChain(
@@ -293,12 +278,7 @@ nonisolated final class ProxyClient: Sendable {
                 if !isLastHop {
                     let nextConfiguration = chain[hopIndex + 1]
                     nextHost = nextConfiguration.serverAddress
-                    guard let port = nextConfiguration.endpointPort(for: hopNetworks[hopIndex]) else {
-                        throw AnywhereError.proxy(nextConfiguration.outboundProtocol.wire, .protocolViolation(
-                            detail: "Chain command cannot reach \(nextConfiguration.outboundProtocol.name) endpoint"
-                        ))
-                    }
-                    nextPort = port
+                    nextPort = nextConfiguration.serverPort
                 } else {
                     nextHost = finalDestination.host
                     nextPort = finalDestination.port

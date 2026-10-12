@@ -27,7 +27,6 @@ nonisolated enum TransportReclaim {
     
     static func sealAll() {
         NowhereClient.seal()
-        NowhereMultiplexerRegistry.shared.seal()
         AnyTLSMultiplexerRegistry.shared.seal()
         SudokuMultiplexerRegistry.shared.seal()
         RFCMultiplexerRegistry.shared.seal()
@@ -35,7 +34,6 @@ nonisolated enum TransportReclaim {
 
     static func unsealAll() {
         NowhereClient.unseal()
-        NowhereMultiplexerRegistry.shared.unseal()
         AnyTLSMultiplexerRegistry.shared.unseal()
         SudokuMultiplexerRegistry.shared.unseal()
         RFCMultiplexerRegistry.shared.unseal()

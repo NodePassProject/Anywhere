@@ -21,22 +21,18 @@ nonisolated enum OutboundProtocol: String, Codable, CaseIterable {
     enum InitialDataPolicy: Equatable {
         case none
         case unbounded
-        case limited(Int)
 
         func prefixLength(for availableBytes: Int) -> Int {
             switch self {
             case .none: return 0
             case .unbounded: return availableBytes
-            case .limited(let limit): return min(availableBytes, max(0, limit))
             }
         }
     }
     
     var initialDataPolicy: InitialDataPolicy {
         switch self {
-        case .nowhere:
-            return .limited(32 * 1024)
-        case .vless, .sudoku:
+        case .nowhere, .vless, .sudoku:
             return .unbounded
         case .hysteria, .trojan, .anytls, .shadowsocks, .socks5, .rfc:
             return .none
@@ -176,7 +172,7 @@ nonisolated struct ProxyConfiguration: Identifiable, Hashable, Codable, Sendable
     
     var genericSecurityLayer: GenericSecurityLayer {
         switch outbound {
-        case .nowhere(let configuration):   configuration.securityLayer
+        case .nowhere:                       .tls(NowhereConfiguration.tlsConfiguration(for: serverAddress))
         case .trojan(let configuration):    configuration.securityLayer
         case .anytls(let configuration):    configuration.securityLayer
         case .rfc(let configuration):       configuration.securityLayer
@@ -188,12 +184,7 @@ nonisolated struct ProxyConfiguration: Identifiable, Hashable, Codable, Sendable
         let tag: String?
         switch outboundProtocol {
         case .nowhere:
-            switch (nowhereUplink, nowhereDownlink) {
-            case (.tcp, .tcp):  tag = "TCP"
-            case (.udp, .udp):  tag = "UDP"
-            case (.tcp, .udp):  tag = "↑ TCP ↓ UDP"
-            case (.udp, .tcp):  tag = "↑ UDP ↓ TCP"
-            }
+            tag = nowhereNetwork.rawValue.uppercased()
         case .vless:
             tag = vless?.displayNetworkTag
         case .hysteria:         tag = "UDP"
@@ -229,21 +220,9 @@ nonisolated struct ProxyConfiguration: Identifiable, Hashable, Codable, Sendable
         return tag
     }
     
-    var nowhereUplink: NowhereNetwork {
-        if case .nowhere(let configuration) = outbound { return configuration.uplink }
-        return .udp
-    }
-
-    var nowhereDownlink: NowhereNetwork {
-        if case .nowhere(let configuration) = outbound { return configuration.downlink }
-        return .udp
-    }
-
-    var nowhereMultiplex: Bool {
-        if case .nowhere(let configuration) = outbound {
-            return configuration.multiplex
-        }
-        return false
+    var nowhereNetwork: NowhereNetwork {
+        if case .nowhere(let configuration) = outbound { return configuration.network }
+        return .tcp
     }
 
     var nowhereMorph: Bool {
@@ -272,7 +251,7 @@ nonisolated struct ProxyConfiguration: Identifiable, Hashable, Codable, Sendable
     var isQUICTransport: Bool {
         switch outbound {
         case .nowhere(let configuration):
-            configuration.uplink == .udp
+            configuration.network == .udp
         case .hysteria:
             true
         case .vless(let configuration):
@@ -285,18 +264,9 @@ nonisolated struct ProxyConfiguration: Identifiable, Hashable, Codable, Sendable
     func upstreamNetwork(for downstream: ProxyNetwork) -> ProxyNetwork? {
         if isXHTTPOverHTTP3 { return .udp }
         if outboundProtocol == .nowhere {
-            return nowhereUplink == .udp ? .udp : .tcp
+            return nowhereNetwork == .udp ? .udp : .tcp
         }
         return outboundProtocol.upstreamNetwork(for: downstream)
-    }
-
-    func endpointPort(for network: ProxyNetwork) -> UInt16? {
-        guard case .nowhere(let configuration) = outbound else { return serverPort }
-        let ports = configuration.resolvedPorts(serverPort: serverPort)
-        switch network {
-        case .tcp: return ports.tcp
-        case .udp: return ports.udp
-        }
     }
 
     init(

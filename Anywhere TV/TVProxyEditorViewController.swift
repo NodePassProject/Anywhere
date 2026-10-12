@@ -20,15 +20,9 @@ class TVProxyEditorViewController: UITableViewController {
     private var serverPort = ""
 
     private var nowhereKey = ""
-    private var nowhereTCPPort = ""
-    private var nowhereUDPPort = ""
-    private var nowhereSeparatePorts = false
-    private var nowhereUplink: NowhereNetwork = .tcp
-    private var nowhereDownlink: NowhereNetwork = .tcp
-    private var nowhereMultiplex = false
-    private var nowhereMorph = false
-    private var nowhereMorphPrelude: NowhereMorphPrelude = .low7
-    private var nowhereSNI = ""
+    private var nowhereNetwork: NowhereNetwork = .tcp
+    private var nowhereMorph = true
+    private var nowhereMorphPrelude: NowhereMorphPrelude = .full8
 
     private var vlessUUID = ""
     private var vlessEncryption = "none"
@@ -61,7 +55,6 @@ class TVProxyEditorViewController: UITableViewController {
     private var vlessTLSECH = ""
     private var vlessFingerprint: TLSFingerprint = .default
 
-    // XHTTP detach: download stream dialed to a separate server, flattened into its own security + host/path (effectively a second proxy).
     private var vlessXHTTPDownloadEnabled = false
     private var vlessXHTTPDownloadAddress = ""
     private var vlessXHTTPDownloadPort = ""
@@ -159,7 +152,7 @@ class TVProxyEditorViewController: UITableViewController {
     private enum FieldKey {
         case name, address, port
         case outboundProtocol
-        case nowhereKey, nowhereTCPPort, nowhereUDPPort, nowhereSeparatePorts, nowhereUplink, nowhereDownlink, nowhereMultiplex, nowhereMorph, nowhereMorphPrelude, nowhereSNI
+        case nowhereKey, nowhereNetwork, nowhereMorph, nowhereMorphPrelude
         case vlessUUID, vlessEncryption, vlessTransport, vlessFlow, vlessSecurity
         case vlessWebSocketHost, vlessWebSocketPath
         case vlessHTTPUpgradeHost, vlessHTTPUpgradePath
@@ -213,16 +206,13 @@ class TVProxyEditorViewController: UITableViewController {
             .text(label: String(localized: "Address"), value: serverAddress, placeholder: String(localized: "Address"), key: .address),
         ]
         if isNowhere {
-            if !nowhereSeparatePorts {
-                serverRows.append(.text(label: String(localized: "Port"), value: serverPort, placeholder: "443", key: .port))
-            }
+            serverRows.append(.text(label: String(localized: "Port"), value: serverPort, placeholder: "443", key: .port))
             serverRows.append(.text(label: String(localized: "Key"), value: nowhereKey, placeholder: String(localized: "Key"), key: .nowhereKey, secure: true))
         } else {
             serverRows.append(.text(label: String(localized: "Port"), value: serverPort, placeholder: "443", key: .port))
         }
         if isVLESS {
             serverRows.append(.text(label: String(localized: "UUID", comment: "UUID for VLESS protocol"), value: vlessUUID, placeholder: String(localized: "UUID", comment: "UUID for VLESS protocol"), key: .vlessUUID))
-            // Encryption (mlkem768x25519plus) needs CryptoKit ML-KEM-768; older OSes refuse it at dial time, so hide the field.
             if #available(tvOS 26.0, *) {
                 serverRows.append(.text(label: String(localized: "Encryption", comment: "Encryption for VLESS protocol"), value: vlessEncryption, placeholder: "none", key: .vlessEncryption))
             }
@@ -273,54 +263,25 @@ class TVProxyEditorViewController: UITableViewController {
         sections.append((String(localized: "Server"), serverRows))
 
         if isNowhere {
-            let carrierOptions = [("TCP", "tcp"), ("UDP", "udp")]
             var transportRows: [RowType] = [
                 .selection(
-                    label: String(localized: "Upload"),
-                    value: nowhereUplink.rawValue.uppercased(),
-                    options: carrierOptions,
-                    key: .nowhereUplink,
-                    isEnabled: true
+                    label: String(localized: "Network"),
+                    value: nowhereNetwork.rawValue.uppercased(),
+                    options: [("TCP", "tcp"), ("UDP", "udp")],
+                    key: .nowhereNetwork
                 ),
-                .selection(
-                    label: String(localized: "Download"),
-                    value: nowhereDownlink.rawValue.uppercased(),
-                    options: carrierOptions,
-                    key: .nowhereDownlink,
-                    isEnabled: true
-                ),
+                .toggle(label: String(localized: "Morph"), isOn: nowhereMorph, key: .nowhereMorph),
             ]
-            if nowhereUplink != nowhereDownlink {
-                transportRows.append(.toggle(
-                    label: String(localized: "Separate Ports"),
-                    isOn: nowhereSeparatePorts,
-                    key: .nowhereSeparatePorts
-                ))
-            }
-            if nowhereSeparatePorts {
-                transportRows.append(.text(label: String(localized: "TCP Port"), value: nowhereTCPPort, placeholder: "443", key: .nowhereTCPPort))
-                transportRows.append(.text(label: String(localized: "UDP Port"), value: nowhereUDPPort, placeholder: "443", key: .nowhereUDPPort))
-            }
-            transportRows.append(.toggle(
-                label: String(localized: "Multiplex"),
-                isOn: nowhereUplink == .tcp || nowhereDownlink == .tcp ? nowhereMultiplex : true,
-                key: .nowhereMultiplex,
-                isEnabled: nowhereUplink == .tcp || nowhereDownlink == .tcp
-            ))
-            transportRows.append(.toggle(
-                label: String(localized: "Morph"),
-                isOn: nowhereMorph,
-                key: .nowhereMorph
-            ))
-            if nowhereMorph && (nowhereUplink == .tcp || nowhereDownlink == .tcp) {
+            if nowhereMorph {
                 transportRows.append(.selection(
                     label: String(localized: "Prelude"),
-                    value: nowhereMorphPrelude.displayName,
+                    value: nowhereNetwork == .tcp ? nowhereMorphPrelude.displayName : String(localized: "None"),
                     options: NowhereMorphPrelude.allCases.map { ($0.displayName, $0.rawValue) },
-                    key: .nowhereMorphPrelude
+                    key: .nowhereMorphPrelude,
+                    isEnabled: nowhereNetwork == .tcp
                 ))
             }
-            sections.append((String(localized: "Network"), transportRows))
+            sections.append((nil, transportRows))
         } else if isVLESS {
             var transportRows: [RowType] = [
                 .selection(label: String(localized: "Transport", comment: "Transport for VLESS protocol"), value: transportDisplayValue, options: [
@@ -382,11 +343,7 @@ class TVProxyEditorViewController: UITableViewController {
             ]))
         }
 
-        if isNowhere {
-            sections.append((String(localized: "TLS"), [
-                .text(label: String(localized: "SNI"), value: nowhereSNI, placeholder: String(localized: "SNI"), key: .nowhereSNI),
-            ]))
-        } else if isVLESS {
+        if isVLESS {
             var tlsRows: [RowType] = [
                 .selection(label: String(localized: "Security", comment: "Security for VLESS protocol"), value: securityDisplayValue, options: [
                     (String("None"), "none"),
@@ -597,22 +554,7 @@ class TVProxyEditorViewController: UITableViewController {
     private var isValid: Bool {
         guard !name.isEmpty, !serverAddress.isEmpty else { return false }
         if isNowhere {
-            if !nowhereSeparatePorts {
-                return !nowhereKey.isEmpty
-                    && nowhereKey.utf8.count <= 255
-                    && validNowherePort(serverPort) != nil
-            }
-            let tcpPort = validNowherePort(nowhereTCPPort)
-            let udpPort = validNowherePort(nowhereUDPPort)
-            return !nowhereKey.isEmpty
-                && nowhereKey.utf8.count <= 255
-                && (nowhereTCPPort.isEmpty || tcpPort != nil)
-                && (nowhereUDPPort.isEmpty || udpPort != nil)
-                && (tcpPort != nil || udpPort != nil)
-                && (nowhereUplink != .tcp || tcpPort != nil)
-                && (nowhereUplink != .udp || udpPort != nil)
-                && (nowhereDownlink != .tcp || tcpPort != nil)
-                && (nowhereDownlink != .udp || udpPort != nil)
+            return !nowhereKey.isEmpty && validNowherePort(serverPort) != nil
         }
         guard UInt16(serverPort) != nil else { return false }
         if isVLESS {
@@ -807,33 +749,13 @@ class TVProxyEditorViewController: UITableViewController {
                 selectedProtocol = proto
             }
         case .nowhereKey: nowhereKey = value
-        case .nowhereTCPPort:
-            nowhereTCPPort = value
-        case .nowhereUDPPort:
-            nowhereUDPPort = value
-        case .nowhereSeparatePorts:
-            setNowherePortSeparation(value == "true")
-        case .nowhereUplink:
-            if let network = NowhereNetwork(rawValue: value) {
-                nowhereUplink = network
-                if nowhereUplink == nowhereDownlink {
-                    setNowherePortSeparation(false)
-                }
-            }
-        case .nowhereDownlink:
-            if let network = NowhereNetwork(rawValue: value) {
-                nowhereDownlink = network
-                if nowhereUplink == nowhereDownlink {
-                    setNowherePortSeparation(false)
-                }
-            }
-        case .nowhereMultiplex: nowhereMultiplex = value == "true"
+        case .nowhereNetwork:
+            if let network = NowhereNetwork(rawValue: value) { nowhereNetwork = network }
         case .nowhereMorph: nowhereMorph = value == "true"
         case .nowhereMorphPrelude:
             if let prelude = NowhereMorphPrelude(rawValue: value) {
                 nowhereMorphPrelude = prelude
             }
-        case .nowhereSNI: nowhereSNI = value
         case .vlessUUID: vlessUUID = value
         case .vlessEncryption: vlessEncryption = value
         case .vlessTransport: vlessTransport = value
@@ -938,15 +860,9 @@ class TVProxyEditorViewController: UITableViewController {
         serverPort = String(configuration.serverPort)
         if case .nowhere(let nowhere) = configuration.outbound {
             nowhereKey = nowhere.key
-            nowhereTCPPort = nowhere.tcpPort.map { String($0) } ?? ""
-            nowhereUDPPort = nowhere.udpPort.map { String($0) } ?? ""
-            nowhereSeparatePorts = nowhere.tcpPort != nowhere.udpPort
-            nowhereUplink = nowhere.uplink
-            nowhereDownlink = nowhere.downlink
-            nowhereMultiplex = nowhere.multiplex
+            nowhereNetwork = nowhere.network
             nowhereMorph = nowhere.morph
             nowhereMorphPrelude = nowhere.morphPrelude
-            nowhereSNI = nowhere.serverName
         }
         if let vless = configuration.vless {
             vlessUUID = vless.uuid.uuidString
@@ -1135,20 +1051,7 @@ class TVProxyEditorViewController: UITableViewController {
     }
 
     private func save() {
-        let sharedNowherePort = validNowherePort(serverPort)
-        let enteredNowhereTCP = nowhereSeparatePorts ? validNowherePort(nowhereTCPPort) : nil
-        let enteredNowhereUDP = nowhereSeparatePorts ? validNowherePort(nowhereUDPPort) : nil
-        let usesSeparateNowherePorts = nowhereSeparatePorts && enteredNowhereTCP != enteredNowhereUDP
-        let nowhereTCP = usesSeparateNowherePorts ? enteredNowhereTCP : nil
-        let nowhereUDP = usesSeparateNowherePorts ? enteredNowhereUDP : nil
-        let port: UInt16
-        if isNowhere {
-            guard let canonicalPort = enteredNowhereTCP ?? enteredNowhereUDP ?? sharedNowherePort else { return }
-            port = canonicalPort
-        } else {
-            guard let parsedPort = UInt16(serverPort) else { return }
-            port = parsedPort
-        }
+        guard let port = UInt16(serverPort), !isNowhere || port != 0 else { return }
         let parsedUUID: UUID
         if isNowhere || isHysteria || isTrojan || isAnyTLS || isShadowsocks || isSOCKS5 || isSudoku || isRFC {
             parsedUUID = existingConfiguration?.id ?? UUID()
@@ -1219,17 +1122,11 @@ class TVProxyEditorViewController: UITableViewController {
         let outbound: Outbound
         switch selectedProtocol {
         case .nowhere:
-            let sni = nowhereSNI.isEmpty ? bareAddress : nowhereSNI
             outbound = .nowhere(NowhereConfiguration(
                 key: nowhereKey,
-                tcpPort: nowhereTCP,
-                udpPort: nowhereUDP,
-                uplink: nowhereUplink,
-                downlink: nowhereDownlink,
-                multiplex: (nowhereUplink == .tcp || nowhereDownlink == .tcp) && nowhereMultiplex,
+                network: nowhereNetwork,
                 morph: nowhereMorph,
-                morphPrelude: nowhereMorphPrelude,
-                serverName: sni
+                morphPrelude: nowhereMorphPrelude
             ))
         case .vless:
             let vlessXrayTransportLayer: XrayTransportLayer
@@ -1376,15 +1273,4 @@ class TVProxyEditorViewController: UITableViewController {
         return port
     }
 
-    private func setNowherePortSeparation(_ enabled: Bool) {
-        if enabled {
-            if let port = validNowherePort(serverPort) {
-                nowhereTCPPort = String(port)
-                nowhereUDPPort = String(port)
-            }
-        } else if let port = validNowherePort(nowhereTCPPort) ?? validNowherePort(nowhereUDPPort) {
-            serverPort = String(port)
-        }
-        nowhereSeparatePorts = enabled
-    }
 }

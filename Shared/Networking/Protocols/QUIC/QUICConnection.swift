@@ -14,6 +14,7 @@ nonisolated final class QUICConnection: Sendable {
     struct Handlers: Sendable {
         var streamData: (@Sendable (Int64, Data, Bool) -> Void)?
         var streamTermination: (@Sendable (Int64, Error?, StreamTerminationCause) -> Void)?
+        var streamSendingStopped: (@Sendable (Int64, Error) -> Void)?
         var datagram: (@Sendable (Data) -> Void)?
         var connectionClosed: (@Sendable (Error) -> Void)?
         var bidiCredit: (@Sendable (UInt64) -> Void)?

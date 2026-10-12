@@ -45,7 +45,7 @@ Most iOS proxy clients wrap sing-box or Xray-core in a Go/C++ bridge. Anywhere t
 
 | Protocol | Highlights |
 | --- | --- |
-| **[Nowhere](https://github.com/NodePassProject/Nowhere)** | Independent upload and download carriers over TLS or QUIC · Morph masking · credit-scheduled multiplexing over TLS · early data on flow open · UDP over QUIC DATAGRAM |
+| **[Nowhere](https://github.com/NodePassProject/Nowhere)** | TCP and UDP forwarding over TLS 1.3 or QUIC · Morph masking · dedicated TLS flows · QUIC streams and QUIC DATAGRAM |
 | **VLESS** | VLESS Encryption · XTLS-RPRX-Vision · Reality with browser fingerprints · WebSocket, HTTPUpgrade, gRPC, and XHTTP transports · XHTTP over HTTP/1.1, HTTP/2, and HTTP/3 with upload/download detach and XMUX · XUDP |
 | **Hysteria2** | Brutal congestion control · Salamander and Gecko obfuscation · UDP over QUIC DATAGRAM |
 | **Sudoku** | Payload encoded as Sudoku-grid hints with per-direction ASCII or entropy layouts and randomly selected custom tables · KIP X25519 handshake with session rekeying · HTTP masquerade in legacy, stream, poll, and WebSocket modes · pure-downlink mode · native multiplexing |
@@ -146,7 +146,7 @@ Link from a webpage:
 Open from another iOS app:
 
 ```swift
-if let url = URL(string: "anywhere://add-proxy?link=nowhere://key@host:443?up=udp&down=udp") {
+if let url = URL(string: "anywhere://add-proxy?link=nowhere://0123456789abcdef0123456789abcdef@host:443?net=udp&morph=1") {
     UIApplication.shared.open(url)
 }
 ```
