@@ -19,6 +19,7 @@ extension Constants {
     static let lastAckTimeout: UInt32 = 10
     static let timeWaitTimeout: UInt32 = 10
     static let arenaReclaimDelay: UInt32 = 10
+    static let pumpSliceBytes = 128 * 1024
     static let receiveChunkSize = 64 * 1024
     static let minimumReceiveChunkSize = 16 * 1024
     static let receiveSealDelay: UInt32 = 1

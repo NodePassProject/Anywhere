@@ -149,6 +149,10 @@ final class ControlBlock {
         unsent.count + unacked.count
     }
 
+    var hasUnsentData: Bool {
+        !unsent.isEmpty
+    }
+
     @discardableResult
     func write(_ bytes: UnsafeRawBufferPointer) -> Int {
         guard isAttached, let base = bytes.baseAddress else { return 0 }

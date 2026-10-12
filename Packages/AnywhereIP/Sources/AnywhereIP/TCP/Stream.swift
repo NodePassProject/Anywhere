@@ -16,6 +16,7 @@ public final class Stream: Sendable {
         case ready
         case remove
         case delayAcknowledgment
+        case startOutput
         case wake(CheckedContinuation<Void, Never>)
     }
 
@@ -96,6 +97,8 @@ public final class Stream: Sendable {
         var acknowledgmentQueued = false
         var publications: [Publication] = []
         var draining = false
+        var outputDeferred = false
+        var outputRunning = false
 
         init(packet: InboundTCP, initialSequenceNumber: UInt32, ticks: UInt32, pendingLimit: Int, delaysAcknowledgment: Bool, growth: GrowthPolicy) {
             let context = Context(key: packet.key, initialSequenceNumber: initialSequenceNumber, ticks: ticks)
@@ -223,11 +226,13 @@ public final class Stream: Sendable {
 
         mutating func pump() {
             guard !ended else { return }
-            while let first = pending.first {
+            var budget = Constants.pumpSliceBytes
+            while budget > 0, let first = pending.first {
                 let written = first.withUnsafeBytes { bytes in
-                    core.write(UnsafeRawBufferPointer(rebasing: bytes[pendingOffset...]))
+                    core.write(UnsafeRawBufferPointer(rebasing: bytes[pendingOffset..<min(bytes.count, pendingOffset + budget)]))
                 }
                 guard written > 0 else { break }
+                budget -= written
                 pendingOffset += written
                 pendingBytes -= written
                 if pendingOffset == first.count {
@@ -243,6 +248,23 @@ public final class Stream: Sendable {
             core.output()
             harvest()
             wakeWriters()
+            if budget == 0, !pending.isEmpty, core.sendBufferSpace > 0 { deferOutput() }
+        }
+
+        mutating func deferOutput() {
+            outputDeferred = true
+            guard !outputRunning else { return }
+            outputRunning = true
+            publications.append(.startOutput)
+        }
+
+        mutating func pumpFromInput() {
+            guard !ended else { return }
+            if pending.isEmpty && !core.hasUnsentData {
+                pump()
+            } else {
+                deferOutput()
+            }
         }
 
         mutating func read() -> Outcome<Data?> {
@@ -364,11 +386,29 @@ public final class Stream: Sendable {
                 case .ready: ready(PendingConnection(stream: self))
                 case .remove: removed(self)
                 case .delayAcknowledgment: delayAcknowledgment(self)
+                case .startOutput: Task.detached(priority: Task.currentPriority) { self.runDeferredOutput() }
                 case .wake(let continuation): continuation.resume()
                 }
             }
             if !packets.isEmpty { output(packets) }
             batch.removeAll(keepingCapacity: true)
+        }
+    }
+
+    private func runDeferredOutput() {
+        while true {
+            update { state in
+                state.outputDeferred = false
+                state.pump()
+            }
+            let again = state.withLock { state in
+                guard state.outputDeferred, !state.ended else {
+                    state.outputRunning = false
+                    return false
+                }
+                return true
+            }
+            if !again { return }
         }
     }
 
@@ -438,7 +478,7 @@ public final class Stream: Sendable {
             }
             core.stack.batching = false
             state.harvest()
-            state.pump()
+            state.pumpFromInput()
             return processed
         }
     }
