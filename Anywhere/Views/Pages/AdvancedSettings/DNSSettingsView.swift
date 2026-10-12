@@ -49,6 +49,9 @@ struct DNSSettingsView: View {
             }
 
             Section("Local Requests") {
+                NavigationLink("Host Mappings") {
+                    HostMappingsView()
+                }
                 Picker("Resolver", selection: $settings.localRequestDNSMode) {
                     ForEach(DNSMode.allCases, id: \.self) { mode in
                         Text(mode.title).tag(mode)
@@ -61,9 +64,6 @@ struct DNSSettingsView: View {
                     plainRow($drafts.localRequestPlain)
                 case .doh:
                     dohRow($drafts.localRequestDoH)
-                }
-                NavigationLink("Host Mappings") {
-                    HostMappingsView()
                 }
             }
 
