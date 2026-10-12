@@ -23,8 +23,21 @@ extension TunnelStack {
     nonisolated func drainOutput() {
         var packets: [OutboundPacket] = []
         while let writer = outputBuffer.withLock({ $0.take(&packets) }) {
-            writer.write(packets)
+            var start = 0
+            while start < packets.count {
+                let end = min(start + TunnelConstants.outputWriteLimit, packets.count)
+                write(packets[start..<end], to: writer)
+                start = end
+            }
             packets.removeAll(keepingCapacity: true)
+        }
+    }
+
+    private nonisolated func write(_ packets: ArraySlice<OutboundPacket>, to writer: PacketFlowWriter) {
+        var attempt = 0
+        while !writer.write(packets), attempt < TunnelConstants.outputRetryLimit {
+            attempt += 1
+            usleep(UInt32(TunnelConstants.outputRetryDelayMicroseconds * attempt))
         }
     }
 
@@ -52,21 +65,42 @@ extension TunnelStack {
 
     // MARK: - Packet Reading
 
+    private static let inboundMergeLimit = 256
+
     nonisolated func runReadLoop(packetFlow: NEPacketTunnelFlow, udpPlane: UDPPlane) async {
         let intake = AsyncInbox<[InboundDatagram]>(capacity: TunnelConstants.udpIntakeBacklog)
         datagramIntake.withLock { $0 = intake }
-        let reader = PacketReader(flow: packetFlow) { [weak self] packets in
-            self?.processInbound(packets)
-        }
+        let queue = InboundQueue(limit: TunnelConstants.inboundQueueLimit)
+        let reader = PacketReader(flow: packetFlow) { batch in queue.push(batch) }
         await withDiscardingTaskGroup { group in
             group.addTask {
                 while let batches = try? await intake.nextBatch() {
                     await udpPlane.feed(batches.count == 1 ? batches[0] : Array(batches.joined()))
                 }
             }
+            group.addTask { await self.runInboundProcessing(queue: queue, reader: reader) }
             await reader.run()
+            queue.finish()
             datagramIntake.withLock { if $0 === intake { $0 = nil } }
             intake.finish()
+        }
+    }
+
+    @concurrent
+    private nonisolated func runInboundProcessing(queue: InboundQueue, reader: PacketReader) async {
+        var packets: [UnsafeRawBufferPointer] = []
+        packets.reserveCapacity(Self.inboundMergeLimit)
+        while let batches = await queue.next() {
+            var index = 0
+            while index < batches.count {
+                packets.removeAll(keepingCapacity: true)
+                repeat {
+                    packets.append(contentsOf: batches[index].packets)
+                    index += 1
+                } while index < batches.count && packets.count + batches[index].packets.count <= Self.inboundMergeLimit
+                processInbound(packets)
+            }
+            if queue.didConsume(batches) { reader.resume() }
         }
     }
 

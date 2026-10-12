@@ -17,6 +17,16 @@ nonisolated enum TunnelConstants {
     static let sniffDeadline: TimeInterval = 0.5
     static let pressureIdleTimeout: TimeInterval = 10
 
+    // MARK: - Inbound Queue
+
+    static let inboundQueueLimit = 2 * 1024 * 1024
+
+    // MARK: - Output Writes
+
+    static let outputWriteLimit = 64
+    static let outputRetryLimit = 8
+    static let outputRetryDelayMicroseconds = 50
+
     // MARK: - TCP Buffer Sizes
     
     static let tcpGlobalBufferBudget = 16 * 1024 * 1024
