@@ -13,40 +13,33 @@ struct LaunchpadView: View {
     @Environment(ConnectionStats.self) private var connectionStats
 
     @State private var connectionEffectsEnabled = false
-    @State private var page = 0
 
     private var isConnected: Bool {
         tunnelController.rawStatus == .connected
     }
 
     var body: some View {
-        PageView(selection: $page) {
-            MainControlView(connectionEffectsEnabled: connectionEffectsEnabled)
-                .pageIndicator(label: "Main Control")
-            
-            DashboardView()
-                .pageIndicator(label: "Dashboard")
-        }
-        .background(
-            BackgroundGradient()
-                .ignoresSafeArea()
-        )
-        .sensoryFeedback(trigger: isConnected) { _, _ in
-            guard connectionEffectsEnabled else { return nil }
-            return .impact
-        }
-        .alert("VPN Error", isPresented: Binding(
-            get: { tunnelController.startError != nil },
-            set: { if !$0 { tunnelController.startError = nil } }
-        )) {
-            Button("OK") { tunnelController.startError = nil }
-        } message: {
-            Text(tunnelController.startError ?? "")
-        }
-        .onChange(of: tunnelController.isManagerReady, initial: true) { _, ready in
-            guard ready, !connectionEffectsEnabled else { return }
-            Task { @MainActor in connectionEffectsEnabled = true }
-        }
+        MainControlView(connectionEffectsEnabled: connectionEffectsEnabled)
+            .background(
+                BackgroundGradient()
+                    .ignoresSafeArea()
+            )
+            .sensoryFeedback(trigger: isConnected) { _, _ in
+                guard connectionEffectsEnabled else { return nil }
+                return .impact
+            }
+            .alert("VPN Error", isPresented: Binding(
+                get: { tunnelController.startError != nil },
+                set: { if !$0 { tunnelController.startError = nil } }
+            )) {
+                Button("OK") { tunnelController.startError = nil }
+            } message: {
+                Text(tunnelController.startError ?? "")
+            }
+            .onChange(of: tunnelController.isManagerReady, initial: true) { _, ready in
+                guard ready, !connectionEffectsEnabled else { return }
+                Task { @MainActor in connectionEffectsEnabled = true }
+            }
     }
 }
 
@@ -74,6 +67,5 @@ struct LaunchpadView: View {
         .environment(container.groupStore)
         .environment(container.subscriptionStore)
         .environment(ConnectionStats.previewSeeded())
-        .colorScheme(.dark)
 }
 #endif

@@ -77,6 +77,10 @@ struct DashboardView: View {
                 }
             }
         }
+        .background(
+            BackgroundGradient()
+                .ignoresSafeArea()
+        )
     }
 }
 
@@ -93,7 +97,6 @@ struct DashboardView: View {
         .environment(container.configurationStore)
         .environment(container.chainStore)
         .environment(ConnectionStats.previewSeeded())
-        .colorScheme(.dark)
 }
 
 #Preview("Disconnected") {
@@ -105,6 +108,5 @@ struct DashboardView: View {
         .environment(container.configurationStore)
         .environment(container.chainStore)
         .environment(ConnectionStats.previewSeeded())
-        .colorScheme(.dark)
 }
 #endif

@@ -406,6 +406,5 @@ private struct ProminentCircle<Content: View>: View {
         .environment(container.groupStore)
         .environment(container.subscriptionStore)
         .environment(ConnectionStats.previewSeeded())
-        .colorScheme(.dark)
 }
 #endif

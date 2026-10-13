@@ -9,6 +9,7 @@ import Foundation
 
 enum Page: Equatable, Hashable, Identifiable, CaseIterable {
     case launchpad
+    case dashboard
     case toolbox
     case data
     case personalization
@@ -25,24 +26,26 @@ enum Page: Equatable, Hashable, Identifiable, CaseIterable {
     var id: Int {
         switch self {
         case .launchpad: 0
-        case .toolbox: 1
-        case .data: 2
-        case .personalization: 3
-        case .tunnel: 4
-        case .purify: 5
-        case .routing: 6
-        case .mitm: 7
-        case .modules: 8
-        case .trustedCertificates: 9
-        case .trustedNetwork: 10
-        case .diagnosis: 11
-        case .about: 12
+        case .dashboard: 1
+        case .toolbox: 2
+        case .data: 3
+        case .personalization: 4
+        case .tunnel: 5
+        case .purify: 6
+        case .routing: 7
+        case .mitm: 8
+        case .modules: 9
+        case .trustedCertificates: 10
+        case .trustedNetwork: 11
+        case .diagnosis: 12
+        case .about: 13
         }
     }
     
     var name: String {
         switch self {
         case .launchpad: String(localized: "Launchpad")
+        case .dashboard: String(localized: "Dashboard")
         case .toolbox: String(localized: "Toolbox")
         case .data: String(localized: "Data")
         case .personalization: String(localized: "Personalization")
@@ -61,6 +64,7 @@ enum Page: Equatable, Hashable, Identifiable, CaseIterable {
     var symbol: String {
         switch self {
         case .launchpad: "anywhere"
+        case .dashboard: "rectangle.3.group"
         case .toolbox: "latch.2.case"
         case .data: "cylinder.split.1x2"
         case .personalization: "paintpalette"
