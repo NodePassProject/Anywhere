@@ -531,12 +531,12 @@ struct ProxiesView: View {
             }
             Section {
                 Button {
-                    if let configuration = config(item.id) { UIPasteboard.general.string = configuration.toURL() }
+                    if let configuration = config(item.id) { UIPasteboard.general.string = configuration.toURLString() }
                 } label: {
                     Label("Copy Link", systemImage: "doc.on.doc")
                 }
-                if let link = config(item.id)?.toURL(), !link.isEmpty {
-                    ShareLink(item: link, preview: SharePreview(item.name)) {
+                if let urlString = config(item.id)?.toURLString(), let url = URL(string: urlString) {
+                    ShareLink(item: url, preview: SharePreview(item.name)) {
                         Label("Share", systemImage: "square.and.arrow.up")
                     }
                 }

@@ -18,30 +18,30 @@ extension ProxyConfiguration {
         return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
     }
 
-    func toURL() -> String {
+    func toURLString() -> String {
         switch outboundProtocol {
         case .nowhere:
-            return toNowhereURL()
+            return toNowhereURLString()
         case .vless:
-            return toVLESSURL()
+            return toVLESSURLString()
         case .hysteria:
-            return toHysteriaURL()
+            return toHysteriaURLString()
         case .sudoku:
-            return toSudokuURL()
+            return toSudokuURLString()
         case .trojan:
-            return toTrojanURL()
+            return toTrojanURLString()
         case .anytls:
-            return toAnyTLSURL()
+            return toAnyTLSURLString()
         case .shadowsocks:
-            return toShadowsocksURL()
+            return toShadowsocksURLString()
         case .socks5:
-            return toSOCKS5URL()
+            return toSOCKS5URLString()
         case .rfc:
-            return toRFCURL()
+            return toRFCURLString()
         }
     }
 
-    private func toNowhereURL() -> String {
+    private func toNowhereURLString() -> String {
         guard case .nowhere(let configuration) = outbound else {
             return ""
         }
@@ -52,7 +52,7 @@ extension ProxyConfiguration {
         return "nowhere://\(encodedKey)@\(bracketedServerAddress):\(serverPort)?\(parameters.joined(separator: "&"))#\(fragment)"
     }
 
-    private func toVLESSURL() -> String {
+    private func toVLESSURLString() -> String {
         guard case .vless(let vless) = outbound else { return "" }
         var parameters: [String] = []
 
@@ -149,7 +149,7 @@ extension ProxyConfiguration {
         }
     }
     
-    private func toHysteriaURL() -> String {
+    private func toHysteriaURLString() -> String {
         guard case .hysteria(let configuration) = outbound else {
             return ""
         }
@@ -175,7 +175,7 @@ extension ProxyConfiguration {
         return "hysteria2://\(encodedPassword)@\(bracketedServerAddress):\(serverPort)/\(query)#\(fragment)"
     }
     
-    private func toSudokuURL() -> String {
+    private func toSudokuURLString() -> String {
         guard case .sudoku(let configuration) = outbound else { return "sudoku://" }
         var payload: [String: Any] = [
             "h": serverAddress,
@@ -201,7 +201,7 @@ extension ProxyConfiguration {
         return "sudoku://\(data.base64URLEncodedString())"
     }
 
-    private func toTrojanURL() -> String {
+    private func toTrojanURLString() -> String {
         guard case .trojan(let configuration) = outbound,
               let tls = configuration.tlsConfiguration else { return "" }
         let encodedPassword = configuration.password.addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
@@ -224,7 +224,7 @@ extension ProxyConfiguration {
         return "trojan://\(encodedPassword)@\(bracketedServerAddress):\(serverPort)\(query)#\(fragment)"
     }
 
-    private func toAnyTLSURL() -> String {
+    private func toAnyTLSURLString() -> String {
         guard case .anytls(let configuration) = outbound,
               let tls = configuration.tlsConfiguration else { return "" }
         let encodedPassword = configuration.password.addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
@@ -256,7 +256,7 @@ extension ProxyConfiguration {
         return "anytls://\(encodedPassword)@\(bracketedServerAddress):\(serverPort)\(query)#\(fragment)"
     }
 
-    private func toShadowsocksURL() -> String {
+    private func toShadowsocksURLString() -> String {
         guard case .shadowsocks(let configuration) = outbound else {
             return "ss://invalid"
         }
@@ -268,7 +268,7 @@ extension ProxyConfiguration {
         return "ss://\(encoded)@\(bracketedServerAddress):\(serverPort)/#\(fragment)"
     }
 
-    private func toSOCKS5URL() -> String {
+    private func toSOCKS5URLString() -> String {
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
         if case .socks5(let configuration) = outbound, let user = configuration.username, !user.isEmpty {
             let encodedUser = user.addingPercentEncoding(withAllowedCharacters: .urlUserAllowed) ?? user
@@ -278,7 +278,7 @@ extension ProxyConfiguration {
         return "socks5://\(bracketedServerAddress):\(serverPort)#\(fragment)"
     }
     
-    private func toRFCURL() -> String {
+    private func toRFCURLString() -> String {
         guard case .rfc(let configuration) = outbound else { return "" }
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
         
