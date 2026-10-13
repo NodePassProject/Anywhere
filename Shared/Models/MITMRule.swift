@@ -575,8 +575,6 @@ nonisolated struct MITMRuleSet: Codable, Equatable, Identifiable, SoftDeletable 
 nonisolated struct MITMSnapshot: Codable, Equatable {
     var ruleSets: [MITMRuleSet]
 
-    static let empty = MITMSnapshot(ruleSets: [])
-    
     var liveRuleSets: [MITMRuleSet] { ruleSets.filter { $0.deletedAt == nil } }
 
     init(ruleSets: [MITMRuleSet]) {
@@ -596,39 +594,6 @@ nonisolated struct MITMSnapshot: Codable, Equatable {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(ruleSets, forKey: .ruleSets)
     }
-    
-    nonisolated static func decode(from data: Data?) -> MITMSnapshot {
-        if let data {
-            if let snapshot = try? JSONDecoder().decode(MITMSnapshot.self, from: data) {
-                return snapshot
-            }
-            SyncStore.quarantine(.mitm, data)
-        }
-        if let data = legacyDefaultsBlob(),
-           let snapshot = try? JSONDecoder().decode(MITMSnapshot.self, from: data) {
-            return snapshot
-        }
-        return .empty
-    }
-    
-    nonisolated static func legacyEnabled(in data: Data?) -> Bool {
-        struct LegacyToggle: Decodable { var enabled: Bool? }
-        let decoder = JSONDecoder()
-        for candidate in [data, legacyDefaultsBlob()] {
-            guard let candidate,
-                  let legacy = try? decoder.decode(LegacyToggle.self, from: candidate),
-                  let enabled = legacy.enabled
-            else { continue }
-            return enabled
-        }
-        return false
-    }
-
-    private static func legacyDefaultsBlob() -> Data? {
-        UserDefaults(suiteName: AWCore.Identifier.appGroupSuite)?.data(forKey: legacyMITMDefaultsKey)
-    }
-
-    private static let legacyMITMDefaultsKey = "mitmData"
     
     @discardableResult
     func exportBinaryToAppGroup() -> Bool {

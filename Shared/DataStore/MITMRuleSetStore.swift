@@ -12,13 +12,7 @@ import SwiftUI
 @MainActor
 @Observable
 final class MITMRuleSetStore {
-    var enabled: Bool {
-        didSet {
-            guard enabled != oldValue else { return }
-            AWCore.setMITMEnabled(enabled)
-        }
-    }
-
+    private(set) var enabled: Bool
     private(set) var ruleSets: [MITMRuleSet]
     private var tombstones: [MITMRuleSet] = []
 
@@ -30,18 +24,8 @@ final class MITMRuleSetStore {
         self.syncStore = syncStore
         let items = syncStore.loadItems(.mitm)
         loadedItems = items
-        var ruleSets = SyncCodec.decodeItems(MITMRuleSet.self, key: .mitm, payloads: items)
-        if items.isEmpty || !AWCore.hasMITMEnabled() {
-            let legacyBlob = syncStore.legacyNewestBlobData(.mitm)
-            if items.isEmpty {
-                ruleSets = MITMSnapshot.decode(from: legacyBlob).ruleSets
-            }
-            if !AWCore.hasMITMEnabled() {
-                AWCore.setMITMEnabled(MITMSnapshot.legacyEnabled(in: legacyBlob))
-            }
-        }
         self.enabled = AWCore.getMITMEnabled()
-        let split = Tombstone.split(ruleSets)
+        let split = Tombstone.split(SyncCodec.decodeItems(MITMRuleSet.self, key: .mitm, payloads: items))
         self.ruleSets = split.live
         self.tombstones = split.tombstones
     }
@@ -64,6 +48,14 @@ final class MITMRuleSetStore {
             tombstones = split.tombstones
             return
         }
+    }
+
+    // MARK: - Master toggle
+
+    func setEnabled(_ enabled: Bool) {
+        guard self.enabled != enabled else { return }
+        self.enabled = enabled
+        AWCore.setMITMEnabled(enabled)
     }
 
     // MARK: - Rule set CRUD

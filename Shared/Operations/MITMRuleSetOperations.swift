@@ -13,7 +13,7 @@ struct MITMRuleSetOperations {
     let mitmExportScheduler: MITMExportScheduler
 
     func setEnabled(_ enabled: Bool) {
-        mitmRuleSetStore.enabled = enabled
+        mitmRuleSetStore.setEnabled(enabled)
         mitmExportScheduler.schedule()
     }
 

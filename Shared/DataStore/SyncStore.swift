@@ -578,14 +578,6 @@ nonisolated final class SyncStore: Sendable {
         }
     }
 
-    func legacyNewestBlobData(_ key: Key) -> Data? {
-        store.withLock { container in
-            guard let container else { return nil }
-            let context = ModelContext(container)
-            return Self.fetchBlobs(key, in: context).max { $0.updatedAt < $1.updatedAt }?.data
-        }
-    }
-
     static func legacyFingerprint(of rows: [LegacyBlobRow]) -> [String] {
         rows.map { "\($0.deviceID)#\($0.updatedAt.timeIntervalSinceReferenceDate)" }.sorted()
     }

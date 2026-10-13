@@ -542,16 +542,22 @@ actor TunnelStack {
 
     func loadMITMSetting() {
         guard let data = AWCore.getMITMData(),
-              let snapshot = MITMBinaryReader.decode(data) else {
+              let snapshot = MITMBinaryReader.decode(data),
+              snapshot.enabled else {
             _mitmEnabled.store(false, ordering: .relaxed)
             mitmPolicy.reset()
             return
         }
-        _mitmEnabled.store(snapshot.enabled, ordering: .relaxed)
-        if snapshot.enabled {
-            mitmPolicy.load(ruleSets: snapshot.ruleSets)
-        } else {
-            mitmPolicy.reset()
+        if mitmCertificateStore.reloadCA() {
+            _mitmLeafCache.withLock { $0 = nil }
         }
+        guard mitmCertificateStore.isCATrusted() else {
+            logger.warning("[VPN] MITM is enabled but the root certificate is not installed or trusted; MITM stays off")
+            _mitmEnabled.store(false, ordering: .relaxed)
+            mitmPolicy.reset()
+            return
+        }
+        _mitmEnabled.store(true, ordering: .relaxed)
+        mitmPolicy.load(ruleSets: snapshot.ruleSets)
     }
 }

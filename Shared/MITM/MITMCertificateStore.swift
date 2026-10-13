@@ -57,6 +57,14 @@ nonisolated final class MITMCertificateStore: Sendable {
         cachedCA.withLock { cache in try? loadCACachedUnlocked(&cache) }
     }
     
+    func reloadCA() -> Bool {
+        cachedCA.withLock { cache in
+            let previous = cache?.certificateDER
+            cache = nil
+            return (try? loadCACachedUnlocked(&cache))?.certificateDER != previous
+        }
+    }
+    
     @discardableResult
     func regenerate() throws -> CA {
         try cachedCA.withLock { cache in

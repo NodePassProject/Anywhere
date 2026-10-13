@@ -20,13 +20,15 @@ final class MITMCertificateController {
     private(set) var trusted: Bool = false
 
     init() {
-        refresh()
+        (hasCA, trusted) = currentState()
     }
 
     func refresh() {
-        let exists = store.exportCertificateDER() != nil
+        let (exists, isTrusted) = currentState()
+        guard exists != hasCA || isTrusted != trusted else { return }
         hasCA = exists
-        trusted = exists ? store.isCATrusted() : false
+        trusted = isTrusted
+        AWNotificationCenter.notifyMITMChanged()
     }
 
     func ensureCA() throws {
@@ -50,6 +52,11 @@ final class MITMCertificateController {
 
     func mobileConfigData() -> Data? {
         store.exportMobileConfig()
+    }
+
+    private func currentState() -> (hasCA: Bool, trusted: Bool) {
+        let exists = store.exportCertificateDER() != nil
+        return (exists, exists && store.isCATrusted())
     }
 }
 

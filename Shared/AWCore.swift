@@ -668,10 +668,4 @@ nonisolated final class AWCore {
     static func setMITMEnabled(_ value: Bool) {
         userDefaults.set(value, forKey: UserDefaultsKey.mitmEnabled)
     }
-
-    /// False until the toggle has been written locally at least once — the cue for the
-    /// one-time migration off the synced blob (see `MITMRuleSetStore.init`).
-    static func hasMITMEnabled() -> Bool {
-        userDefaults.object(forKey: UserDefaultsKey.mitmEnabled) != nil
-    }
 }
