@@ -21,12 +21,14 @@ struct PageView<Content: View>: View {
                 ScrollView(.horizontal) {
                     HStack(spacing: 0) {
                         ForEach(subviews.indices, id: \.self) { index in
-                            PageHost(bottomInset: indicatorHeight) {
+                            PageHost(
+                                leadingInset: safeAreaInsets.leading,
+                                trailingInset: safeAreaInsets.trailing,
+                                bottomInset: indicatorHeight
+                            ) {
                                 subviews[index]
                             }
                             .ignoresSafeArea(.container, edges: .vertical)
-                            .padding(.leading, safeAreaInsets.leading)
-                            .padding(.trailing, safeAreaInsets.trailing)
                             .containerRelativeFrame(.horizontal)
                             .id(index)
                         }
@@ -87,23 +89,35 @@ private final class PageProgress {
 }
 
 private struct PageHost<Page: View>: UIViewControllerRepresentable {
+    let leadingInset: CGFloat
+    let trailingInset: CGFloat
     let bottomInset: CGFloat
     @ViewBuilder let page: Page
 
     func makeUIViewController(context: Context) -> UIHostingController<AnyView> {
         let controller = UIHostingController(rootView: rootView(context))
         controller.view.backgroundColor = .clear
-        controller.additionalSafeAreaInsets.bottom = bottomInset
+        controller.additionalSafeAreaInsets = additionalSafeAreaInsets(context)
         return controller
     }
 
     func updateUIViewController(_ controller: UIHostingController<AnyView>, context: Context) {
         controller.rootView = rootView(context)
-        controller.additionalSafeAreaInsets.bottom = bottomInset
+        controller.additionalSafeAreaInsets = additionalSafeAreaInsets(context)
     }
 
     private func rootView(_ context: Context) -> AnyView {
         AnyView(page.environment(\.self, context.environment))
+    }
+
+    private func additionalSafeAreaInsets(_ context: Context) -> UIEdgeInsets {
+        let isRightToLeft = context.environment.layoutDirection == .rightToLeft
+        return UIEdgeInsets(
+            top: 0,
+            left: isRightToLeft ? trailingInset : leadingInset,
+            bottom: bottomInset,
+            right: isRightToLeft ? leadingInset : trailingInset
+        )
     }
 }
 

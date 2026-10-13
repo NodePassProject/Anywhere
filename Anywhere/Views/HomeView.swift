@@ -25,7 +25,7 @@ struct HomeView: View {
                 ToolboxView()
             }
             
-            if horizontalSizeClass != .compact {
+            if horizontalSizeClass != .compact, UIDevice.current.userInterfaceIdiom != .phone {
                 TabSection {
                     Tab(Page.data.name, systemImage: Page.data.symbol, value: Page.data) {
                         DataView()
