@@ -11,6 +11,7 @@ struct ContentView: View {
     @Environment(AppState.self) private var appState
     @Environment(AppSettings.self) private var settings
     @Environment(Operations.self) private var operations
+    @Environment(MITMRuleSetStore.self) private var mitmRuleSetStore
     @Environment(DeepLinkManager.self) private var deepLinkManager
     @State private var onboardingCompleted = AWCore.getOnboardingCompleted()
     @State private var showingDeepLinkAddSheet = false
@@ -34,6 +35,7 @@ struct ContentView: View {
                 .sheet(isPresented: $showingDeepLinkAddSheet, onDismiss: { pendingDeepLinkURL = nil }) {
                     DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
                         AddProxyView(showingManualAddSheet: $showingManualAddSheet, deepLinkURL: pendingDeepLinkURL)
+                            .environment(operations)
                     }
                 }
                 .sheet(isPresented: $showingManualAddSheet) {
@@ -45,11 +47,15 @@ struct ContentView: View {
                 .sheet(isPresented: $showingImportRuleSetSheet, onDismiss: { pendingRuleSetLink = nil }) {
                     if let link = pendingRuleSetLink {
                         ImportRuleSetView(link: link)
+                            .environment(operations)
+                            .environment(mitmRuleSetStore)
                     }
                 }
                 .sheet(isPresented: $showingImportModuleSheet, onDismiss: { pendingModuleLink = nil }) {
                     if let link = pendingModuleLink {
                         ImportModuleView(link: link)
+                            .environment(operations)
+                            .environment(mitmRuleSetStore)
                     }
                 }
                 .alert(String(localized: "Routing Rules Updated"), isPresented: showOrphanedAlert) {
