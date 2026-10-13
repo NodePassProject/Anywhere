@@ -323,7 +323,7 @@ final class ControlBlock {
         var oversize = unsentOversize
         var position = 0
         if let last = unsent.last, oversize > 0 {
-            position = min(segmentSize - last.length, min(oversize, length))
+            position = min(oversize, max(0, segmentSize - last.length), length)
             oversize -= position
         }
         guard sendQueueLength + (length - position + segmentSize - 1) / segmentSize <= sendQueueLimit else { return false }
