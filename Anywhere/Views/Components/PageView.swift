@@ -94,23 +94,23 @@ private struct PageHost<Page: View>: UIViewControllerRepresentable {
     let bottomInset: CGFloat
     @ViewBuilder let page: Page
 
-    func makeUIViewController(context: Context) -> UIHostingController<AnyView> {
-        let controller = UIHostingController(rootView: rootView(context))
+    func makeUIViewController(context: Context) -> PageHostingController {
+        let controller = PageHostingController(rootView: rootView(context))
         controller.view.backgroundColor = .clear
-        controller.additionalSafeAreaInsets = additionalSafeAreaInsets(context)
+        controller.targetSafeAreaInsets = targetSafeAreaInsets(context)
         return controller
     }
 
-    func updateUIViewController(_ controller: UIHostingController<AnyView>, context: Context) {
+    func updateUIViewController(_ controller: PageHostingController, context: Context) {
         controller.rootView = rootView(context)
-        controller.additionalSafeAreaInsets = additionalSafeAreaInsets(context)
+        controller.targetSafeAreaInsets = targetSafeAreaInsets(context)
     }
 
     private func rootView(_ context: Context) -> AnyView {
         AnyView(page.environment(\.self, context.environment))
     }
 
-    private func additionalSafeAreaInsets(_ context: Context) -> UIEdgeInsets {
+    private func targetSafeAreaInsets(_ context: Context) -> UIEdgeInsets {
         let isRightToLeft = context.environment.layoutDirection == .rightToLeft
         return UIEdgeInsets(
             top: 0,
@@ -118,6 +118,31 @@ private struct PageHost<Page: View>: UIViewControllerRepresentable {
             bottom: bottomInset,
             right: isRightToLeft ? leadingInset : trailingInset
         )
+    }
+}
+
+private final class PageHostingController: UIHostingController<AnyView> {
+    var targetSafeAreaInsets: UIEdgeInsets = .zero {
+        didSet { updateAdditionalSafeAreaInsets() }
+    }
+
+    override func viewSafeAreaInsetsDidChange() {
+        super.viewSafeAreaInsetsDidChange()
+        updateAdditionalSafeAreaInsets()
+    }
+
+    private func updateAdditionalSafeAreaInsets() {
+        let current = view.safeAreaInsets
+        let additional = additionalSafeAreaInsets
+        let insets = UIEdgeInsets(
+            top: targetSafeAreaInsets.top,
+            left: max(0, targetSafeAreaInsets.left - (current.left - additional.left)),
+            bottom: targetSafeAreaInsets.bottom,
+            right: max(0, targetSafeAreaInsets.right - (current.right - additional.right))
+        )
+        if insets != additional {
+            additionalSafeAreaInsets = insets
+        }
     }
 }
 
