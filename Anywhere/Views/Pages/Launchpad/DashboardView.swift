@@ -50,6 +50,8 @@ struct DashboardView: View {
                 }
             }
             .containerBackground(.clear, for: .navigation)
+            .navigationTitle("Dashboard")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 if #available(iOS 27.0, *),
                    !ProcessInfo.processInfo.isiOSAppOnMac /* Workaround */ {
