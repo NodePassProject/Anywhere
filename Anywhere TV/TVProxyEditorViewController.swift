@@ -22,7 +22,7 @@ class TVProxyEditorViewController: UITableViewController {
     private var nowhereKey = ""
     private var nowhereNetwork: NowhereNetwork = .tcp
     private var nowhereMorph = true
-    private var nowhereMorphPrelude: NowhereMorphPrelude = .full8
+    private var nowhereMorphPrelude: NowhereMorphPrelude = .fade
 
     private var vlessUUID = ""
     private var vlessEncryption = "none"

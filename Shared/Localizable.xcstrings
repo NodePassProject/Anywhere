@@ -7902,6 +7902,9 @@
         }
       }
     },
+    "Fading Random" : {
+      "shouldTranslate" : false
+    },
     "Fallback" : {
       "localizations" : {
         "ar" : {

@@ -308,14 +308,26 @@ nonisolated final class NowhereMorphTCPTransport: ByteTransport, Sendable {
                 )
             }
             switch policy {
+            case .fade:
+                let boundaries = try NowhereMorphNonceGenerator.secureRandomBytes(count: 2)
+                let a = 8 + Int(try sampleBelow(boundaries[0], upper: 5))
+                let b = 16 + Int(try sampleBelow(boundaries[1], upper: 17))
+                try prelude.withUnsafeMutableBytes { (bytes: UnsafeMutableRawBufferPointer) in
+                    for index in 0..<a {
+                        bytes[index] = 0x20 + (try sampleBelow(bytes[index], upper: 95))
+                    }
+                    for index in a..<b {
+                        bytes[index] &= 0x7f
+                    }
+                }
+            case .full8:
+                break
             case .low7:
                 prelude.withUnsafeMutableBytes { bytes in
                     for index in bytes.indices {
                         bytes[index] &= 0x7f
                     }
                 }
-            case .full8:
-                break
             }
             let nonce = try NowhereMorphNonceGenerator.secureRandomBytes(
                 count: NowhereMorph.nonceSize
@@ -328,6 +340,15 @@ nonisolated final class NowhereMorphTCPTransport: ByteTransport, Sendable {
             inner.cancel()
             throw error
         }
+    }
+
+    private static func sampleBelow(_ initial: UInt8, upper: UInt8) throws -> UInt8 {
+        let limit = 256 - 256 % Int(upper)
+        var byte = initial
+        while Int(byte) >= limit {
+            byte = try NowhereMorphNonceGenerator.secureRandomBytes(count: 1)[0]
+        }
+        return byte % upper
     }
 
     var isReady: Bool { inner.isReady }

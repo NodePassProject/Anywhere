@@ -13,11 +13,13 @@ nonisolated enum NowhereNetwork: String, Codable, CaseIterable, Sendable {
 }
 
 nonisolated enum NowhereMorphPrelude: String, Codable, CaseIterable, Sendable {
+    case fade
     case full8
     case low7
 
     var displayName: String {
         switch self {
+        case .fade: String(localized: "Fading Random")
         case .full8: String(localized: "8-bit Random")
         case .low7: String(localized: "7-bit Random")
         }
@@ -34,7 +36,7 @@ nonisolated struct NowhereConfiguration: Codable, Hashable, Sendable {
         key: String,
         network: NowhereNetwork = .tcp,
         morph: Bool = true,
-        morphPrelude: NowhereMorphPrelude = .full8
+        morphPrelude: NowhereMorphPrelude = .fade
     ) {
         self.key = key
         self.network = network
@@ -52,7 +54,7 @@ nonisolated struct NowhereConfiguration: Codable, Hashable, Sendable {
             key: try container.decode(String.self, forKey: .key),
             network: try container.decodeIfPresent(NowhereNetwork.self, forKey: .network) ?? .tcp,
             morph: try container.decodeIfPresent(Bool.self, forKey: .morph) ?? true,
-            morphPrelude: try container.decodeIfPresent(NowhereMorphPrelude.self, forKey: .morphPrelude) ?? .full8
+            morphPrelude: try container.decodeIfPresent(NowhereMorphPrelude.self, forKey: .morphPrelude) ?? .fade
         )
     }
 

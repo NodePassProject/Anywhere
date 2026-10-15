@@ -21,7 +21,7 @@ struct ProxyEditorView: View {
     @State private var nowhereKey = ""
     @State private var nowhereNetwork: NowhereNetwork = .tcp
     @State private var nowhereMorph = true
-    @State private var nowhereMorphPrelude: NowhereMorphPrelude = .full8
+    @State private var nowhereMorphPrelude: NowhereMorphPrelude = .fade
 
     @State private var vlessUUID = ""
     @State private var vlessEncryption = "none"
