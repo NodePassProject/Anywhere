@@ -25,7 +25,15 @@ No Electron. No WebView. No sing-box wrapper. Pure protocol implementation from 
 
 ## Why Anywhere?
 
-Most iOS proxy clients wrap sing-box or Xray-core in a Go/C++ bridge. Anywhere takes a different approach — every protocol, every transport, the QUIC stack, and the entire packet tunnel are implemented natively in Swift and C. The result is a smaller binary, lower memory usage, tighter system integration, and no bridging overhead.
+Most iOS proxy clients wrap third party components in a Go/C++ bridge. Anywhere takes a different approach — every protocol, every transport, the QUIC stack, and the entire packet tunnel are implemented natively in Swift and C. The result is a smaller binary, lower memory usage, tighter system integration, and no bridging overhead. The difference is measurable:
+
+<div align="center">
+    <a href="https://resource.anywhere-proxy.com/anywhere-proxy-vs-sing-box.mp4">
+        <img alt="Anywhere Proxy vs sing-box throughput: 9.04 Gbps vs 1.93 Gbps on one stream (4.7× faster), 12.4 Gbps vs 1.86 Gbps on four parallel streams (6.7× faster)" src="https://resource.anywhere-proxy.com/anywhere-proxy-vs-sing-box.png" />
+    </a>
+</div>
+
+Measured with iperf3 3.10.1 on an iPad Pro 11-inch (M1) in 5-second runs, Anywhere Proxy 2.4 sustains **9.04 Gbps** on a single stream and **12.4 Gbps** across four parallel streams, against 1.93 Gbps and 1.86 Gbps for sing-box 1.14 — **4.7×** and **6.7×** faster respectively. Both were the latest releases at the time of testing.
 
 ## Features
 
