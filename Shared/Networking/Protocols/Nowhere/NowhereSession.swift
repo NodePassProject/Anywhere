@@ -62,6 +62,11 @@ nonisolated final class NowhereSession: Sendable {
         }
     }
 
+    private struct TCPRoute {
+        let connection: NowhereConnection
+        var uncreditedBytes = 0
+    }
+
     private struct UDPRoute: PhaseHolding {
         let connection: NowhereUDPConnection
         var phase: UDPRoutePhase = .registering
@@ -105,8 +110,7 @@ nonisolated final class NowhereSession: Sendable {
 
         var cancelledStreamOpenWaiters: Set<UInt64> = []
 
-        var tcpStreams: [Int64: NowhereConnection] = [:]
-        var tcpDeliveredBytes: [Int64: Int] = [:]
+        var tcpStreams: [Int64: TCPRoute] = [:]
         var udpRoutes: [UInt32: UDPRoute] = [:]
         var udpControlStreams: [Int64: NowhereUDPConnection] = [:]
         var reassembly: [ReassemblyKey: ReassemblySlot] = [:]
@@ -159,7 +163,7 @@ nonisolated final class NowhereSession: Sendable {
             morphObfuscator = nil
         }
         let quic = QUICConnection(
-            host: configuration.proxyHost,
+            host: configuration.connectHost,
             port: configuration.proxyPort,
             serverName: configuration.proxyHost,
             alpn: [NowhereProtocol.applicationProtocol],
@@ -278,9 +282,9 @@ nonisolated final class NowhereSession: Sendable {
     private func handleStreamData(sid: Int64, data: Data, fin: Bool) {
         enum Route { case tcp(NowhereConnection); case udpControl(NowhereUDPConnection); case violation; case orphanData; case ignore }
         let route: Route = state.withLock { session in
-            if let connection = session.tcpStreams[sid] {
-                if !data.isEmpty { session.tcpDeliveredBytes[sid, default: 0] += data.count }
-                return .tcp(connection)
+            if let route = session.tcpStreams[sid] {
+                session.tcpStreams[sid]?.uncreditedBytes += data.count
+                return .tcp(route.connection)
             }
             if let connection = session.udpControlStreams[sid] { return .udpControl(connection) }
             if sid == session.firstStreamID {
@@ -315,7 +319,7 @@ nonisolated final class NowhereSession: Sendable {
                 if let error { return .failAuth(error) }
                 return .none
             }
-            if let connection = session.tcpStreams.removeValue(forKey: sid) { return .tcp(connection) }
+            if let route = session.tcpStreams[sid] { return .tcp(route.connection) }
             if let connection = session.udpControlStreams.removeValue(forKey: sid) { return .udpControl(connection) }
             return .none
         }
@@ -325,7 +329,6 @@ nonisolated final class NowhereSession: Sendable {
         case .failAuth(let error):
             failSession(error)
         case .tcp(let connection):
-            updateIdleCloseTimer()
             connection.handleStreamTermination(error: error)
         case .udpControl(let connection):
             connection.handleControlStreamTermination(error: error)
@@ -335,12 +338,11 @@ nonisolated final class NowhereSession: Sendable {
     // MARK: - Datagram dispatch (UDP)
 
     private func handleDatagram(_ data: Data) {
-        guard let envelope = NowhereProtocol.decodeUDPEnvelope(data),
-              let message = NowhereProtocol.decodeUDPDatagram(data) else { return }
+        guard let message = NowhereProtocol.decodeUDPDatagram(data) else { return }
 
         enum Deliver { case datagram(NowhereQueuedDatagram); case flowClose; case none }
         let (connection, deliver): (NowhereUDPConnection?, Deliver) = state.withLock { session in
-            guard let route = session.udpRoutes[envelope.flowID], route.phase == .active else { return (nil, .none) }
+            guard let route = session.udpRoutes[message.flowID], route.phase == .active else { return (nil, .none) }
             switch message.type {
             case .data:
                 guard let reservation = reserveUDPBudget(message.payload.count) else { return (nil, .none) }
@@ -499,7 +501,13 @@ nonisolated final class NowhereSession: Sendable {
         let sid = try await openBidiStreamWhenCreditAvailable(registerUnderLock: registerUnderLock)
         afterRegister(sid)
         do {
-            try await quic.writeStream(sid, data: request)
+            try await withTaskCancellationHandler {
+                try Task.checkCancellation()
+                try await quic.writeStream(sid, data: request)
+                try Task.checkCancellation()
+            } onCancel: {
+                self.shutdownStream(sid)
+            }
             return sid
         } catch {
             quic.shutdownStream(sid, appErrorCode: NowhereProtocol.closeErrCodeOK)
@@ -626,12 +634,17 @@ nonisolated final class NowhereSession: Sendable {
     ) async throws -> Int64 {
         try await openStream(
             request: request,
-            registerUnderLock: { session, sid in session.tcpStreams[sid] = connection },
+            registerUnderLock: { session, sid in
+                guard connection.adoptStream(sid) else {
+                    throw AnywhereError.proxy(.nowhere, .streamClosed)
+                }
+                session.tcpStreams[sid] = TCPRoute(connection: connection)
+            },
             afterRegister: { [weak self] _ in
                 self?.updateIdleCloseTimer()
             },
             releaseOnWriteFailure: { [weak self] sid in
-                self?.releaseTCPStream(sid, credited: 0)
+                self?.releaseTCPStream(sid)
             }
         )
     }
@@ -648,6 +661,9 @@ nonisolated final class NowhereSession: Sendable {
                     throw AnywhereError.proxy(.nowhere, .flowRejected(code: NowhereProtocol.FlowRejectCode.flowLimit.rawValue))
                 }
                 let flowID = try NowhereProtocol.udpFlowID(streamID: sid)
+                guard connection.adoptControlStream(sid) else {
+                    throw AnywhereError.proxy(.nowhere, .streamClosed)
+                }
                 session.udpRoutes[flowID] = UDPRoute(connection: connection)
                 session.udpControlStreams[sid] = connection
             },
@@ -673,16 +689,23 @@ nonisolated final class NowhereSession: Sendable {
         quic.shutdownStream(sid, appErrorCode: NowhereProtocol.closeErrCodeOK)
     }
 
-    func releaseTCPStream(_ sid: Int64, credited: Int) {
-        let (routeRemoved, delivered): (Bool, Int) = state.withLock { session in
-            (session.tcpStreams.removeValue(forKey: sid) != nil,
-             session.tcpDeliveredBytes.removeValue(forKey: sid) ?? 0)
+    func consumeTCPBytes(_ sid: Int64, count: Int) {
+        guard count > 0 else { return }
+        let granted: Int = state.withLock { session in
+            guard let route = session.tcpStreams[sid] else { return 0 }
+            let granted = min(count, route.uncreditedBytes)
+            session.tcpStreams[sid]?.uncreditedBytes -= granted
+            return granted
         }
-        let residual = delivered - credited
-        if residual > 0 {
-            quic.extendStreamOffset(sid, count: residual)
+        if granted > 0 { quic.extendStreamOffset(sid, count: granted) }
+    }
+
+    func releaseTCPStream(_ sid: Int64) {
+        let route = state.withLock { $0.tcpStreams.removeValue(forKey: sid) }
+        guard let route else { return }
+        if route.uncreditedBytes > 0 {
+            quic.extendStreamOffset(sid, count: route.uncreditedBytes)
         }
-        guard routeRemoved else { return }
         updateIdleCloseTimer()
     }
 
@@ -797,7 +820,7 @@ nonisolated final class NowhereSession: Sendable {
             }
             guard session.transition(to: .closed) else { return nil }
             let snapshot = Teardown(
-                tcp: Array(session.tcpStreams.values),
+                tcp: session.tcpStreams.values.map(\.connection),
                 udp: session.udpRoutes.values.map(\.connection),
                 openWaiters: session.streamOpenWaiters,
                 idleClose: session.idleClose,
@@ -812,7 +835,6 @@ nonisolated final class NowhereSession: Sendable {
             session.reassemblyExpiry = nil
             session.reassemblyExpiryAt = nil
             session.tcpStreams.removeAll()
-            session.tcpDeliveredBytes.removeAll()
             session.udpRoutes.removeAll()
             session.reassembly.removeAll()
             session.udpControlStreams.removeAll()

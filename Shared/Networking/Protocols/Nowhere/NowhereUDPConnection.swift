@@ -46,6 +46,7 @@ actor NowhereUDPConnection {
 
     private let datagramInbox = NowhereDatagramInbox()
     private var nextPacketID: UInt32 = 1
+    private var receiveInProgress = false
 
     init(
         session: NowhereSession,
@@ -67,38 +68,37 @@ actor NowhereUDPConnection {
         let begin = lifecycle.withLock { $0.transition(to: .opening) }
         guard begin else { throw AnywhereError.proxy(.nowhere, .streamClosed) }
         do {
-            let request = NowhereProtocol.encodeFlowRequest(kind: .udp, target: destination)
-            let sid = try await session.openUDPControlStream(for: self, request: request)
-            let flowID = try NowhereProtocol.udpFlowID(streamID: sid)
-            let streamAdopted = lifecycle.withLock { state in
-                guard state.phase == .opening else { return false }
-                state.controlStreamID = sid
-                return true
-            }
-            guard streamAdopted else {
-                session.shutdownStream(sid)
-                session.releaseUDPControlStream(sid)
-                session.releaseUDPSession(flowID)
-                throw AnywhereError.proxy(.nowhere, .streamClosed)
-            }
-            guard let chunk = try await nextControlChunk(),
-                  let result = NowhereProtocol.decodeFlowResult(chunk) else {
-                throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "UDP control stream closed before READY"))
-            }
-            session.extendStreamOffset(sid, count: chunk.count)
-            switch result {
-            case .ready:
-                break
-            case .reject(let code):
-                throw AnywhereError.proxy(.nowhere, .flowRejected(code: code.rawValue))
-            }
-            session.activateUDPSession(flowID)
-            guard lifecycle.withLock({ $0.transition(to: .ready) }) else {
-                throw AnywhereError.proxy(.nowhere, .streamClosed)
+            try await withTaskCancellationHandler {
+                try Task.checkCancellation()
+                try await performOpen()
+                try Task.checkCancellation()
+            } onCancel: {
+                self.cancel()
             }
         } catch {
             fail(error)
             throw error
+        }
+    }
+
+    private func performOpen() async throws {
+        let request = NowhereProtocol.encodeFlowRequest(kind: .udp, target: destination)
+        let sid = try await session.openUDPControlStream(for: self, request: request)
+        let flowID = try NowhereProtocol.udpFlowID(streamID: sid)
+        guard let chunk = try await controlInbox.next(),
+              let result = NowhereProtocol.decodeFlowResult(chunk) else {
+            throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "UDP control stream closed before READY"))
+        }
+        session.extendStreamOffset(sid, count: chunk.count)
+        switch result {
+        case .ready:
+            break
+        case .reject(let code):
+            throw AnywhereError.proxy(.nowhere, .flowRejected(code: code.rawValue))
+        }
+        session.activateUDPSession(flowID)
+        guard lifecycle.withLock({ $0.transition(to: .ready) }) else {
+            throw AnywhereError.proxy(.nowhere, .streamClosed)
         }
     }
 
@@ -147,7 +147,12 @@ actor NowhereUDPConnection {
     // MARK: - ProxyConnection overrides
 
     func receiveRaw() async throws -> Data? {
-        guard let datagram = try await nextDatagram() else { return nil }
+        guard !receiveInProgress else {
+            throw AnywhereError.proxy(.nowhere, .protocolViolation(detail: "Overlapping receive on Nowhere UDP flow"))
+        }
+        receiveInProgress = true
+        defer { receiveInProgress = false }
+        guard let datagram = try await datagramInbox.next() else { return nil }
         return datagram.payload
     }
 
@@ -249,14 +254,12 @@ actor NowhereUDPConnection {
         return try NowhereProtocol.udpFlowID(streamID: sid)
     }
 
-    // MARK: - Pull helpers
-
-    private func nextControlChunk() async throws -> Data? {
-        try await controlInbox.next()
-    }
-
-    private func nextDatagram() async throws -> NowhereQueuedDatagram? {
-        try await datagramInbox.next()
+    nonisolated func adoptControlStream(_ sid: Int64) -> Bool {
+        lifecycle.withLock { state in
+            guard state.phase == .opening, state.controlStreamID == nil else { return false }
+            state.controlStreamID = sid
+            return true
+        }
     }
 
     // MARK: - Helpers

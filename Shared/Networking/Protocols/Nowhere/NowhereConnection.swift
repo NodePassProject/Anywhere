@@ -16,7 +16,7 @@ actor NowhereConnection {
     private enum Phase: PhaseTransitionable {
         case idle
         case opening
-        case open(sid: Int64, ready: Bool, credited: Int)
+        case open(sid: Int64, ready: Bool)
         case closed
 
         var isClosed: Bool {
@@ -26,10 +26,9 @@ actor NowhereConnection {
         static func canTransition(from old: Phase, to new: Phase) -> Bool {
             switch (old, new) {
             case (.idle, .opening),
-                 (.opening, .open):
+                 (.opening, .open),
+                 (.open(_, false), .open(_, true)):
                 return true
-            case (.open(_, let wasReady, _), .open(_, let isReady, _)):
-                return isReady || !wasReady
             case (_, .closed):
                 return !old.isClosed
             default:
@@ -42,10 +41,10 @@ actor NowhereConnection {
     private let rawInbox = AsyncInbox<Data>()
     private var pendingData = Data()
 
-    private var uncreditedBytes = 0
-    private static let creditFlushThreshold = 256 << 10
+    private var receiveInProgress = false
 
     private var backlogChunks: [Data] = []
+    private var backlogIndex = 0
     private static let maxChunkBytes = 512 << 10
     private static let inboxCompactionDepth = 32
 
@@ -60,16 +59,16 @@ actor NowhereConnection {
     }
 
     nonisolated var isConnected: Bool {
-        phase.withLock { if case .open(_, true, _) = $0 { true } else { false } }
+        phase.withLock { if case .open(_, true) = $0 { true } else { false } }
     }
     nonisolated var outerTLSVersion: TLSVersion? { .tls13 }
 
-    private nonisolated func closeLifecycle() -> (sid: Int64, credited: Int)? {
+    private nonisolated func closeLifecycle() -> Int64? {
         phase.withLock { state in
-            let released: (sid: Int64, credited: Int)?
+            let released: Int64?
             switch state {
             case .closed: return nil
-            case .open(let sid, _, let credited): released = (sid, credited)
+            case .open(let sid, _): released = sid
             case .idle, .opening: released = nil
             }
             Phase.transition(&state, to: .closed)
@@ -79,8 +78,8 @@ actor NowhereConnection {
 
     private nonisolated func becomeReady() -> Bool {
         phase.withLock { state -> Bool in
-            guard case .open(let sid, false, let credited) = state else { return false }
-            return Phase.transition(&state, to: .open(sid: sid, ready: true, credited: credited))
+            guard case .open(let sid, false) = state else { return false }
+            return Phase.transition(&state, to: .open(sid: sid, ready: true))
         }
     }
 
@@ -90,12 +89,15 @@ actor NowhereConnection {
         let begin = phase.withLock { Phase.transition(&$0, to: .opening) }
         guard begin else { throw AnywhereError.proxy(.nowhere, .streamClosed) }
         do {
-            try await performOpen()
-        } catch {
-            if let released = closeLifecycle() {
-                session.shutdownStream(released.sid)
-                session.releaseTCPStream(released.sid, credited: released.credited)
+            try await withTaskCancellationHandler {
+                try Task.checkCancellation()
+                try await performOpen()
+                try Task.checkCancellation()
+            } onCancel: {
+                self.cancel()
             }
+        } catch {
+            cancel()
             throw error
         }
     }
@@ -103,13 +105,6 @@ actor NowhereConnection {
     private func performOpen() async throws {
         let frame = NowhereProtocol.encodeFlowRequest(kind: .tcp, target: destination)
         let sid = try await session.openTCPStream(for: self, request: frame)
-        let adopted = phase.withLock { Phase.transition(&$0, to: .open(sid: sid, ready: false, credited: 0)) }
-        guard adopted else {
-            session.shutdownStream(sid)
-            session.releaseTCPStream(sid, credited: 0)
-            throw AnywhereError.proxy(.nowhere, .streamClosed)
-        }
-
         var buffer = Data()
         while true {
             guard let chunk = try await nextChunk() else {
@@ -120,7 +115,7 @@ actor NowhereConnection {
             guard let result = NowhereProtocol.decodeFlowResult(buffer) else {
                 throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Invalid flow result"))
             }
-            recordCredit(count: NowhereProtocol.flowResultSize)
+            session.consumeTCPBytes(sid, count: NowhereProtocol.flowResultSize)
             switch result {
             case .ready:
                 pendingData = Data(buffer.dropFirst(NowhereProtocol.flowResultSize))
@@ -146,10 +141,7 @@ actor NowhereConnection {
 
     nonisolated func handleStreamTermination(error: Error?) {
         if let error { rawInbox.finish(throwing: error) } else { rawInbox.finish() }
-        if let released = closeLifecycle() {
-            session.shutdownStream(released.sid)
-            session.releaseTCPStream(released.sid, credited: released.credited)
-        }
+        cancel()
     }
 
     nonisolated func handleSessionClose() {
@@ -169,85 +161,93 @@ actor NowhereConnection {
     // MARK: - ProxyConnection overrides
 
     func sendRaw(_ data: Data) async throws {
-        let sid: Int64? = phase.withLock { if case .open(let s, true, _) = $0 { s } else { nil } }
+        let sid: Int64? = phase.withLock { if case .open(let s, true) = $0 { s } else { nil } }
         guard let sid else {
             throw AnywhereError.proxy(.nowhere, .streamClosed)
         }
-        try await session.writeStream(sid, data: data)
+        try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            try await session.writeStream(sid, data: data)
+        } onCancel: {
+            self.cancel()
+        }
     }
 
     func receiveRaw() async throws -> Data? {
+        try Task.checkCancellation()
+        guard !receiveInProgress else {
+            throw AnywhereError.proxy(.nowhere, .protocolViolation(detail: "Overlapping receive on Nowhere stream"))
+        }
+        receiveInProgress = true
+        defer { receiveInProgress = false }
         if !pendingData.isEmpty {
             let out = pendingData
             pendingData = Data()
             credit(out.count)
             return out
         }
-        guard let chunk = try await nextChunk() else {
-            flushCredit()
-            return nil
-        }
-        if !chunk.isEmpty {
-            credit(chunk.count)
-        }
+        guard let chunk = try await nextChunk() else { return nil }
+        credit(chunk.count)
         return chunk
     }
 
     private func nextChunk() async throws -> Data? {
-        if !backlogChunks.isEmpty { return takeBacklog() }
+        if backlogIndex < backlogChunks.count { return takeBacklog() }
         guard let batch = try await rawInbox.nextBatch() else { return nil }
         if batch.count == 1 { return batch[0] }
         backlogChunks = batch
+        backlogIndex = 0
         return takeBacklog()
     }
 
     private func takeBacklog() -> Data {
-        var joined = Data(capacity: min(backlogChunks.reduce(0) { $0 + $1.count }, Self.maxChunkBytes))
-        var index = 0
-        while index < backlogChunks.count, joined.count < Self.maxChunkBytes {
-            joined.append(backlogChunks[index])
-            index += 1
+        defer {
+            if backlogIndex == backlogChunks.count {
+                backlogChunks.removeAll(keepingCapacity: false)
+                backlogIndex = 0
+            }
         }
-        backlogChunks.removeFirst(index)
+        var joined = backlogChunks[backlogIndex]
+        backlogChunks[backlogIndex] = Data()
+        backlogIndex += 1
+        while backlogIndex < backlogChunks.count,
+              backlogChunks[backlogIndex].count <= Self.maxChunkBytes - joined.count {
+            joined.append(backlogChunks[backlogIndex])
+            backlogChunks[backlogIndex] = Data()
+            backlogIndex += 1
+        }
         return joined
     }
 
     private func credit(_ count: Int) {
-        uncreditedBytes += count
-        guard uncreditedBytes >= Self.creditFlushThreshold else { return }
-        flushCredit()
-    }
-
-    private func flushCredit() {
-        guard uncreditedBytes > 0 else { return }
-        let count = uncreditedBytes
-        uncreditedBytes = 0
-        recordCredit(count: count)
-    }
-
-    private nonisolated func recordCredit(count: Int) {
-        guard count > 0 else { return }
-        let sid: Int64? = phase.withLock { state -> Int64? in
-            guard case .open(let s, let ready, let credited) = state else { return nil }
-            Phase.transition(&state, to: .open(sid: s, ready: ready, credited: credited + count))
-            return s
+        let sid = phase.withLock { state -> Int64? in
+            if case .open(let sid, _) = state { return sid }
+            return nil
         }
-        guard let sid else { return }
-        session.extendStreamOffset(sid, count: count)
+        if let sid { session.consumeTCPBytes(sid, count: count) }
+    }
+
+    nonisolated func adoptStream(_ sid: Int64) -> Bool {
+        phase.withLock { Phase.transition(&$0, to: .open(sid: sid, ready: false)) }
     }
 
     nonisolated func cancel() {
         rawInbox.finish()
-        if let released = closeLifecycle() {
-            session.shutdownStream(released.sid)
-            session.releaseTCPStream(released.sid, credited: released.credited)
+        if let sid = closeLifecycle() {
+            session.shutdownStream(sid)
+            session.releaseTCPStream(sid)
         }
     }
 }
 
 nonisolated final class NowhereTCPUDPConnection: ProxyConnection {
     private let inner: ProxyConnection
-    private let udpState = Mutex(UDPFramingState())
+    private struct State {
+        var framing = UDPFramingState()
+        var receiveInProgress = false
+        var closed = false
+    }
+    private let state = Mutex(State())
 
     init(inner: ProxyConnection) {
         self.inner = inner
@@ -270,6 +270,7 @@ nonisolated final class NowhereTCPUDPConnection: ProxyConnection {
     private enum PacketStep {
         case deliver(Data)
         case needMore
+        case end
     }
 
     private func nextPacketStep(_ state: inout UDPFramingState) -> PacketStep {
@@ -283,32 +284,58 @@ nonisolated final class NowhereTCPUDPConnection: ProxyConnection {
         }
         state.bufferOffset += consumed
         if state.bufferOffset > 8192 {
-            state.buffer.removeSubrange(0..<state.bufferOffset)
+            let end = state.buffer.index(state.buffer.startIndex, offsetBy: state.bufferOffset)
+            state.buffer.removeSubrange(state.buffer.startIndex..<end)
             state.bufferOffset = 0
         }
         return .deliver(payload)
     }
 
     func receiveRaw() async throws -> Data? {
+        let begin = try state.withLock { state in
+            guard !state.receiveInProgress else {
+                throw AnywhereError.proxy(.nowhere, .protocolViolation(detail: "Overlapping receive on Nowhere UDP framing"))
+            }
+            guard !state.closed else { return false }
+            state.receiveInProgress = true
+            return true
+        }
+        guard begin else { return nil }
+        defer { state.withLock { $0.receiveInProgress = false } }
+        return try await withTaskCancellationHandler {
+            try await receivePacket()
+        } onCancel: {
+            self.cancel()
+        }
+    }
+
+    private func receivePacket() async throws -> Data? {
         while true {
-            let step = udpState.withLock { nextPacketStep(&$0) }
+            try Task.checkCancellation()
+            let step = state.withLock { state in
+                state.closed ? .end : nextPacketStep(&state.framing)
+            }
             switch step {
             case .deliver(let packet):
                 return packet
+            case .end:
+                return nil
             case .needMore:
                 let data = try await inner.receive()
                 guard let data else {
-                    inner.cancel()
-                    let truncated = udpState.withLock {
-                        $0.buffer.count - $0.bufferOffset != 0
+                    let truncated = state.withLock {
+                        $0.framing.buffer.count - $0.framing.bufferOffset != 0
                     }
+                    cancel()
                     if truncated {
                         throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Truncated UoT packet"))
                     }
                     return nil
                 }
                 if data.isEmpty { continue }
-                udpState.withLock { $0.buffer.append(data) }
+                state.withLock {
+                    if !$0.closed { $0.framing.buffer.append(data) }
+                }
             }
         }
     }
@@ -322,9 +349,9 @@ nonisolated final class NowhereTCPUDPConnection: ProxyConnection {
     }
 
     private func finish(abortive: Bool) {
-        udpState.withLock {
-            $0.buffer = Data()
-            $0.bufferOffset = 0
+        state.withLock {
+            $0.closed = true
+            $0.framing = UDPFramingState()
         }
         if abortive {
             inner.abort()

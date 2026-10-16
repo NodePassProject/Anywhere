@@ -15,6 +15,7 @@ nonisolated extension ProxyClient {
         }
         let runtime = try NowhereRuntimeConfiguration(
             proxyHost: self.configuration.serverAddress,
+            connectHost: directDialHost,
             proxyPort: self.configuration.serverPort,
             configuration: configuration
         )

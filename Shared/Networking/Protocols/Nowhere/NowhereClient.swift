@@ -40,6 +40,7 @@ nonisolated final class NowhereFlowOpenAttempt: Sendable {
 nonisolated final class NowhereClient: Sendable {
     private struct Key: Hashable {
         let host: String
+        let connectHost: String
         let port: UInt16
         let key: String
         let morph: Bool
@@ -65,6 +66,7 @@ nonisolated final class NowhereClient: Sendable {
     static func shared(for configuration: NowhereRuntimeConfiguration) throws -> NowhereClient {
         let key = Key(
             host: configuration.proxyHost,
+            connectHost: configuration.connectHost,
             port: configuration.proxyPort,
             key: configuration.key,
             morph: configuration.morph,
@@ -103,6 +105,7 @@ nonisolated final class NowhereClient: Sendable {
     ) async throws -> NowhereClient {
         let key = Key(
             host: configuration.proxyHost,
+            connectHost: configuration.proxyHost,
             port: configuration.proxyPort,
             key: configuration.key,
             morph: configuration.morph,

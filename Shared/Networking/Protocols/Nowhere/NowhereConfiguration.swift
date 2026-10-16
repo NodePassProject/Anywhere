@@ -70,6 +70,7 @@ nonisolated struct NowhereConfiguration: Codable, Hashable, Sendable {
 
 nonisolated struct NowhereRuntimeConfiguration: Hashable, Sendable {
     let proxyHost: String
+    let connectHost: String
     let proxyPort: UInt16
     let key: String
     let network: NowhereNetwork
@@ -78,11 +79,17 @@ nonisolated struct NowhereRuntimeConfiguration: Hashable, Sendable {
     let authKey: NowhereProtocol.AuthKey
     let morphKeys: NowhereMorph.Keys?
 
-    init(proxyHost: String, proxyPort: UInt16, configuration: NowhereConfiguration) throws {
+    init(
+        proxyHost: String,
+        connectHost: String,
+        proxyPort: UInt16,
+        configuration: NowhereConfiguration
+    ) throws {
         guard proxyPort != 0 else {
             throw AnywhereError.proxy(.nowhere, .protocolViolation(detail: "Invalid Nowhere port"))
         }
         self.proxyHost = proxyHost
+        self.connectHost = connectHost
         self.proxyPort = proxyPort
         key = configuration.key
         network = configuration.network

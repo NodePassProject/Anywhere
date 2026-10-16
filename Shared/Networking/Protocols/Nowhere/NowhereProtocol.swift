@@ -299,9 +299,9 @@ nonisolated enum NowhereProtocol {
     }
 
     static func decodeUDPStreamPacket(_ data: Data, offset: Int = 0) -> (payload: Data, consumed: Int)? {
-        guard offset >= 0, offset + 2 <= data.count else { return nil }
+        guard offset >= 0, offset <= data.count, data.count - offset >= 2 else { return nil }
         let length = Int(data.uint16(at: offset))
-        guard offset + 2 + length <= data.count else { return nil }
+        guard length <= data.count - offset - 2 else { return nil }
         let start = data.startIndex + offset + 2
         return (Data(data[start..<(start + length)]), 2 + length)
     }

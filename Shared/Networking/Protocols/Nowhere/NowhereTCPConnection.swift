@@ -34,7 +34,6 @@ actor NowhereTCPConnection: ProxyConnection {
         var transport: (any ByteTransport)?
         var tlsVersion: TLSVersion?
         var terminalError: Error?
-        var bootstrapTask: Task<TLSRecordConnection, Error>?
     }
 
     private let configuration: NowhereRuntimeConfiguration
@@ -71,6 +70,20 @@ actor NowhereTCPConnection: ProxyConnection {
     }
 
     func openFresh(
+        destination: NowhereProtocol.Target,
+        kind: NowhereProtocol.FlowKind,
+        initialData: Data? = nil
+    ) async throws {
+        try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            try await performOpen(destination: destination, kind: kind, initialData: initialData)
+            try Task.checkCancellation()
+        } onCancel: {
+            self.cancel()
+        }
+    }
+
+    private func performOpen(
         destination: NowhereProtocol.Target,
         kind: NowhereProtocol.FlowKind,
         initialData: Data? = nil
@@ -121,35 +134,14 @@ actor NowhereTCPConnection: ProxyConnection {
                     base.cancel()
                     throw terminalError()
                 }
-                let task = Task {
-                    try Task.checkCancellation()
-                    if let directTCP { try await directTCP.connect() }
-                    return try await NowhereMorph.connectTLS(
-                        client: client,
-                        base: base,
-                        keys: keys,
-                        prelude: configuration.morphPrelude
-                    )
-                }
-                let adoptedTask = lifecycle.withLock { state -> Bool in
-                    guard state.phase == .opening else { return false }
-                    state.bootstrapTask = task
-                    return true
-                }
-                if !adoptedTask { task.cancel() }
-                defer { lifecycle.withLock { $0.bootstrapTask = nil } }
-                record = try await withTaskCancellationHandler {
-                    let result = try await task.value
-                    guard !Task.isCancelled, lifecycle.withLock({ $0.phase == .opening }) else {
-                        result.cancel()
-                        throw terminalError(fallback: CancellationError())
-                    }
-                    return result
-                } onCancel: {
-                    task.cancel()
-                    base.cancel()
-                    client.cancel()
-                }
+                try Task.checkCancellation()
+                if let directTCP { try await directTCP.connect() }
+                record = try await NowhereMorph.connectTLS(
+                    client: client,
+                    base: base,
+                    keys: keys,
+                    prelude: configuration.morphPrelude
+                )
             } else if let tunnel {
                 record = try await client.connect(overTunnel: tunnel)
             } else {
@@ -159,8 +151,21 @@ actor NowhereTCPConnection: ProxyConnection {
                 )
             }
 
+            let transport = TLSByteTransport(record)
+            let adoptedTransport = lifecycle.withLock { state -> Bool in
+                guard state.phase == .opening else { return false }
+                state.tlsClient = nil
+                state.transport = transport
+                state.tlsVersion = TLSVersion(rawValue: record.tlsVersion)
+                return true
+            }
+            guard adoptedTransport else {
+                transport.cancel()
+                throw terminalError()
+            }
+
+            try Task.checkCancellation()
             guard record.negotiatedALPN == NowhereProtocol.applicationProtocol else {
-                record.cancel()
                 throw AnywhereError.tls(.handshakeFailed(
                     detail: "Portal did not negotiate the Nowhere application protocol"
                 ))
@@ -175,19 +180,6 @@ actor NowhereTCPConnection: ProxyConnection {
                 transport: .tlsTCP,
                 exporter: exporter
             )
-
-            let transport = TLSByteTransport(record)
-            let adoptedTransport = lifecycle.withLock { state -> Bool in
-                guard state.phase == .opening else { return false }
-                state.tlsClient = nil
-                state.transport = transport
-                state.tlsVersion = TLSVersion(rawValue: record.tlsVersion)
-                return true
-            }
-            guard adoptedTransport else {
-                transport.cancel()
-                throw terminalError()
-            }
 
             var bootstrap = auth
             bootstrap.append(request)
@@ -248,11 +240,7 @@ actor NowhereTCPConnection: ProxyConnection {
     }
 
     func receiveRaw() async throws -> Data? {
-        if !pendingData.isEmpty {
-            let data = pendingData
-            pendingData.removeAll(keepingCapacity: false)
-            return data
-        }
+        try Task.checkCancellation()
         guard !receiveInProgress else {
             throw AnywhereError.proxy(
                 .nowhere,
@@ -262,6 +250,11 @@ actor NowhereTCPConnection: ProxyConnection {
         receiveInProgress = true
         defer { receiveInProgress = false }
 
+        if !pendingData.isEmpty {
+            let data = pendingData
+            pendingData.removeAll(keepingCapacity: false)
+            return data
+        }
         let transport = try readyTransport()
         do {
             switch try await transport.receive() {
@@ -297,17 +290,15 @@ actor NowhereTCPConnection: ProxyConnection {
     }
 
     private nonisolated func finish(error: Error?) {
-        let resources: (TLSClient?, (any ByteTransport)?, Task<TLSRecordConnection, Error>?)? = lifecycle.withLock { state in
+        let resources: (TLSClient?, (any ByteTransport)?)? = lifecycle.withLock { state in
             guard state.transition(to: .closed) else { return nil }
             state.terminalError = error
-            let resources = (state.tlsClient, state.transport, state.bootstrapTask)
+            let resources = (state.tlsClient, state.transport)
             state.tlsClient = nil
             state.transport = nil
-            state.bootstrapTask = nil
             return resources
         }
         guard let resources else { return }
-        resources.2?.cancel()
         resources.0?.cancel()
         resources.1?.cancel()
         tunnel?.cancel()
