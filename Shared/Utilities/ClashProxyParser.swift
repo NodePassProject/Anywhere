@@ -462,8 +462,12 @@ nonisolated struct ClashProxyParser {
     }
 
     private static func parseFingerprint(_ node: YAML.Node) -> TLSFingerprint {
-        let raw = getString(node, key: "client-fingerprint")
-        return TLSFingerprint(rawValue: mapFingerprint(raw)) ?? .default
+        guard let raw = getString(node, key: "client-fingerprint") else { return .default }
+        switch raw.lowercased() {
+        case "ios":    return .chrome120
+        case "random": return .default
+        default:       return TLSFingerprint(importValue: raw) ?? .default
+        }
     }
     
     private static func parseBandwidthMbps(_ raw: String?, default def: Int) -> Int {
@@ -526,17 +530,5 @@ nonisolated struct ClashProxyParser {
             host: getString(node, key: "host") ?? "",
             pathRoot: getString(node, key: "path-root") ?? getString(node, key: "path_root") ?? ""
         )
-    }
-
-    private static func mapFingerprint(_ rawFingerprint: String?) -> String {
-        switch rawFingerprint?.lowercased() {
-        case "chrome":  return TLSFingerprint.chrome133.rawValue
-        case "firefox": return TLSFingerprint.firefox148.rawValue
-        case "safari":  return TLSFingerprint.safari26.rawValue
-        case "ios":     return TLSFingerprint.chrome120.rawValue
-        case "edge":    return TLSFingerprint.edge106.rawValue
-        case "random":  return TLSFingerprint.default.rawValue
-        default:        return rawFingerprint ?? TLSFingerprint.default.rawValue
-        }
     }
 }

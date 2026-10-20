@@ -38,7 +38,7 @@ nonisolated struct RealityConfiguration {
         let sidString = params["sid"] ?? ""
         let shortId = Data(hexString: sidString) ?? Data()
 
-        let fingerprint = params["fp"].flatMap { TLSFingerprint(rawValue: $0) } ?? .default
+        let fingerprint = params["fp"].flatMap { TLSFingerprint(importValue: $0) } ?? .default
 
         return RealityConfiguration(
             serverName: sni,
@@ -133,13 +133,29 @@ nonisolated enum TLSFingerprint: String, Codable, CaseIterable {
          .edge106]
     }
     
-    static var `default`: TLSFingerprint {
-        if #available(iOS 26.0, macOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *) {
-            return .chrome133
+    static var `default`: TLSFingerprint { TLSFingerprint.chrome133.supportedOnThisOS }
+    
+    init?(importValue: String) {
+        if let exact = TLSFingerprint(rawValue: importValue) {
+            self = exact
+            return
         }
-        return .chrome120
+        switch importValue.lowercased() {
+        case "chrome":  self = TLSFingerprint.chrome133.supportedOnThisOS
+        case "firefox": self = TLSFingerprint.firefox148.supportedOnThisOS
+        case "safari":  self = TLSFingerprint.safari26.supportedOnThisOS
+        case "edge":    self = TLSFingerprint.edge106.supportedOnThisOS
+        default:        return nil
+        }
     }
     
+    var supportedOnThisOS: TLSFingerprint {
+        if #available(iOS 26.0, macOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *) {
+            return self
+        }
+        return withoutPostQuantum
+    }
+
     var withoutPostQuantum: TLSFingerprint {
         switch self {
         case .chrome133:  return .chrome120
