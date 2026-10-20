@@ -256,5 +256,4 @@ nonisolated final class MITMScriptHTTPClient: Sendable {
         }
         return next
     }
-
 }

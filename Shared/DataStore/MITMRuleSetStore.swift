@@ -12,7 +12,7 @@ import SwiftUI
 @MainActor
 @Observable
 final class MITMRuleSetStore {
-    private(set) var enabled: Bool
+    private(set) var isEnabled: Bool
     private(set) var ruleSets: [MITMRuleSet]
     private var tombstones: [MITMRuleSet] = []
 
@@ -24,7 +24,7 @@ final class MITMRuleSetStore {
         self.syncStore = syncStore
         let items = syncStore.loadItems(.mitm)
         loadedItems = items
-        self.enabled = AWCore.getMITMEnabled()
+        self.isEnabled = AWCore.getMITMEnabled()
         let split = Tombstone.split(SyncCodec.decodeItems(MITMRuleSet.self, key: .mitm, payloads: items))
         self.ruleSets = split.live
         self.tombstones = split.tombstones
@@ -53,8 +53,8 @@ final class MITMRuleSetStore {
     // MARK: - Master toggle
 
     func setEnabled(_ enabled: Bool) {
-        guard self.enabled != enabled else { return }
-        self.enabled = enabled
+        guard self.isEnabled != enabled else { return }
+        self.isEnabled = enabled
         AWCore.setMITMEnabled(enabled)
     }
 
@@ -85,7 +85,7 @@ final class MITMRuleSetStore {
         ruleSets[index].updatedAt = SyncStamp.after(ruleSets[index])
         save()
     }
-    
+
     func setParameterValue(_ id: UUID, name: String, value: String) {
         guard let index = ruleSets.firstIndex(where: { $0.id == id }),
               let definition = ruleSets[index].parameters.first(where: { $0.name == name })
@@ -150,7 +150,7 @@ final class MITMRuleSetStore {
         ruleSets[setIndex].updatedAt = SyncStamp.after(ruleSets[setIndex])
         save()
     }
-    
+
     func moveRules(
         fromOffsets source: IndexSet,
         toOffset destination: Int,
@@ -163,7 +163,7 @@ final class MITMRuleSetStore {
     }
 
     // MARK: - Subscription
-    
+
     @discardableResult
     func applyRefreshedContent(
         domainSuffixes: [String],
@@ -190,7 +190,7 @@ final class MITMRuleSetStore {
         save()
         return ruleSets[writeIndex]
     }
-    
+
     static func mergedParameterValues(
         definitions: [MITMParameter],
         previousValues: [String: String]
@@ -205,22 +205,22 @@ final class MITMRuleSetStore {
     }
 
     // MARK: - Persistence
-    
+
     private func recordTombstones(_ removed: [MITMRuleSet]) {
         guard !removed.isEmpty else { return }
         let now = Date.now
         let ids = Set(removed.map { $0.id })
         tombstones.removeAll { ids.contains($0.id) }
         for item in removed {
-            var tomb = item
-            tomb.deletedAt = now
-            tomb.domainSuffixes = []
-            tomb.rules = []
-            tomb.parameters = []
-            tomb.parameterValues = [:]
-            tomb.iconLight = nil
-            tomb.iconDark = nil
-            tombstones.append(tomb)
+            var tombstone = item
+            tombstone.deletedAt = now
+            tombstone.domainSuffixes = []
+            tombstone.rules = []
+            tombstone.parameters = []
+            tombstone.parameterValues = [:]
+            tombstone.iconLight = nil
+            tombstone.iconDark = nil
+            tombstones.append(tombstone)
         }
     }
 

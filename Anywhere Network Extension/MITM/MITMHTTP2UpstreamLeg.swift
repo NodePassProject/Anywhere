@@ -66,7 +66,7 @@ actor MITMHTTP2UpstreamLeg {
         Phase.transition(&phase, to: new)
     }
 
-    private var rxBuffer = MITMByteBuffer()
+    private var receiveBuffer = MITMByteBuffer()
 
     private var parkedContinuation: CheckedContinuation<Void, Never>?
 
@@ -83,7 +83,7 @@ actor MITMHTTP2UpstreamLeg {
     // MARK: Request side (toward upstream)
 
     private struct PendingRequestBody {
-        var remaining: Data
+        var remaining = MITMByteQueue()
         var streamWindow: Int
         var endStream: Bool
         var pendingTrailers: [(name: String, value: String)]? = nil
@@ -104,8 +104,8 @@ actor MITMHTTP2UpstreamLeg {
     private static let unadvertisedMaxConcurrentStreams = 100
 
     private var maxConcurrentStreams: Int {
-        if let s = serverMaxConcurrentStreams { return s }
-        return firstSettingsSeen ? Self.unadvertisedMaxConcurrentStreams : Self.provisionalMaxConcurrentStreams
+        serverMaxConcurrentStreams
+            ?? (firstSettingsSeen ? Self.unadvertisedMaxConcurrentStreams : Self.provisionalMaxConcurrentStreams)
     }
 
     private struct QueuedRequest {
@@ -116,31 +116,34 @@ actor MITMHTTP2UpstreamLeg {
     }
     private var queuedRequests: [UInt32: QueuedRequest] = [:]
     private var queueOrder: [UInt32] = []
-    private var draining = false
+    private var isDraining = false
 
-    private var ourStreamID: [UInt32: UInt32] = [:]   // client → upstream
-    private var theirStreamID: [UInt32: UInt32] = [:] // upstream → client
+    private var upstreamStreamIDByClient: [UInt32: UInt32] = [:]
+    private var clientStreamIDByUpstream: [UInt32: UInt32] = [:]
     private var nextUpstreamStreamID: UInt32 = 1
 
     private func upstreamID(forClient clientID: UInt32) -> UInt32 {
-        if let existing = ourStreamID[clientID] { return existing }
-        let sid = nextUpstreamStreamID
+        if let existing = upstreamStreamIDByClient[clientID] { return existing }
+        let upstreamStreamID = nextUpstreamStreamID
         nextUpstreamStreamID += 2
-        ourStreamID[clientID] = sid
-        theirStreamID[sid] = clientID
-        return sid
+        upstreamStreamIDByClient[clientID] = upstreamStreamID
+        clientStreamIDByUpstream[upstreamStreamID] = clientID
+        return upstreamStreamID
     }
 
     private func releaseStream(clientID: UInt32, resetOrigin: Bool = false) {
-        if resetOrigin, let sid = ourStreamID[clientID] {
-            delegate?.upstreamLegWriteToOrigin(Codec.rstStream(streamID: sid, errorCode: Codec.ErrorCode.cancel))
+        if resetOrigin, let upstreamStreamID = upstreamStreamIDByClient[clientID] {
+            delegate?.upstreamLegWriteToOrigin(Codec.rstStream(streamID: upstreamStreamID, errorCode: Codec.ErrorCode.cancel))
         }
         responseStreams.removeValue(forKey: clientID)
         drainCoupledStreams.remove(clientID)
         responseHalfClosed.remove(clientID)
         pendingRequestBodies.removeValue(forKey: clientID)
         openRequestStreams.remove(clientID)
-        if let sid = ourStreamID.removeValue(forKey: clientID) { theirStreamID.removeValue(forKey: sid) }
+        if let upstreamStreamID = upstreamStreamIDByClient.removeValue(forKey: clientID) {
+            clientStreamIDByUpstream.removeValue(forKey: upstreamStreamID)
+            unannouncedStreamCredit.removeValue(forKey: upstreamStreamID)
+        }
         drainQueue()
     }
 
@@ -149,6 +152,7 @@ actor MITMHTTP2UpstreamLeg {
             responseStreams.removeValue(forKey: clientID)
             drainCoupledStreams.remove(clientID)
             responseHalfClosed.insert(clientID)
+            if let upstreamStreamID = upstreamStreamIDByClient[clientID] { unannouncedStreamCredit.removeValue(forKey: upstreamStreamID) }
         } else {
             releaseStream(clientID: clientID, resetOrigin: !originEnded || openRequestStreams.contains(clientID))
         }
@@ -166,10 +170,10 @@ actor MITMHTTP2UpstreamLeg {
     }
 
     private func drainQueue() {
-        guard !draining, phase == .idle || phase == .prefaceSent else { return }
-        draining = true
-        defer { draining = false }
-        while ourStreamID.count < maxConcurrentStreams, let clientID = queueOrder.first {
+        guard !isDraining, phase == .idle || phase == .prefaceSent else { return }
+        isDraining = true
+        defer { isDraining = false }
+        while upstreamStreamIDByClient.count < maxConcurrentStreams, let clientID = queueOrder.first {
             queueOrder.removeFirst()
             guard let queuedRequest = queuedRequests.removeValue(forKey: clientID) else { continue }
             openUpstreamStream(queuedRequest.head, endStream: queuedRequest.endStreamOnHead)
@@ -219,8 +223,8 @@ actor MITMHTTP2UpstreamLeg {
 
     private var responseHalfClosed: Set<UInt32> = []
 
-    private var batchedConnCredit = 0
-    private var batchedStreamCredit: [UInt32: Int] = [:]
+    private var unannouncedConnCredit = 0
+    private var unannouncedStreamCredit: [UInt32: Int] = [:]
 
     private static let maxBufferedRewriteGrowthBytes = 65_535
     private static let maxStreamingRewriteGrowthBytes = 65_535
@@ -228,6 +232,8 @@ actor MITMHTTP2UpstreamLeg {
     private static let maxUpstreamBufferedBytes = 8 * 1024 * 1024
 
     private static let receiveWindow = 4 * 1024 * 1024
+
+    private static let creditAnnouncementThreshold = receiveWindow / 2
 
     init(
         host: String,
@@ -245,7 +251,7 @@ actor MITMHTTP2UpstreamLeg {
         transition(to: .torn)
         let continuation = parkedContinuation
         parkedContinuation = nil
-        rxBuffer = MITMByteBuffer()
+        receiveBuffer = MITMByteBuffer()
         pendingRequestBodies.removeAll()
         responseStreams.removeAll()
         drainCoupledStreams.removeAll()
@@ -253,10 +259,10 @@ actor MITMHTTP2UpstreamLeg {
         openRequestStreams.removeAll()
         queuedRequests.removeAll()
         queueOrder.removeAll()
-        ourStreamID.removeAll()
-        theirStreamID.removeAll()
-        batchedConnCredit = 0
-        batchedStreamCredit.removeAll()
+        upstreamStreamIDByClient.removeAll()
+        clientStreamIDByUpstream.removeAll()
+        unannouncedConnCredit = 0
+        unannouncedStreamCredit.removeAll()
         pending = nil
         continuation?.resume()
     }
@@ -266,18 +272,22 @@ actor MITMHTTP2UpstreamLeg {
         transition(to: .prefaceSent)
         var preface = Data("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".utf8)
         Codec.appendFrameHeader(typeCode: Codec.FrameType.settings, flags: 0, streamID: 0, payloadLength: 18, into: &preface)
-        preface.append(contentsOf: [0x00, 0x02, 0x00, 0x00, 0x00, 0x00]) // SETTINGS_ENABLE_PUSH = 0
-        let w = UInt32(Self.receiveWindow)
+        preface.append(contentsOf: [0x00, 0x02, 0x00, 0x00, 0x00, 0x00])
+        let window = UInt32(Self.receiveWindow)
         preface.append(
-            contentsOf: [0x00, 0x04, // SETTINGS_INITIAL_WINDOW_SIZE
-                         UInt8((w >> 24) & 0xFF), UInt8((w >> 16) & 0xFF),
-                         UInt8((w >> 8) & 0xFF), UInt8(w & 0xFF)]
+            contentsOf: [
+                0x00, 0x04,
+                UInt8((window >> 24) & 0xFF), UInt8((window >> 16) & 0xFF),
+                UInt8((window >> 8) & 0xFF), UInt8(window & 0xFF)
+            ]
         )
         let maxHeaderList = UInt32(HPACKDecoder.maxDecodedHeaderListSize)
         preface.append(
-            contentsOf: [0x00, 0x06, // SETTINGS_MAX_HEADER_LIST_SIZE
-                         UInt8((maxHeaderList >> 24) & 0xFF), UInt8((maxHeaderList >> 16) & 0xFF),
-                         UInt8((maxHeaderList >> 8) & 0xFF), UInt8(maxHeaderList & 0xFF)]
+            contentsOf: [
+                0x00, 0x06,
+                UInt8((maxHeaderList >> 24) & 0xFF), UInt8((maxHeaderList >> 16) & 0xFF),
+                UInt8((maxHeaderList >> 8) & 0xFF), UInt8(maxHeaderList & 0xFF)
+            ]
         )
         delegate?.upstreamLegWriteToOrigin(preface)
         delegate?.upstreamLegWriteToOrigin(Codec.windowUpdate(streamID: 0, increment: Self.receiveWindow - 65_535))
@@ -292,7 +302,7 @@ actor MITMHTTP2UpstreamLeg {
             return
         }
         ensurePrefaceSent()
-        guard ourStreamID.count < maxConcurrentStreams else {
+        guard upstreamStreamIDByClient.count < maxConcurrentStreams else {
             guard queueOrder.count < Self.maxQueuedRequests else {
                 logger.warning("h2-upstream \(host) stream \(head.clientStreamID): request queue at cap \(Self.maxQueuedRequests) (origin MAX_CONCURRENT_STREAMS=\(maxConcurrentStreams)); refusing stream")
                 sink?.deliverResponseReset(streamID: head.clientStreamID, errorCode: Codec.ErrorCode.refusedStream)
@@ -311,7 +321,7 @@ actor MITMHTTP2UpstreamLeg {
             return
         }
         let clientID = head.clientStreamID
-        let sid = upstreamID(forClient: clientID)
+        let upstreamStreamID = upstreamID(forClient: clientID)
         if !endStream {
             openRequestStreams.insert(clientID)
         }
@@ -324,19 +334,18 @@ actor MITMHTTP2UpstreamLeg {
         for (name, value) in head.headers {
             block.append((name: name.lowercased(), value: value))
         }
-        if case .contentLength(let n) = head.framing {
-            block.append((name: "content-length", value: String(n)))
+        if case .contentLength(let length) = head.framing {
+            block.append((name: "content-length", value: String(length)))
         }
         delegate?.upstreamLegWriteToOrigin(
             Codec.emitHeaders(
-                streamID: sid,
+                streamID: upstreamStreamID,
                 block: HPACKEncoder.encodeHeaderBlock(block, neverIndexed: head.neverIndexed),
                 endStream: endStream
             )
         )
         if !endStream {
             pendingRequestBodies[clientID] = PendingRequestBody(
-                remaining: Data(),
                 streamWindow: flowController.serverInitialStreamWindow,
                 endStream: false
             )
@@ -356,16 +365,16 @@ actor MITMHTTP2UpstreamLeg {
             return
         }
         guard phase != .torn, openRequestStreams.contains(clientID) else { return }
-        var entry = pendingRequestBodies[clientID]
-            ?? PendingRequestBody(remaining: Data(), streamWindow: flowController.serverInitialStreamWindow, endStream: false)
-        entry.remaining.append(data)
-        if endStream { entry.endStream = true }
-        pendingRequestBodies[clientID] = entry
+        if pendingRequestBodies[clientID] == nil {
+            pendingRequestBodies[clientID] = PendingRequestBody(streamWindow: flowController.serverInitialStreamWindow, endStream: false)
+        }
+        pendingRequestBodies[clientID]?.remaining.append(data)
+        if endStream { pendingRequestBodies[clientID]?.endStream = true }
         flushRequestBody(clientID)
         if let backlog = pendingRequestBodies[clientID]?.remaining.count, backlog > Self.maxUpstreamBufferedBytes {
             logger.warning("h2-upstream \(host) stream \(clientID): request backlog \(backlog) B over cap; resetting stream")
-            if let sid = ourStreamID[clientID] {
-                delegate?.upstreamLegWriteToOrigin(Codec.rstStream(streamID: sid, errorCode: Codec.ErrorCode.internalError))
+            if let upstreamStreamID = upstreamStreamIDByClient[clientID] {
+                delegate?.upstreamLegWriteToOrigin(Codec.rstStream(streamID: upstreamStreamID, errorCode: Codec.ErrorCode.internalError))
             }
             releaseStream(clientID: clientID)
             sink?.deliverResponseReset(streamID: clientID)
@@ -395,23 +404,22 @@ actor MITMHTTP2UpstreamLeg {
             queuedRequests[clientID]?.body.append((Data(), true))
             return
         }
-        guard openRequestStreams.contains(clientID), let sid = ourStreamID[clientID] else { return }
-        if var entry = pendingRequestBodies[clientID], !entry.remaining.isEmpty {
-            entry.endStream = true
-            entry.pendingTrailers = fields
-            pendingRequestBodies[clientID] = entry
+        guard openRequestStreams.contains(clientID), let upstreamStreamID = upstreamStreamIDByClient[clientID] else { return }
+        if pendingRequestBodies[clientID]?.remaining.isEmpty == false {
+            pendingRequestBodies[clientID]?.endStream = true
+            pendingRequestBodies[clientID]?.pendingTrailers = fields
             flushRequestBody(clientID)
         } else {
             pendingRequestBodies.removeValue(forKey: clientID)
-            emitRequestTrailers(sid: sid, fields)
+            emitRequestTrailers(upstreamStreamID: upstreamStreamID, fields)
             closeRequestHalf(clientID)
         }
     }
 
-    private func emitRequestTrailers(sid: UInt32, _ trailers: [(name: String, value: String)]) {
+    private func emitRequestTrailers(upstreamStreamID: UInt32, _ trailers: [(name: String, value: String)]) {
         let block = trailers.map { (name: $0.name.lowercased(), value: $0.value) }
         delegate?.upstreamLegWriteToOrigin(Codec.emitHeaders(
-            streamID: sid,
+            streamID: upstreamStreamID,
             block: HPACKEncoder.encodeHeaderBlock(block),
             endStream: true
         ))
@@ -419,31 +427,28 @@ actor MITMHTTP2UpstreamLeg {
 
     @discardableResult
     private func flushRequestBody(_ clientID: UInt32, cap: Int = .max) -> Bool {
-        guard var entry = pendingRequestBodies[clientID], let sid = ourStreamID[clientID] else { return false }
+        guard let upstreamStreamID = upstreamStreamIDByClient[clientID], var entry = pendingRequestBodies.removeValue(forKey: clientID) else { return false }
         let available = flowController.takeServerConnection(
             upTo: min(entry.streamWindow, entry.remaining.count, cap)
         )
         if available > 0 {
-            let chunk = entry.remaining.prefix(available)
-            entry.remaining.removeFirst(available)
+            let chunk = entry.remaining.popFirst(available)
             let bodyDone = entry.endStream && entry.remaining.isEmpty
-            delegate?.upstreamLegWriteToOrigin(Codec.frameData(streamID: sid, payload: chunk,
+            delegate?.upstreamLegWriteToOrigin(Codec.frameData(streamID: upstreamStreamID, payload: chunk,
                                              endStream: bodyDone && entry.pendingTrailers == nil))
             entry.streamWindow -= available
             delegate?.upstreamLegRequestDrained(clientID: clientID, count: available)
             if bodyDone {
-                if let trailers = entry.pendingTrailers { emitRequestTrailers(sid: sid, trailers) }
-                pendingRequestBodies.removeValue(forKey: clientID)
+                if let trailers = entry.pendingTrailers { emitRequestTrailers(upstreamStreamID: upstreamStreamID, trailers) }
                 closeRequestHalf(clientID)
                 return true
             }
         } else if entry.remaining.isEmpty, entry.endStream {
             if let trailers = entry.pendingTrailers {
-                emitRequestTrailers(sid: sid, trailers)
+                emitRequestTrailers(upstreamStreamID: upstreamStreamID, trailers)
             } else {
-                delegate?.upstreamLegWriteToOrigin(Codec.frameData(streamID: sid, payload: Data(), endStream: true))
+                delegate?.upstreamLegWriteToOrigin(Codec.frameData(streamID: upstreamStreamID, payload: Data(), endStream: true))
             }
-            pendingRequestBodies.removeValue(forKey: clientID)
             closeRequestHalf(clientID)
             return true
         }
@@ -452,9 +457,9 @@ actor MITMHTTP2UpstreamLeg {
     }
 
     private func distributeServerConnectionWindow() {
-        let ready = pendingRequestBodies.keys.filter { !(pendingRequestBodies[$0]?.remaining.isEmpty ?? true) }.sorted()
-        var remaining = ready.count
-        for id in ready {
+        let readyStreamIDs = pendingRequestBodies.keys.filter { !(pendingRequestBodies[$0]?.remaining.isEmpty ?? true) }.sorted()
+        var remaining = readyStreamIDs.count
+        for id in readyStreamIDs {
             guard flowController.serverConnectionWindow > 0 else { break }
             let share = max(Codec.maxFramePayloadSize, flowController.serverConnectionWindow / max(1, remaining))
             flushRequestBody(id, cap: share)
@@ -465,9 +470,7 @@ actor MITMHTTP2UpstreamLeg {
     // MARK: - Upstream h2 → response IR
 
     func feed(_ data: Data) async {
-        await sessionContext.runParked { (continuation: CheckedContinuation<Void, Never>) in
-            self.assumeIsolated { $0.feedOnQueue(data, continuation: continuation) }
-        }
+        await withCheckedContinuation { feedOnQueue(data, continuation: $0) }
     }
 
     private func feedOnQueue(_ data: Data, continuation: CheckedContinuation<Void, Never>) {
@@ -476,8 +479,11 @@ actor MITMHTTP2UpstreamLeg {
             continuation.resume()
             return
         }
-        if phase == .failed || phase == .torn { continuation.resume(); return }
-        rxBuffer.append(data)
+        if phase == .failed || phase == .torn {
+            continuation.resume()
+            return
+        }
+        receiveBuffer.append(data)
         parkedContinuation = continuation
         let parked = pump()
         finishPass(parked: parked)
@@ -485,9 +491,11 @@ actor MITMHTTP2UpstreamLeg {
 
     private func pump() -> Bool {
         while true {
-            switch Codec.parseFrame(from: &rxBuffer) {
+            switch Codec.parseFrame(from: &receiveBuffer) {
             case .needMore: return false
-            case .error: fail("upstream frame exceeded receive cap"); return false
+                        case .error:
+                fail("upstream frame exceeded receive cap")
+                return false
             case .frame(let frame):
                 if handleFrame(frame) { return true }
                 if phase == .failed || phase == .torn { return false }
@@ -496,32 +504,46 @@ actor MITMHTTP2UpstreamLeg {
     }
 
     private func finishPass(parked: Bool) {
-        flushBatchedCredits()
+        announceDueCredits()
         if parked { return }
-        let continuation = parkedContinuation; parkedContinuation = nil; continuation?.resume()
+        let continuation = parkedContinuation
+        parkedContinuation = nil
+        continuation?.resume()
     }
 
-    private func flushBatchedCredits() {
-        if batchedConnCredit > 0 {
-            delegate?.upstreamLegWriteToOrigin(Codec.windowUpdate(streamID: 0, increment: batchedConnCredit))
-            batchedConnCredit = 0
+    private func announceDueCredits() {
+        if unannouncedConnCredit >= Self.creditAnnouncementThreshold {
+            delegate?.upstreamLegWriteToOrigin(Codec.windowUpdate(streamID: 0, increment: unannouncedConnCredit))
+            unannouncedConnCredit = 0
         }
-        guard !batchedStreamCredit.isEmpty else { return }
-        for (sid, n) in batchedStreamCredit where n > 0 {
-            delegate?.upstreamLegWriteToOrigin(Codec.windowUpdate(streamID: sid, increment: n))
+        var announced: [UInt32] = []
+        for (upstreamStreamID, credit) in unannouncedStreamCredit where credit >= Self.creditAnnouncementThreshold {
+            delegate?.upstreamLegWriteToOrigin(Codec.windowUpdate(streamID: upstreamStreamID, increment: credit))
+            announced.append(upstreamStreamID)
         }
-        batchedStreamCredit.removeAll(keepingCapacity: true)
+        for upstreamStreamID in announced { unannouncedStreamCredit.removeValue(forKey: upstreamStreamID) }
+    }
+
+    private func announceStreamCreditIfDue(_ upstreamStreamID: UInt32) {
+        guard let credit = unannouncedStreamCredit[upstreamStreamID], credit >= Self.creditAnnouncementThreshold else { return }
+        unannouncedStreamCredit.removeValue(forKey: upstreamStreamID)
+        delegate?.upstreamLegWriteToOrigin(Codec.windowUpdate(streamID: upstreamStreamID, increment: credit))
     }
 
     private func resumeAfterScript() {
-        guard phase != .torn, phase != .failed else { let continuation = parkedContinuation; parkedContinuation = nil; continuation?.resume(); return }
+        guard phase != .torn, phase != .failed else {
+            let continuation = parkedContinuation
+            parkedContinuation = nil
+            continuation?.resume()
+            return
+        }
         let parked = pump()
         finishPass(parked: parked)
     }
 
     private func fail(_ message: String) {
         guard transition(to: .failed) else { return }
-        rxBuffer = MITMByteBuffer()
+        receiveBuffer = MITMByteBuffer()
         pending = nil
         refuseAllQueued()
         logger.warning("h2-upstream \(host): \(message); tearing down")
@@ -529,8 +551,8 @@ actor MITMHTTP2UpstreamLeg {
     }
 
     private func handleFrame(_ frame: Codec.RawFrame) -> Bool {
-        if let p = pending, frame.typeCode != Codec.FrameType.continuation {
-            fail("frame interleaved with pending HEADERS on stream \(p.streamID)")
+        if let pendingHeaders = pending, frame.typeCode != Codec.FrameType.continuation {
+            fail("frame interleaved with pending HEADERS on stream \(pendingHeaders.streamID)")
             return false
         }
         switch frame.typeCode {
@@ -551,7 +573,10 @@ actor MITMHTTP2UpstreamLeg {
     }
 
     private func handleSettings(_ frame: Codec.RawFrame) {
-        guard frame.streamID == 0 else { fail("upstream SETTINGS on non-zero stream"); return }
+        guard frame.streamID == 0 else {
+            fail("upstream SETTINGS on non-zero stream")
+            return
+        }
         if frame.flags & 0x1 != 0 { return }
         let payload = frame.payload
         var i = payload.startIndex
@@ -576,39 +601,39 @@ actor MITMHTTP2UpstreamLeg {
     }
 
     private func handleWindowUpdate(_ frame: Codec.RawFrame) {
-        guard let inc = Codec.windowUpdateIncrement(frame.payload), inc > 0 else { return }
+        guard let increment = Codec.windowUpdateIncrement(frame.payload), increment > 0 else { return }
         if frame.streamID == 0 {
-            flowController.creditServerConnection(inc)
+            flowController.creditServerConnection(increment)
             distributeServerConnectionWindow()
-        } else if let clientID = theirStreamID[frame.streamID], pendingRequestBodies[clientID] != nil {
+        } else if let clientID = clientStreamIDByUpstream[frame.streamID], pendingRequestBodies[clientID] != nil {
             let current = pendingRequestBodies[clientID]?.streamWindow ?? 0
-            pendingRequestBodies[clientID]?.streamWindow = min(MITMHTTP2FlowController.maxWindow, current + inc)
+            pendingRequestBodies[clientID]?.streamWindow = min(MITMHTTP2FlowController.maxWindow, current + increment)
             flushRequestBody(clientID)
         }
     }
 
     private func handleUpstreamRST(_ frame: Codec.RawFrame) {
-        let sid = frame.streamID
-        guard sid != 0, let clientID = theirStreamID[sid] else { return }
+        let upstreamStreamID = frame.streamID
+        guard upstreamStreamID != 0, let clientID = clientStreamIDByUpstream[upstreamStreamID] else { return }
         releaseStream(clientID: clientID)
         sink?.deliverResponseReset(streamID: clientID, errorCode: Self.rstErrorCode(frame.payload))
     }
 
     private static func rstErrorCode(_ payload: Data) -> UInt32 {
         guard payload.count >= 4 else { return Codec.ErrorCode.internalError }
-        let s = payload.startIndex
-        return UInt32(payload[s]) << 24 | UInt32(payload[s + 1]) << 16
-            | UInt32(payload[s + 2]) << 8 | UInt32(payload[s + 3])
+        let start = payload.startIndex
+        return UInt32(payload[start]) << 24 | UInt32(payload[start + 1]) << 16
+            | UInt32(payload[start + 2]) << 8 | UInt32(payload[start + 3])
     }
 
     private func handleGoAway(_ frame: Codec.RawFrame) {
         guard frame.streamID == 0, frame.payload.count >= 8 else { return }
-        let p = frame.payload
-        let s = p.startIndex
-        let lastStreamID = (UInt32(p[s]) & 0x7F) << 24 | UInt32(p[s + 1]) << 16 | UInt32(p[s + 2]) << 8 | UInt32(p[s + 3])
+        let payload = frame.payload
+        let start = payload.startIndex
+        let lastStreamID = (UInt32(payload[start]) & 0x7F) << 24 | UInt32(payload[start + 1]) << 16 | UInt32(payload[start + 2]) << 8 | UInt32(payload[start + 3])
         let enteredGoingAway = transition(to: .goingAway)
         if enteredGoingAway { refuseAllQueued() }
-        for (clientID, upstreamID) in Array(ourStreamID) where upstreamID > lastStreamID {
+        for (clientID, upstreamID) in Array(upstreamStreamIDByClient) where upstreamID > lastStreamID {
             releaseStream(clientID: clientID)
             sink?.deliverResponseReset(streamID: clientID, errorCode: Codec.ErrorCode.refusedStream)
         }
@@ -618,12 +643,18 @@ actor MITMHTTP2UpstreamLeg {
     // MARK: Response HEADERS
 
     private func handleHeaders(_ frame: Codec.RawFrame) -> Bool {
-        guard frame.streamID != 0 else { fail("HEADERS on stream 0"); return false }
+        guard frame.streamID != 0 else {
+            fail("HEADERS on stream 0")
+            return false
+        }
         guard let block = Codec.stripHeadersPadding(payload: frame.payload, flags: frame.flags) else {
             fail("HEADERS with invalid padding")
             return false
         }
-        if block.count > Self.maxHeaderBlockBytes { fail("HEADERS block over cap"); return false }
+        if block.count > Self.maxHeaderBlockBytes {
+            fail("HEADERS block over cap")
+            return false
+        }
         if frame.flags & 0x4 != 0 {
             return finalizeHeaders(streamID: frame.streamID, fragments: block, originalFlags: frame.flags)
         }
@@ -632,18 +663,30 @@ actor MITMHTTP2UpstreamLeg {
     }
 
     private func handleContinuation(_ frame: Codec.RawFrame) -> Bool {
-        guard var p = pending, p.streamID == frame.streamID else { fail("stray CONTINUATION"); return false }
+        guard var pendingHeaders = pending, pendingHeaders.streamID == frame.streamID else {
+            fail("stray CONTINUATION")
+            return false
+        }
         let isFinal = frame.flags & 0x4 != 0
-        if frame.payload.isEmpty && !isFinal { fail("zero-length CONTINUATION without END_HEADERS"); return false }
-        p.continuationCount += 1
-        if p.continuationCount > Self.maxContinuationFrames { fail("too many CONTINUATION frames"); return false }
-        if p.fragments.count + frame.payload.count > Self.maxHeaderBlockBytes { fail("header block over cap"); return false }
-        p.fragments.append(frame.payload)
+        if frame.payload.isEmpty && !isFinal {
+            fail("zero-length CONTINUATION without END_HEADERS")
+            return false
+        }
+        pendingHeaders.continuationCount += 1
+        if pendingHeaders.continuationCount > Self.maxContinuationFrames {
+            fail("too many CONTINUATION frames")
+            return false
+        }
+        if pendingHeaders.fragments.count + frame.payload.count > Self.maxHeaderBlockBytes {
+            fail("header block over cap")
+            return false
+        }
+        pendingHeaders.fragments.append(frame.payload)
         if isFinal {
             pending = nil
-            return finalizeHeaders(streamID: p.streamID, fragments: p.fragments, originalFlags: p.originalFlags)
+            return finalizeHeaders(streamID: pendingHeaders.streamID, fragments: pendingHeaders.fragments, originalFlags: pendingHeaders.originalFlags)
         }
-        pending = p
+        pending = pendingHeaders
         return false
     }
 
@@ -655,7 +698,7 @@ actor MITMHTTP2UpstreamLeg {
         let decoded = result.fields
         let neverIndexed = result.neverIndexed
         let endStream = originalFlags & 0x1 != 0
-        guard let clientID = theirStreamID[streamID] else {
+        guard let clientID = clientStreamIDByUpstream[streamID] else {
             if streamID >= nextUpstreamStreamID {
                 fail("response HEADERS on idle upstream stream \(streamID)")
             } else {
@@ -669,8 +712,8 @@ actor MITMHTTP2UpstreamLeg {
             return false
         }
 
-        if let bad = HTTPHeader.firstInvalidOctet(decoded) {
-            logger.warning("h2-upstream \(host) stream \(clientID): response header rejected — \(bad.reason) on \"\(HTTPHeader.escapedForLog(bad.name))\"; resetting stream")
+        if let invalidOctet = HTTPHeader.firstInvalidOctet(decoded) {
+            logger.warning("h2-upstream \(host) stream \(clientID): response header rejected — \(invalidOctet.reason) on \"\(HTTPHeader.escapedForLog(invalidOctet.name))\"; resetting stream")
             sink?.deliverResponseReset(streamID: clientID)
             releaseStream(clientID: clientID, resetOrigin: true)
             return false
@@ -788,7 +831,8 @@ actor MITMHTTP2UpstreamLeg {
             self.sessionContext.enqueue {
                 self.assumeIsolated { leg in
                     guard leg.phase != .torn, leg.phase != .failed else {
-                        let continuation = leg.parkedContinuation; leg.parkedContinuation = nil
+                        let continuation = leg.parkedContinuation
+                        leg.parkedContinuation = nil
                         continuation?.resume()
                         return
                     }
@@ -804,17 +848,20 @@ actor MITMHTTP2UpstreamLeg {
     // MARK: Response DATA
 
     private func handleData(_ frame: Codec.RawFrame) -> Bool {
-        guard frame.streamID != 0 else { fail("DATA on stream 0"); return false }
+        guard frame.streamID != 0 else {
+            fail("DATA on stream 0")
+            return false
+        }
         let onWireLength = frame.payload.count
         guard let body = Codec.stripDataPadding(payload: frame.payload, flags: frame.flags) else {
             fail("DATA with invalid padding")
             return false
         }
         let endStream = frame.flags & 0x1 != 0
-        let sid = frame.streamID
-        guard let clientID = theirStreamID[sid] else {
-            if sid >= nextUpstreamStreamID {
-                fail("DATA on idle upstream stream \(sid)")
+        let upstreamStreamID = frame.streamID
+        guard let clientID = clientStreamIDByUpstream[upstreamStreamID] else {
+            if upstreamStreamID >= nextUpstreamStreamID {
+                fail("DATA on idle upstream stream \(upstreamStreamID)")
                 return false
             }
             creditConnectionWindow(onWireLength)
@@ -825,51 +872,55 @@ actor MITMHTTP2UpstreamLeg {
         case .passthrough:
             creditConnectionWindow(onWireLength)
             if drainCoupledStreams.contains(clientID) {
-                creditStreamWindow(sid, onWireLength - body.count)
+                creditStreamWindow(upstreamStreamID, onWireLength - body.count)
             } else {
-                creditStreamWindow(sid, onWireLength)
+                creditStreamWindow(upstreamStreamID, onWireLength)
             }
             sink?.deliverResponseData(streamID: clientID, body, endStream: endStream)
             if endStream { finalizeResponseHalf(clientID: clientID, originEnded: true) }
             return false
 
-        case .buffering(var buffer):
-            ackUpstream(upstreamStreamID: sid, length: onWireLength)
-            buffer.data.append(body)
-            if !endStream, buffer.data.count > MITMBodyCodec.maxBufferedBodyBytes {
-                responseStreams[clientID] = .passthrough
-                sink?.deliverResponseHead(
-                    streamID: clientID, status: buffer.status,
-                    headers: buffer.headers.filter { !$0.name.hasPrefix(":") },
-                    endStream: false,
-                    neverIndexed: buffer.neverIndexed
-                )
-                sink?.deliverResponseData(streamID: clientID, buffer.data, endStream: false)
-                return false
-            }
-            responseStreams[clientID] = .buffering(buffer)
-            if endStream { return runResponseScripts(clientID) }
-            return false
+        case .buffering:
+            ackUpstream(upstreamStreamID: upstreamStreamID, length: onWireLength)
+            return appendBufferedResponse(clientID: clientID, body: body, endStream: endStream)
 
         case .streaming:
-            ackUpstream(upstreamStreamID: sid, length: onWireLength)
+            ackUpstream(upstreamStreamID: upstreamStreamID, length: onWireLength)
             return handleStreamingData(streamID: clientID, body: body, endStream: endStream)
 
         case nil:
-            ackUpstream(upstreamStreamID: sid, length: onWireLength)
+            ackUpstream(upstreamStreamID: upstreamStreamID, length: onWireLength)
             return false
         }
     }
 
+    private func appendBufferedResponse(clientID: UInt32, body: Data, endStream: Bool) -> Bool {
+        guard case .buffering(var buffer)? = responseStreams.removeValue(forKey: clientID) else { return false }
+        buffer.data.append(body)
+        if !endStream, buffer.data.count > MITMBodyCodec.maxBufferedBodyBytes {
+            responseStreams[clientID] = .passthrough
+            sink?.deliverResponseHead(
+                streamID: clientID, status: buffer.status,
+                headers: buffer.headers.filter { !$0.name.hasPrefix(":") },
+                endStream: false,
+                neverIndexed: buffer.neverIndexed
+            )
+            sink?.deliverResponseData(streamID: clientID, buffer.data, endStream: false)
+            return false
+        }
+        responseStreams[clientID] = .buffering(buffer)
+        if endStream { return runResponseScripts(clientID) }
+        return false
+    }
+
     private func creditConnectionWindow(_ byteCount: Int) {
         guard byteCount > 0 else { return }
-        // Accumulate; flushed at `finishPass`.
-        batchedConnCredit += byteCount
+        unannouncedConnCredit += byteCount
     }
 
     private func creditStreamWindow(_ upstreamStreamID: UInt32, _ byteCount: Int) {
         guard byteCount > 0 else { return }
-        batchedStreamCredit[upstreamStreamID, default: 0] += byteCount
+        unannouncedStreamCredit[upstreamStreamID, default: 0] += byteCount
     }
 
     private func ackUpstream(upstreamStreamID: UInt32, length: Int) {
@@ -877,10 +928,10 @@ actor MITMHTTP2UpstreamLeg {
         creditConnectionWindow(length)
     }
 
-    func creditDrainedResponse(clientID: UInt32, _ n: Int) {
-        guard phase != .torn, n > 0, drainCoupledStreams.contains(clientID), let sid = ourStreamID[clientID] else { return }
-        creditStreamWindow(sid, n)
-        flushBatchedCredits()
+    func creditDrainedResponse(clientID: UInt32, _ byteCount: Int) {
+        guard phase != .torn, byteCount > 0, drainCoupledStreams.contains(clientID), let upstreamStreamID = upstreamStreamIDByClient[clientID] else { return }
+        creditStreamWindow(upstreamStreamID, byteCount)
+        announceStreamCreditIfDue(upstreamStreamID)
     }
 
     private func finishResponseStream(streamID: UInt32, endStream: Bool, trailers: [(name: String, value: String)] = []) -> Bool {
@@ -911,7 +962,13 @@ actor MITMHTTP2UpstreamLeg {
         neverIndexed: Set<String>
     ) {
         let headers = MITMBridgeHeaders.settingContentLength(headers, body.count)
-        sink?.deliverResponseHead(streamID: streamID, status: status, headers: headers, endStream: body.isEmpty && trailers.isEmpty, neverIndexed: neverIndexed)
+        sink?.deliverResponseHead(
+            streamID: streamID,
+            status: status,
+            headers: headers,
+            endStream: body.isEmpty && trailers.isEmpty,
+            neverIndexed: neverIndexed
+        )
         if !body.isEmpty { sink?.deliverResponseData(streamID: streamID, body, endStream: trailers.isEmpty) }
         if !trailers.isEmpty { sink?.deliverResponseTrailers(streamID: streamID, trailers) }
     }
@@ -961,7 +1018,7 @@ actor MITMHTTP2UpstreamLeg {
             phase: .httpResponse,
             method: buffer.originatingRequest?.method,
             url: buffer.originatingRequest?.url,
-            originalUrl: buffer.originatingRequest?.originalUrl,
+            originalURL: buffer.originatingRequest?.originalURL,
             status: buffer.status,
             headers: scriptedHeaders.filter { !$0.name.hasPrefix(":") },
             body: plaintext,
@@ -982,9 +1039,23 @@ actor MITMHTTP2UpstreamLeg {
                             logger.warning("h2-upstream \(leg.host) stream \(streamID): response grew over cap; using original body")
                             body = plaintext
                         }
-                        leg.deliverFinalResponse(streamID: streamID, status: buffer.status, headers: regular, body: body, trailers: trailers, neverIndexed: buffer.neverIndexed)
+                        leg.deliverFinalResponse(
+                            streamID: streamID,
+                            status: buffer.status,
+                            headers: regular,
+                            body: body,
+                            trailers: trailers,
+                            neverIndexed: buffer.neverIndexed
+                        )
                     case .synthesizedResponse:
-                        leg.deliverFinalResponse(streamID: streamID, status: buffer.status, headers: regular, body: plaintext, trailers: trailers, neverIndexed: buffer.neverIndexed)
+                        leg.deliverFinalResponse(
+                            streamID: streamID,
+                            status: buffer.status,
+                            headers: regular,
+                            body: plaintext,
+                            trailers: trailers,
+                            neverIndexed: buffer.neverIndexed
+                        )
                     }
                 }
             }
@@ -996,7 +1067,7 @@ actor MITMHTTP2UpstreamLeg {
 
     private func handleStreamingData(streamID: UInt32, body: Data, endStream: Bool, trailers: [(name: String, value: String)] = []) -> Bool {
         guard case .streaming(let streamingResponse)? = responseStreams[streamID] else { return false }
-        if streamingResponse.cursor.mutable.withLock({ $0.bypass }) {
+        if streamingResponse.cursor.mutable.withLock({ $0.isBypassed }) {
             advanceStreaming(streamID)
             deliverStreamingFrame(streamID: streamID, body: body, endStream: endStream, trailers: trailers)
             return false
@@ -1005,7 +1076,7 @@ actor MITMHTTP2UpstreamLeg {
             phase: .httpResponse,
             method: streamingResponse.originatingRequest?.method,
             url: streamingResponse.originatingRequest?.url,
-            originalUrl: streamingResponse.originatingRequest?.originalUrl,
+            originalURL: streamingResponse.originatingRequest?.originalURL,
             status: streamingResponse.status,
             headers: streamingResponse.headers.filter { !$0.name.hasPrefix(":") },
             frameIndex: streamingResponse.frameIndex,
@@ -1035,7 +1106,7 @@ actor MITMHTTP2UpstreamLeg {
     private func advanceStreaming(_ streamID: UInt32, growth: Int = 0) {
         guard case .streaming(var streamingResponse)? = responseStreams[streamID] else { return }
         streamingResponse.frameIndex += 1
-        if growth > Self.maxStreamingRewriteGrowthBytes { streamingResponse.cursor.mutable.withLock { $0.bypass = true } }
+        if growth > Self.maxStreamingRewriteGrowthBytes { streamingResponse.cursor.mutable.withLock { $0.isBypassed = true } }
         responseStreams[streamID] = .streaming(streamingResponse)
     }
 }

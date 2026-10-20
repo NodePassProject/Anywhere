@@ -107,12 +107,12 @@ actor MITMHTTP1Stream {
     private enum StreamingPostFrame {
         case hold(nextPending: Data?, inner: StreamingChunkedInner)
         case finalThenTrailer
-        case bypassRemainder(left: Int, accumulator: Data)
+        case bypassRemainder(left: Int)
     }
 
     private enum StreamingChunkedInner {
         case sizeLine
-        case chunkData(remaining: Int, accumulator: Data)
+        case chunkData(remaining: Int)
         case dataCRLF
         case trailerOrEnd
     }
@@ -122,9 +122,9 @@ actor MITMHTTP1Stream {
         case forwardingLength(remaining: Int)
         case forwardingChunked(reader: ChunkedReader)
         case bridgeForwardUntilClose
-        case rewritingLength(pending: PendingHead, expected: Int, accumulator: Data)
-        case rewritingChunked(pending: PendingHead, accumulator: Data, reader: ChunkedReader)
-        case rewritingUntilClose(pending: PendingHead, accumulator: Data)
+        case rewritingLength(pending: PendingHead, expected: Int)
+        case rewritingChunked(pending: PendingHead, reader: ChunkedReader)
+        case rewritingUntilClose(pending: PendingHead)
         case discardingChunked(reader: ChunkedReader)
         case discardingLength(remaining: Int)
         case draining
@@ -172,7 +172,7 @@ actor MITMHTTP1Stream {
     weak var responseIRSink: MITMHTTP1ResponseIRSink?
 
     private var parkedContinuation: CheckedContinuation<Data, Never>?
-    
+
     private var pendingHop: Task<Void, Never>?
 
     private var pendingPreParkOutput = Data()
@@ -198,36 +198,46 @@ actor MITMHTTP1Stream {
     }
 
     private var forcePassthroughPending = false
-    private var rxBuffer = MITMByteBuffer()
+    private var receiveBuffer = MITMByteBuffer()
+
+    private var bodyAccumulator = Data()
+    private var chunkAccumulator = Data()
+
+    private func takeBodyAccumulator() -> Data {
+        defer { bodyAccumulator = Data() }
+        return bodyAccumulator
+    }
+
+    private func takeChunkAccumulator() -> Data {
+        defer { chunkAccumulator = Data() }
+        return chunkAccumulator
+    }
 
     private var headScanned: Int = 0
 
     private var pendingClientBytes = Data()
 
-    private var pendingSynthAfterCurrentResponse = Data()
+    private var pendingSynthesizedAfterCurrentResponse = Data()
+
+    private var hasRewriteRule: Bool {
+        rules.contains { rule in
+            if case .rewrite = rule.operation { return true }
+            return false
+        }
+    }
 
     var isBetweenMessages: Bool {
         guard case .awaitingHead = mode else { return false }
-        return rxBuffer.isEmpty
+        return receiveBuffer.isEmpty
             && parkedContinuation == nil
             && !forcePassthroughPending
-            && pendingSynthAfterCurrentResponse.isEmpty
+            && pendingSynthesizedAfterCurrentResponse.isEmpty
     }
 
     // MARK: - Public API
 
-    private func onIPStack<T>(_ body: @escaping () -> T) async -> T {
-        await sessionContext.run(body)
-    }
-
-    private func onIPStackParked<T>(_ body: @escaping (CheckedContinuation<T, Never>) -> Void) async -> T {
-        await sessionContext.runParked(body)
-    }
-
     func transform(_ data: Data) async -> Data {
-        await onIPStackParked { (continuation: CheckedContinuation<Data, Never>) in
-            self.transformOnQueue(data, continuation: continuation)
-        }
+        await withCheckedContinuation { transformOnQueue(data, continuation: $0) }
     }
 
     private func transformOnQueue(_ data: Data, continuation: CheckedContinuation<Data, Never>) {
@@ -240,7 +250,7 @@ actor MITMHTTP1Stream {
             continuation.resume(returning: data)
             return
         }
-        rxBuffer.append(data)
+        receiveBuffer.append(data)
         parkedContinuation = continuation
         var output = Data()
         while drive(into: &output) { }
@@ -268,11 +278,13 @@ actor MITMHTTP1Stream {
         parkedContinuation = nil
         pendingPreParkOutput = Data()
         mode = .passthrough
-        rxBuffer = MITMByteBuffer()
+        receiveBuffer = MITMByteBuffer()
+        bodyAccumulator = Data()
+        chunkAccumulator = Data()
         pendingGateTables = PendingGateTables()
         forcePassthroughPending = false
         pendingClientBytes.removeAll(keepingCapacity: false)
-        pendingSynthAfterCurrentResponse.removeAll(keepingCapacity: false)
+        pendingSynthesizedAfterCurrentResponse.removeAll(keepingCapacity: false)
         continuation?.resume(returning: Data())
     }
 
@@ -282,8 +294,8 @@ actor MITMHTTP1Stream {
             return Data()
         }
         if case .passthrough = mode { return Data() }
-        let buffered = rxBuffer.prefix(rxBuffer.count)
-        rxBuffer.removeAll(keepingCapacity: false)
+        let buffered = receiveBuffer.prefix(receiveBuffer.count)
+        receiveBuffer.removeAll(keepingCapacity: false)
         headScanned = 0
         mode = .passthrough
         return buffered
@@ -294,8 +306,8 @@ actor MITMHTTP1Stream {
         forcePassthroughPending = false
         var resumed = pendingPreParkOutput
         pendingPreParkOutput = Data()
-        resumed.append(rxBuffer.prefix(rxBuffer.count))
-        rxBuffer.removeAll(keepingCapacity: false)
+        resumed.append(receiveBuffer.prefix(receiveBuffer.count))
+        receiveBuffer.removeAll(keepingCapacity: false)
         headScanned = 0
         mode = .passthrough
         finishDrivePass(resumed)
@@ -318,9 +330,7 @@ actor MITMHTTP1Stream {
     }
 
     func finish() async -> Data {
-        await onIPStackParked { (continuation: CheckedContinuation<Data, Never>) in
-            self.finishOnQueue(continuation: continuation)
-        }
+        await withCheckedContinuation { finishOnQueue(continuation: $0) }
     }
 
     private func finishOnQueue(continuation: CheckedContinuation<Data, Never>) {
@@ -344,7 +354,7 @@ actor MITMHTTP1Stream {
                 return
             }
         }
-        guard case .rewritingUntilClose(let pending, let accumulator) = mode else {
+        guard case .rewritingUntilClose(let pending) = mode else {
             continuation.resume(returning: Data())
             return
         }
@@ -352,7 +362,7 @@ actor MITMHTTP1Stream {
         var output = Data()
         let parked = applyScriptsAndEmit(
             pending: pending,
-            rawBody: accumulator,
+            rawBody: takeBodyAccumulator(),
             originalSizes: nil,
             resumeMode: .passthrough,
             into: &output
@@ -364,13 +374,13 @@ actor MITMHTTP1Stream {
         finishDrivePass(output)
     }
 
-    private func flushSynthAfterResponse(into output: inout Data) {
+    private func flushSynthesizedAfterResponse(into output: inout Data) {
         if direction == .httpResponse {
-            pendingSynthAfterCurrentResponse.append(requestLog.closeHTTP1Response())
+            pendingSynthesizedAfterCurrentResponse.append(requestLog.closeHTTP1Response())
         }
-        if !pendingSynthAfterCurrentResponse.isEmpty {
-            output.append(pendingSynthAfterCurrentResponse)
-            pendingSynthAfterCurrentResponse.removeAll(keepingCapacity: false)
+        if !pendingSynthesizedAfterCurrentResponse.isEmpty {
+            output.append(pendingSynthesizedAfterCurrentResponse)
+            pendingSynthesizedAfterCurrentResponse.removeAll(keepingCapacity: false)
         }
     }
 
@@ -380,14 +390,14 @@ actor MITMHTTP1Stream {
         switch mode {
         case .passthrough:
             if bridgeResetIfNeeded() { return false }
-            output.append(rxBuffer.prefix(rxBuffer.count))
-            rxBuffer.removeAll(keepingCapacity: false)
+            output.append(receiveBuffer.prefix(receiveBuffer.count))
+            receiveBuffer.removeAll(keepingCapacity: false)
             return false
 
         case .bridgeForwardUntilClose:
-            guard !rxBuffer.isEmpty else { return false }
-            _ = emitBridgeBody(Data(rxBuffer.prefix(rxBuffer.count)), endStream: false)
-            rxBuffer.removeAll(keepingCapacity: false)
+            guard !receiveBuffer.isEmpty else { return false }
+            _ = emitBridgeBody(Data(receiveBuffer.prefix(receiveBuffer.count)), endStream: false)
+            receiveBuffer.removeAll(keepingCapacity: false)
             return false
 
         case .awaitingScript, .awaitingGates:
@@ -403,17 +413,14 @@ actor MITMHTTP1Stream {
             mode = .forwardingChunked(reader: reader)
             return forwardChunked(reader: &reader, into: &output)
 
-        case .rewritingLength(let pending, let expected, var accumulator):
-            mode = .rewritingLength(pending: pending, expected: expected, accumulator: accumulator)
-            return rewriteLength(pending: pending, expected: expected, accumulator: &accumulator, into: &output)
+        case .rewritingLength(let pending, let expected):
+            return rewriteLength(pending: pending, expected: expected, into: &output)
 
-        case .rewritingChunked(let pending, var accumulator, var reader):
-            mode = .rewritingChunked(pending: pending, accumulator: accumulator, reader: reader)
-            return rewriteChunked(pending: pending, accumulator: &accumulator, reader: &reader, into: &output)
+        case .rewritingChunked(let pending, let reader):
+            return rewriteChunked(pending: pending, reader: reader, into: &output)
 
-        case .rewritingUntilClose(let pending, var accumulator):
-            mode = .rewritingUntilClose(pending: pending, accumulator: accumulator)
-            return rewriteUntilClose(pending: pending, accumulator: &accumulator, into: &output)
+        case .rewritingUntilClose(let pending):
+            return rewriteUntilClose(pending: pending, into: &output)
 
         case .discardingChunked(var reader):
             mode = .discardingChunked(reader: reader)
@@ -423,7 +430,7 @@ actor MITMHTTP1Stream {
             return discardLength(remaining: remaining)
 
         case .draining:
-            rxBuffer.removeAll(keepingCapacity: false)
+            receiveBuffer.removeAll(keepingCapacity: false)
             return false
 
         case .streamingChunked(var streaming, let inner):
@@ -435,47 +442,47 @@ actor MITMHTTP1Stream {
     // MARK: - Head consumption
 
     private func consumeHead(into output: inout Data) -> Bool {
-        while rxBuffer.count >= 2, rxBuffer[0] == 0x0D, rxBuffer[1] == 0x0A {
-            output.append(0x0D); output.append(0x0A)
-            rxBuffer.removeFirst(2)
+        while receiveBuffer.count >= 2, receiveBuffer[0] == 0x0D, receiveBuffer[1] == 0x0A {
+            output.append(contentsOf: [0x0D, 0x0A])
+            receiveBuffer.removeFirst(2)
             headScanned = 0
         }
-        let crlfcrlf = Data([0x0D, 0x0A, 0x0D, 0x0A])
-        let searchFrom = max(0, headScanned - (crlfcrlf.count - 1))
-        guard let terminator = rxBuffer.range(of: crlfcrlf, from: searchFrom) else {
-            if rxBuffer.count > Self.maxHeadBytes {
+        let headTerminator = Data([0x0D, 0x0A, 0x0D, 0x0A])
+        let searchFrom = max(0, headScanned - (headTerminator.count - 1))
+        guard let terminator = receiveBuffer.range(of: headTerminator, from: searchFrom) else {
+            if receiveBuffer.count > Self.maxHeadBytes {
                 logger.warning("HTTP/1 \(host): head exceeded \(Self.maxHeadBytes) B without CRLF CRLF; closing the connection without forwarding")
-                rxBuffer.removeAll(keepingCapacity: false)
+                receiveBuffer.removeAll(keepingCapacity: false)
                 headScanned = 0
                 mode = .draining
                 delegate?.http1StreamFatalClose(self)
                 return false
             }
-            headScanned = rxBuffer.count
+            headScanned = receiveBuffer.count
             return false
         }
         headScanned = 0
         let headEnd = terminator.upperBound
         guard headEnd <= Self.maxHeadBytes else {
             logger.warning("HTTP/1 \(host): head exceeded \(Self.maxHeadBytes) B; closing the connection without forwarding")
-            rxBuffer.removeAll(keepingCapacity: false)
+            receiveBuffer.removeAll(keepingCapacity: false)
             mode = .draining
             delegate?.http1StreamFatalClose(self)
             return false
         }
-        let headData = rxBuffer.subdata(in: 0..<headEnd)
+        let headData = receiveBuffer.subdata(in: 0..<headEnd)
 
         let parsed: ParsedHead
         switch parseHead(headData) {
         case .ok(let parsedHead):
             parsed = parsedHead
         case .forward:
-            rxBuffer.removeFirst(headEnd)
+            receiveBuffer.removeFirst(headEnd)
             mode = .passthrough
             output.append(headData)
             return true
         case .smuggling:
-            rxBuffer.removeFirst(headEnd)
+            receiveBuffer.removeFirst(headEnd)
             logger.warning("HTTP/1 \(host): rejecting message with a framing/smuggling violation; closing the connection without forwarding")
             mode = .draining
             delegate?.http1StreamFatalClose(self)
@@ -483,12 +490,11 @@ actor MITMHTTP1Stream {
         }
 
         guard let gates = ensureGateTables(parsed: parsed) else { return false }
-        rxBuffer.removeFirst(headEnd)
+        receiveBuffer.removeFirst(headEnd)
         pendingGateTables = PendingGateTables()
 
         let rewrittenStartLine: String
-        if direction == .httpRequest,
-           rules.contains(where: { if case .rewrite = $0.operation { return true }; return false }) {
+        if direction == .httpRequest, hasRewriteRule {
             effectiveAuthority = nil
             resolvedUpstreamValue = nil
         }
@@ -519,8 +525,8 @@ actor MITMHTTP1Stream {
             } else {
                 let popped = requestLog.popHTTP1()
                 originatingRequest = popped
-                if let popped, !popped.synthAfter.isEmpty {
-                    pendingSynthAfterCurrentResponse.append(popped.synthAfter)
+                if let popped, !popped.synthesizedAfter.isEmpty {
+                    pendingSynthesizedAfterCurrentResponse.append(popped.synthesizedAfter)
                 }
             }
         } else {
@@ -554,25 +560,25 @@ actor MITMHTTP1Stream {
             if case .readUntilClose = framing, buffersBody,
                !MITMScriptTransform.hasStreamScriptRule(in: rules, verdicts: gates.ruleTable) {
                 let codec = MITMBodyCodec.plan(for: combinedHeaderValue(rewrittenHeaders, name: "content-encoding"))
-                let teContentCoded = Self.transferEncodingHasContentCoding(combinedHeaderValue(rewrittenHeaders, name: "transfer-encoding"))
-                if codec.supported, !codec.requiresDecompression, !teContentCoded {
+                let hasContentCodedTransferEncoding = Self.transferEncodingHasContentCoding(combinedHeaderValue(rewrittenHeaders, name: "transfer-encoding"))
+                if codec.isSupported, !codec.requiresDecompression, !hasContentCodedTransferEncoding {
                     warnIfBufferedScriptDeStreams(rewrittenHeaders)
                     var headers = rewrittenHeaders.filter {
                         !ASCII.equalsIgnoringCase($0.name, "connection")
                     }
                     headers.append((name: "Connection", value: "close"))
+                    bodyAccumulator = Data()
                     mode = .rewritingUntilClose(
                         pending: PendingHead(
                             startLine: rewrittenStartLine,
                             headers: headers,
                             codec: codec,
                             originatingRequest: originatingRequest
-                        ),
-                        accumulator: Data()
+                        )
                     )
                     return true
                 }
-                if teContentCoded {
+                if hasContentCodedTransferEncoding {
                     logger.warning("HTTP/1 \(host): Transfer-Encoding content-coding not decodable on the buffered path; forwarding verbatim")
                 }
             }
@@ -599,7 +605,7 @@ actor MITMHTTP1Stream {
                 return true
             }
             output.append(serializeHead(startLine: rewrittenStartLine, headers: finalHeaders))
-            flushSynthAfterResponse(into: &output)
+            flushSynthesizedAfterResponse(into: &output)
             mode = .passthrough
             if case .switchingProtocols = framing {
                 delegate?.http1StreamDidUpgrade(self)
@@ -650,7 +656,7 @@ actor MITMHTTP1Stream {
                 return true
             }
             emitResponseHead(startLine: rewrittenStartLine, headers: rewrittenHeaders, bodyFollows: false, into: &output)
-            flushSynthAfterResponse(into: &output)
+            flushSynthesizedAfterResponse(into: &output)
             mode = .awaitingHead
             return true
         case .contentLength(let length):
@@ -772,10 +778,11 @@ actor MITMHTTP1Stream {
         }
 
         let codec = MITMBodyCodec.plan(for: combinedHeaderValue(rewrittenHeaders, name: "content-encoding"))
-        let canRewrite = buffersBody && codec.supported && length <= MITMBodyCodec.maxBufferedBodyBytes
+        let canRewrite = buffersBody && codec.isSupported && length <= MITMBodyCodec.maxBufferedBodyBytes
 
         if canRewrite {
             let headers = handleExpectContinue(startLine: rewrittenStartLine, headers: rewrittenHeaders)
+            bodyAccumulator = Data()
             mode = .rewritingLength(
                 pending: PendingHead(
                     startLine: rewrittenStartLine,
@@ -783,8 +790,7 @@ actor MITMHTTP1Stream {
                     codec: codec,
                     originatingRequest: originatingRequest
                 ),
-                expected: length,
-                accumulator: Data()
+                expected: length
             )
             return true
         }
@@ -833,10 +839,11 @@ actor MITMHTTP1Stream {
         }
 
         let codec = MITMBodyCodec.plan(for: combinedHeaderValue(rewrittenHeaders, name: "content-encoding"))
-        let teContentCoded = Self.transferEncodingHasContentCoding(combinedHeaderValue(rewrittenHeaders, name: "transfer-encoding"))
-        if buffersBody, codec.supported, !teContentCoded {
+        let hasContentCodedTransferEncoding = Self.transferEncodingHasContentCoding(combinedHeaderValue(rewrittenHeaders, name: "transfer-encoding"))
+        if buffersBody, codec.isSupported, !hasContentCodedTransferEncoding {
             warnIfBufferedScriptDeStreams(rewrittenHeaders)
             let headers = handleExpectContinue(startLine: rewrittenStartLine, headers: rewrittenHeaders)
+            bodyAccumulator = Data()
             mode = .rewritingChunked(
                 pending: PendingHead(
                     startLine: rewrittenStartLine,
@@ -844,12 +851,11 @@ actor MITMHTTP1Stream {
                     codec: codec,
                     originatingRequest: originatingRequest
                 ),
-                accumulator: Data(),
                 reader: ChunkedReader()
             )
             return true
         }
-        if buffersBody, teContentCoded {
+        if buffersBody, hasContentCodedTransferEncoding {
             logger.warning("HTTP/1 \(host): Transfer-Encoding content-coding not decodable on the buffered path; forwarding verbatim")
         }
         if direction == .httpRequest {
@@ -874,7 +880,7 @@ actor MITMHTTP1Stream {
         if requestLog.isHTTP1QueueEmpty {
             pendingClientBytes.append(interim)
         } else {
-            requestLog.attachSynthAfterLastHTTP1(interim)
+            requestLog.attachSynthesizedAfterLastHTTP1(interim)
         }
         return headers.filter { !ASCII.equalsIgnoringCase($0.name, "expect") }
     }
@@ -882,16 +888,16 @@ actor MITMHTTP1Stream {
     // MARK: - Body forwarding (no rewrite)
 
     private func forwardLength(remaining: Int, into output: inout Data) -> Bool {
-        guard !rxBuffer.isEmpty else { return false }
-        let take = min(remaining, rxBuffer.count)
-        let slice = Data(rxBuffer.prefix(take))
-        rxBuffer.removeFirst(take)
+        guard !receiveBuffer.isEmpty else { return false }
+        let take = min(remaining, receiveBuffer.count)
+        let slice = Data(receiveBuffer.prefix(take))
+        receiveBuffer.removeFirst(take)
         let left = remaining - take
         if !emitBridgeBody(slice, endStream: left == 0) {
             output.append(slice)
         }
         if left == 0 {
-            flushSynthAfterResponse(into: &output)
+            flushSynthesizedAfterResponse(into: &output)
             mode = .awaitingHead
         } else {
             mode = .forwardingLength(remaining: left)
@@ -900,17 +906,17 @@ actor MITMHTTP1Stream {
     }
 
     private func forwardChunked(reader: inout ChunkedReader, into output: inout Data) -> Bool {
-        guard !rxBuffer.isEmpty else { return false }
+        guard !receiveBuffer.isEmpty else { return false }
         let result: ChunkedReader.ForwardResult
         if let sink = responseIRSink {
             var slices: [Data] = []
-            result = reader.consumeForwardIR(&rxBuffer) { slices.append($0) }
+            result = reader.consumeForwardIR(&receiveBuffer) { slices.append($0) }
             for slice in slices {
                 sink.http1ResponseBody(slice, endStream: false)
                 if phase == .torn { return false }
             }
         } else {
-            result = reader.consumeForward(&rxBuffer, into: &output)
+            result = reader.consumeForward(&receiveBuffer, into: &output)
         }
         switch result {
         case .needMore:
@@ -921,13 +927,13 @@ actor MITMHTTP1Stream {
                 mode = .awaitingHead
                 return true
             }
-            flushSynthAfterResponse(into: &output)
+            flushSynthesizedAfterResponse(into: &output)
             mode = .awaitingHead
             return true
         case .malformed:
             if bridgeResetIfNeeded() { return false }
             logger.warning("HTTP/1 \(host): chunked framing broke mid-body; closing the connection rather than truncating + desyncing")
-            rxBuffer.removeAll(keepingCapacity: false)
+            receiveBuffer.removeAll(keepingCapacity: false)
             mode = .draining
             delegate?.http1StreamHardClose(self)
             return true
@@ -939,50 +945,46 @@ actor MITMHTTP1Stream {
     private func rewriteLength(
         pending: PendingHead,
         expected: Int,
-        accumulator: inout Data,
         into output: inout Data
     ) -> Bool {
-        guard !rxBuffer.isEmpty else { return false }
-        let needed = expected - accumulator.count
-        let take = min(needed, rxBuffer.count)
-        accumulator.append(rxBuffer.prefix(take))
-        rxBuffer.removeFirst(take)
-        if accumulator.count == expected {
+        guard !receiveBuffer.isEmpty else { return false }
+        let needed = expected - bodyAccumulator.count
+        let take = min(needed, receiveBuffer.count)
+        bodyAccumulator.append(receiveBuffer.prefix(take))
+        receiveBuffer.removeFirst(take)
+        if bodyAccumulator.count == expected {
             let parked = applyScriptsAndEmit(
                 pending: pending,
-                rawBody: accumulator,
+                rawBody: takeBodyAccumulator(),
                 originalSizes: nil,
                 resumeMode: .awaitingHead,
                 into: &output
             )
             return !parked
         }
-        mode = .rewritingLength(pending: pending, expected: expected, accumulator: accumulator)
         return false
     }
 
     private func rewriteChunked(
         pending: PendingHead,
-        accumulator: inout Data,
-        reader: inout ChunkedReader,
+        reader: ChunkedReader,
         into output: inout Data
     ) -> Bool {
-        guard !rxBuffer.isEmpty else { return false }
-        let result = reader.consumeBuffered(&rxBuffer, into: &accumulator)
+        guard !receiveBuffer.isEmpty else { return false }
+        let result = reader.consumeBuffered(&receiveBuffer, into: &bodyAccumulator)
         switch result {
         case .needMore:
-            if accumulator.count > MITMBodyCodec.maxBufferedBodyBytes {
+            if bodyAccumulator.count > MITMBodyCodec.maxBufferedBodyBytes {
                 logger.warning("HTTP/1 \(host): chunked body exceeded \(MITMBodyCodec.maxBufferedBodyBytes) B buffer cap; failing closed rather than truncating to a fake-complete length")
                 mode = .draining
                 delegate?.http1StreamFatalClose(self)
                 return false
             }
-            mode = .rewritingChunked(pending: pending, accumulator: accumulator, reader: reader)
             return false
         case .complete(let originalSizes):
             let parked = applyScriptsAndEmit(
                 pending: pending,
-                rawBody: accumulator,
+                rawBody: takeBodyAccumulator(),
                 originalSizes: originalSizes,
                 resumeMode: .awaitingHead,
                 into: &output
@@ -999,22 +1001,20 @@ actor MITMHTTP1Stream {
 
     private func rewriteUntilClose(
         pending: PendingHead,
-        accumulator: inout Data,
         into output: inout Data
     ) -> Bool {
-        guard !rxBuffer.isEmpty else { return false }
-        accumulator.append(rxBuffer.prefix(rxBuffer.count))
-        rxBuffer.removeAll(keepingCapacity: false)
-        if accumulator.count > MITMBodyCodec.maxBufferedBodyBytes {
+        guard !receiveBuffer.isEmpty else { return false }
+        bodyAccumulator.append(receiveBuffer.prefix(receiveBuffer.count))
+        receiveBuffer.removeAll(keepingCapacity: false)
+        if bodyAccumulator.count > MITMBodyCodec.maxBufferedBodyBytes {
             logger.warning("HTTP/1 \(host): read-until-close body exceeded cap \(MITMBodyCodec.maxBufferedBodyBytes) B; bypassing Script and forwarding verbatim")
             if bridgeResetIfNeeded() { return false }
             output.append(serializeHead(startLine: pending.startLine, headers: pending.headers))
-            output.append(accumulator)
-            flushSynthAfterResponse(into: &output)
+            output.append(takeBodyAccumulator())
+            flushSynthesizedAfterResponse(into: &output)
             mode = .passthrough
             return true
         }
-        mode = .rewritingUntilClose(pending: pending, accumulator: accumulator)
         return false
     }
 
@@ -1027,24 +1027,24 @@ actor MITMHTTP1Stream {
         while true {
             switch currentInner {
             case .sizeLine:
-                guard let lineEnd = rxBuffer.firstCRLF(from: streaming.lineScanCursor) else {
-                    if rxBuffer.count > Self.maxChunkLineBytes {
+                guard let lineEnd = receiveBuffer.firstCRLF(from: streaming.lineScanCursor) else {
+                    if receiveBuffer.count > Self.maxChunkLineBytes {
                         logger.warning("HTTP/1 \(host): chunk-size line exceeded \(Self.maxChunkLineBytes) B without CRLF; closing the connection")
-                        rxBuffer.removeAll(keepingCapacity: false)
+                        receiveBuffer.removeAll(keepingCapacity: false)
                         mode = .draining
                         delegate?.http1StreamHardClose(self)
                         return true
                     }
-                    streaming.lineScanCursor = max(0, rxBuffer.count - 1)
+                    streaming.lineScanCursor = max(0, receiveBuffer.count - 1)
                     mode = .streamingChunked(streaming: streaming, inner: .sizeLine)
                     return false
                 }
-                let line = rxBuffer.subdata(in: 0..<lineEnd)
-                rxBuffer.removeFirst(lineEnd + 2)
+                let line = receiveBuffer.subdata(in: 0..<lineEnd)
+                receiveBuffer.removeFirst(lineEnd + 2)
                 streaming.lineScanCursor = 0
                 guard let size = Self.parseHexSize(line) else {
                     logger.warning("HTTP/1 \(host): malformed chunk-size line; closing the connection")
-                    rxBuffer.removeAll(keepingCapacity: false)
+                    receiveBuffer.removeAll(keepingCapacity: false)
                     mode = .draining
                     delegate?.http1StreamHardClose(self)
                     return true
@@ -1064,21 +1064,19 @@ actor MITMHTTP1Stream {
                     output.append(contentsOf: "0\r\n".utf8)
                     currentInner = .trailerOrEnd
                 } else {
-                    currentInner = .chunkData(remaining: size, accumulator: Data())
+                    chunkAccumulator = Data()
+                    currentInner = .chunkData(remaining: size)
                 }
-            case .chunkData(let remaining, var accumulator):
-                guard !rxBuffer.isEmpty else {
-                    mode = .streamingChunked(
-                        streaming: streaming,
-                        inner: .chunkData(remaining: remaining, accumulator: accumulator)
-                    )
+            case .chunkData(let remaining):
+                guard !receiveBuffer.isEmpty else {
+                    mode = .streamingChunked(streaming: streaming, inner: .chunkData(remaining: remaining))
                     return false
                 }
-                let take = min(remaining, rxBuffer.count)
-                accumulator.append(rxBuffer.prefix(take))
-                rxBuffer.removeFirst(take)
+                let take = min(remaining, receiveBuffer.count)
+                chunkAccumulator.append(receiveBuffer.prefix(take))
+                receiveBuffer.removeFirst(take)
                 let left = remaining - take
-                if left != 0, accumulator.count > MITMBodyCodec.maxBufferedBodyBytes {
+                if left != 0, chunkAccumulator.count > MITMBodyCodec.maxBufferedBodyBytes {
                     logger.warning("HTTP/1 \(host): streaming chunk exceeded cap \(MITMBodyCodec.maxBufferedBodyBytes) B; bypassing Script and forwarding remainder verbatim")
                     if let held = streaming.pendingChunk {
                         streaming.pendingChunk = nil
@@ -1086,77 +1084,72 @@ actor MITMHTTP1Stream {
                             streaming: &streaming,
                             chunk: held,
                             isLast: false,
-                            postFrame: .bypassRemainder(left: left, accumulator: accumulator),
+                            postFrame: .bypassRemainder(left: left),
                             into: &output
                         ) {
                             return false
                         }
                     }
-                    streaming.cursor.mutable.withLock { $0.bypass = true }
-                    appendChunk(accumulator, into: &output)
-                    mode = .streamingChunked(
-                        streaming: streaming,
-                        inner: .chunkData(remaining: left, accumulator: Data())
-                    )
+                    streaming.cursor.mutable.withLock { $0.isBypassed = true }
+                    appendChunk(takeChunkAccumulator(), into: &output)
+                    mode = .streamingChunked(streaming: streaming, inner: .chunkData(remaining: left))
                     return false
                 }
                 if left == 0 {
+                    let completed = takeChunkAccumulator()
                     if let held = streaming.pendingChunk {
                         if emitOrParkStreamingFrame(
                             streaming: &streaming,
                             chunk: held,
                             isLast: false,
-                            postFrame: .hold(nextPending: accumulator, inner: .dataCRLF),
+                            postFrame: .hold(nextPending: completed, inner: .dataCRLF),
                             into: &output
                         ) {
                             return false
                         }
                     }
-                    streaming.pendingChunk = accumulator
+                    streaming.pendingChunk = completed
                     currentInner = .dataCRLF
                 } else {
-                    mode = .streamingChunked(
-                        streaming: streaming,
-                        inner: .chunkData(remaining: left, accumulator: accumulator)
-                    )
+                    mode = .streamingChunked(streaming: streaming, inner: .chunkData(remaining: left))
                     return false
                 }
             case .dataCRLF:
-                guard rxBuffer.count >= 2 else {
+                guard receiveBuffer.count >= 2 else {
                     mode = .streamingChunked(streaming: streaming, inner: .dataCRLF)
                     return false
                 }
-                guard rxBuffer[0] == 0x0D,
-                      rxBuffer[1] == 0x0A
+                guard receiveBuffer[0] == 0x0D,
+                      receiveBuffer[1] == 0x0A
                 else {
                     logger.warning("HTTP/1 \(host): missing CRLF after chunk data; closing the connection")
-                    rxBuffer.removeAll(keepingCapacity: false)
+                    receiveBuffer.removeAll(keepingCapacity: false)
                     mode = .draining
                     delegate?.http1StreamHardClose(self)
                     return true
                 }
-                rxBuffer.removeFirst(2)
+                receiveBuffer.removeFirst(2)
                 currentInner = .sizeLine
             case .trailerOrEnd:
-                guard let lineEnd = rxBuffer.firstCRLF(from: streaming.lineScanCursor) else {
-                    if rxBuffer.count > Self.maxChunkLineBytes {
+                guard let lineEnd = receiveBuffer.firstCRLF(from: streaming.lineScanCursor) else {
+                    if receiveBuffer.count > Self.maxChunkLineBytes {
                         logger.warning("HTTP/1 \(host): chunk trailer line exceeded \(Self.maxChunkLineBytes) B without CRLF; closing the connection")
-                        rxBuffer.removeAll(keepingCapacity: false)
+                        receiveBuffer.removeAll(keepingCapacity: false)
                         mode = .draining
                         delegate?.http1StreamHardClose(self)
                         return true
                     }
-                    streaming.lineScanCursor = max(0, rxBuffer.count - 1)
+                    streaming.lineScanCursor = max(0, receiveBuffer.count - 1)
                     mode = .streamingChunked(streaming: streaming, inner: .trailerOrEnd)
                     return false
                 }
-                let line = rxBuffer.subdata(in: 0..<lineEnd)
-                rxBuffer.removeFirst(lineEnd + 2)
+                let line = receiveBuffer.subdata(in: 0..<lineEnd)
+                receiveBuffer.removeFirst(lineEnd + 2)
                 streaming.lineScanCursor = 0
                 output.append(line)
-                output.append(0x0D); output.append(0x0A)
+                output.append(contentsOf: [0x0D, 0x0A])
                 if line.isEmpty {
-                    flushSynthAfterResponse(into: &output)
+                    flushSynthesizedAfterResponse(into: &output)
                     mode = .awaitingHead
                     return true
                 }
@@ -1171,7 +1164,7 @@ actor MITMHTTP1Stream {
         postFrame: StreamingPostFrame,
         into output: inout Data
     ) -> Bool {
-        if streaming.cursor.mutable.withLock({ $0.bypass }) {
+        if streaming.cursor.mutable.withLock({ $0.isBypassed }) {
             streaming.frameIndex += 1
             if !chunk.isEmpty {
                 appendChunk(chunk, into: &output)
@@ -1182,7 +1175,7 @@ actor MITMHTTP1Stream {
             phase: direction,
             method: streamingMethod(streaming),
             url: streamingURL(streaming),
-            originalUrl: streamingOriginalURL(streaming),
+            originalURL: streamingOriginalURL(streaming),
             status: streamingStatus(streaming),
             headers: streaming.headers,
             frameIndex: streaming.frameIndex,
@@ -1227,13 +1220,10 @@ actor MITMHTTP1Stream {
         case .finalThenTrailer:
             resumed.append(contentsOf: "0\r\n".utf8)
             mode = .streamingChunked(streaming: streaming, inner: .trailerOrEnd)
-        case .bypassRemainder(let left, let accumulator):
-            streaming.cursor.mutable.withLock { $0.bypass = true }
-            appendChunk(accumulator, into: &resumed)
-            mode = .streamingChunked(
-                streaming: streaming,
-                inner: .chunkData(remaining: left, accumulator: Data())
-            )
+        case .bypassRemainder(let left):
+            streaming.cursor.mutable.withLock { $0.isBypassed = true }
+            appendChunk(takeChunkAccumulator(), into: &resumed)
+            mode = .streamingChunked(streaming: streaming, inner: .chunkData(remaining: left))
         }
         while drive(into: &resumed) { }
         finishDrivePass(resumed)
@@ -1265,7 +1255,7 @@ actor MITMHTTP1Stream {
         case .httpRequest:
             return currentRequestOriginalURL
         case .httpResponse:
-            return streaming.originatingRequest?.originalUrl
+            return streaming.originatingRequest?.originalURL
         }
     }
 
@@ -1286,17 +1276,17 @@ actor MITMHTTP1Stream {
     }
 
     private func discardLength(remaining: Int) -> Bool {
-        guard !rxBuffer.isEmpty else { return false }
-        let take = min(remaining, rxBuffer.count)
-        rxBuffer.removeFirst(take)
+        guard !receiveBuffer.isEmpty else { return false }
+        let take = min(remaining, receiveBuffer.count)
+        receiveBuffer.removeFirst(take)
         let left = remaining - take
         mode = left == 0 ? .awaitingHead : .discardingLength(remaining: left)
         return true
     }
 
     private func discardChunked(reader: inout ChunkedReader) -> Bool {
-        guard !rxBuffer.isEmpty else { return false }
-        let result = reader.consumeForwardIR(&rxBuffer) { _ in }
+        guard !receiveBuffer.isEmpty else { return false }
+        let result = reader.consumeForwardIR(&receiveBuffer) { _ in }
         switch result {
         case .needMore:
             mode = .discardingChunked(reader: reader)
@@ -1338,7 +1328,7 @@ actor MITMHTTP1Stream {
                 } else {
                     output.append(rawBody)
                 }
-                flushSynthAfterResponse(into: &output)
+                flushSynthesizedAfterResponse(into: &output)
                 mode = resumeMode.mode
                 return false
             }
@@ -1353,7 +1343,6 @@ actor MITMHTTP1Stream {
             body: body,
             originatingRequest: pending.originatingRequest
         )
-        _ = originalSizes
         mode = .awaitingScript
         let rules = self.rules
         pendingHop = Task { [weak self] in
@@ -1400,7 +1389,7 @@ actor MITMHTTP1Stream {
             }
             queueSynthesizedResponse(response)
         }
-        flushSynthAfterResponse(into: &resumed)
+        flushSynthesizedAfterResponse(into: &resumed)
         mode = resumeMode.mode
         while drive(into: &resumed) { }
         finishDrivePass(resumed)
@@ -1432,7 +1421,7 @@ actor MITMHTTP1Stream {
             }
             queueSynthesizedResponse(response)
         }
-        flushSynthAfterResponse(into: &resumed)
+        flushSynthesizedAfterResponse(into: &resumed)
         mode = .awaitingHead
         while drive(into: &resumed) { }
         finishDrivePass(resumed)
@@ -1539,9 +1528,9 @@ actor MITMHTTP1Stream {
 
     private func appendChunk(_ data: Data, into out: inout Data) {
         out.append(contentsOf: String(data.count, radix: 16).utf8)
-        out.append(0x0D); out.append(0x0A)
+        out.append(contentsOf: [0x0D, 0x0A])
         out.append(data)
-        out.append(0x0D); out.append(0x0A)
+        out.append(contentsOf: [0x0D, 0x0A])
     }
 
     // MARK: - Head parsing
@@ -1612,10 +1601,10 @@ actor MITMHTTP1Stream {
                (100..<200).contains(status) || status == 204 {
                 return .smuggling
             }
-            guard let te = Self.normalizedTransferEncoding(transferEncodingValues[0]) else {
+            guard let transferEncoding = Self.normalizedTransferEncoding(transferEncodingValues[0]) else {
                 return .smuggling
             }
-            if direction == .httpRequest, !te.hasSuffix("chunked") {
+            if direction == .httpRequest, !transferEncoding.hasSuffix("chunked") {
                 return .smuggling
             }
         }
@@ -1653,17 +1642,17 @@ actor MITMHTTP1Stream {
 
     static func normalizedTransferEncoding(_ value: String) -> String? {
         guard value.allSatisfy({ $0.isASCII }) else { return nil }
-        let te = value.lowercased()
+        let normalized = value.lowercased()
             .replacingOccurrences(of: "[\t ]*,[\t ]*", with: ",", options: .regularExpression)
         let allowed: Set<String> = [
             "chunked", "compress,chunked", "deflate,chunked", "gzip,chunked",
             "compress", "deflate", "gzip", "identity",
         ]
-        return allowed.contains(te) ? te : nil
+        return allowed.contains(normalized) ? normalized : nil
     }
 
-    static func isHTTPVersionToken(_ s: Substring) -> Bool {
-        let bytes = Array(s.utf8)
+    static func isHTTPVersionToken(_ token: Substring) -> Bool {
+        let bytes = Array(token.utf8)
         return bytes.count == 8
             && bytes[0] == 0x48 && bytes[1] == 0x54 && bytes[2] == 0x54 && bytes[3] == 0x50 && bytes[4] == 0x2F
             && (0x30...0x39).contains(bytes[5]) && bytes[6] == 0x2E && (0x30...0x39).contains(bytes[7])
@@ -1689,8 +1678,8 @@ actor MITMHTTP1Stream {
         return tokens.first == "CONNECT"
     }
 
-    private static func containsCRorLF(_ s: String) -> Bool {
-        for byte in s.utf8 {
+    private static func containsCRorLF(_ string: String) -> Bool {
+        for byte in string.utf8 {
             if byte == 0x0D || byte == 0x0A {
                 return true
             }
@@ -1733,7 +1722,7 @@ actor MITMHTTP1Stream {
         guard let sink = responseIRSink else { return false }
         sink.http1ResponseReset()
         mode = .draining
-        rxBuffer.removeAll(keepingCapacity: false)
+        receiveBuffer.removeAll(keepingCapacity: false)
         return true
     }
 
@@ -1752,14 +1741,14 @@ actor MITMHTTP1Stream {
         }
         var out = Data(capacity: size)
         HTTPHeader.appendFieldBytes(startLine, to: &out)
-        out.append(0x0D); out.append(0x0A)
+        out.append(contentsOf: [0x0D, 0x0A])
         for (name, value) in safeHeaders {
             HTTPHeader.appendFieldBytes(name, to: &out)
-            out.append(0x3A); out.append(0x20) // ':'  ' '
+            out.append(contentsOf: [0x3A, 0x20]) // ':'  ' '
             HTTPHeader.appendFieldBytes(value, to: &out)
-            out.append(0x0D); out.append(0x0A)
+            out.append(contentsOf: [0x0D, 0x0A])
         }
-        out.append(0x0D); out.append(0x0A)
+        out.append(contentsOf: [0x0D, 0x0A])
         return out
     }
 
@@ -1781,17 +1770,17 @@ actor MITMHTTP1Stream {
         if requestLog.isHTTP1QueueEmpty {
             pendingClientBytes.append(bytes)
         } else {
-            requestLog.attachSynthAfterLastHTTP1(bytes)
+            requestLog.attachSynthesizedAfterLastHTTP1(bytes)
         }
     }
 
-    private static func isValidMethodToken(_ s: String) -> Bool {
-        return HTTPHeader.isValidName(s)
+    private static func isValidMethodToken(_ token: String) -> Bool {
+        HTTPHeader.isValidName(token)
     }
 
-    private static func isValidRequestTarget(_ s: String) -> Bool {
-        guard !s.isEmpty else { return false }
-        for byte in s.utf8 {
+    private static func isValidRequestTarget(_ target: String) -> Bool {
+        guard !target.isEmpty else { return false }
+        for byte in target.utf8 {
             if byte < 0x21 || byte == 0x7F {
                 return false
             }
@@ -1840,8 +1829,8 @@ actor MITMHTTP1Stream {
                 contentLength = value
             }
         }
-        if let te = transferEncoding {
-            if Self.transferEncodingIsChunked(te) {
+        if let transferEncoding {
+            if Self.transferEncodingIsChunked(transferEncoding) {
                 return .chunked
             }
         }
@@ -1865,8 +1854,8 @@ actor MITMHTTP1Stream {
 
     private func combinedHeaderValue(_ headers: [Header], name: String) -> String? {
         var parts: [String] = []
-        for (n, v) in headers where ASCII.equalsIgnoringCase(n, name) {
-            parts.append(v)
+        for (fieldName, fieldValue) in headers where ASCII.equalsIgnoringCase(fieldName, name) {
+            parts.append(fieldValue)
         }
         if parts.isEmpty { return nil }
         if parts.count == 1 { return parts[0] }
@@ -1886,10 +1875,7 @@ actor MITMHTTP1Stream {
 
     private func selectRewrite(_ startLine: String, verdicts: MITMGateVerdictTable) -> RewriteSelection {
         guard direction == .httpRequest else { return .none }
-        guard rules.contains(where: {
-            if case .rewrite = $0.operation { return true }
-            return false
-        }) else { return .none }
+        guard hasRewriteRule else { return .none }
 
         let parts = startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
         guard parts.count == 3 else { return .none }
@@ -1981,7 +1967,7 @@ actor MITMHTTP1Stream {
     ) -> HTTPMessage {
         var method: String?
         var url: String?
-        var originalUrl: String?
+        var originalURL: String?
         var status: Int?
         switch direction {
         case .httpRequest:
@@ -1990,7 +1976,7 @@ actor MITMHTTP1Stream {
                 method = String(parts[0])
                 url = "\(scheme)://\(host)\(String(parts[1]))"
             }
-            originalUrl = currentRequestOriginalURL
+            originalURL = currentRequestOriginalURL
         case .httpResponse:
             let parts = startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
             if parts.count >= 2, let code = HTTPHeader.parseStatusCode(parts[1]) {
@@ -1998,13 +1984,13 @@ actor MITMHTTP1Stream {
             }
             method = originatingRequest?.method
             url = originatingRequest?.url
-            originalUrl = originatingRequest?.originalUrl
+            originalURL = originatingRequest?.originalURL
         }
         return HTTPMessage(
             phase: direction,
             method: method,
             url: url,
-            originalUrl: originalUrl,
+            originalURL: originalURL,
             status: status,
             headers: headers,
             body: body,
@@ -2094,13 +2080,13 @@ actor MITMHTTP1Stream {
         guard direction == .httpRequest else { return }
         let parts = startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
         guard parts.count >= 2 else {
-            requestLog.recordHTTP1(method: nil, url: nil, originalUrl: nil)
+            requestLog.recordHTTP1(method: nil, url: nil, originalURL: nil)
             return
         }
         let method = String(parts[0])
         let target = String(parts[1])
         let url = "\(scheme)://\(host)\(target)"
-        requestLog.recordHTTP1(method: method, url: url, originalUrl: currentRequestOriginalURL)
+        requestLog.recordHTTP1(method: method, url: url, originalURL: currentRequestOriginalURL)
     }
 }
 
@@ -2143,7 +2129,7 @@ nonisolated private final class ChunkedReader {
                 let line = buffer.subdata(in: 0..<lineEnd)
                 guard let size = MITMHTTP1Stream.parseHexSize(line) else { return .malformed }
                 output.append(line)
-                output.append(0x0D); output.append(0x0A)
+                output.append(contentsOf: [0x0D, 0x0A])
                 buffer.removeFirst(lineEnd + 2)
                 scanCursor = 0
                 if size == 0 {
@@ -2167,7 +2153,7 @@ nonisolated private final class ChunkedReader {
                 guard buffer[0] == 0x0D, buffer[1] == 0x0A else {
                     return .malformed
                 }
-                output.append(0x0D); output.append(0x0A)
+                output.append(contentsOf: [0x0D, 0x0A])
                 buffer.removeFirst(2)
                 state = .sizeLine
             case .trailerOrEnd:
@@ -2178,7 +2164,7 @@ nonisolated private final class ChunkedReader {
                 }
                 let line = buffer.subdata(in: 0..<lineEnd)
                 output.append(line)
-                output.append(0x0D); output.append(0x0A)
+                output.append(contentsOf: [0x0D, 0x0A])
                 buffer.removeFirst(lineEnd + 2)
                 scanCursor = 0
                 if line.isEmpty {

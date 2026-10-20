@@ -50,7 +50,7 @@ struct ImportRuleSetView: View {
                     row(name: ruleSet.name, iconLight: ruleSet.iconLight, iconDark: ruleSet.iconDark) {
                         EmptyView()
                     }
-                    if !mitmStore.enabled {
+                    if !mitmStore.isEnabled {
                         mitmDisabledWarning
                     }
                 }

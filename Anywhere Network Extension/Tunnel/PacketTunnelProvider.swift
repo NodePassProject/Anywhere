@@ -289,6 +289,7 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
         }
 
         statsRecorder.stop()
+        MITMScriptDiskStore.shared.flush()
         task?.cancel()
 
         logTunnelStop(reason: reason)
@@ -363,6 +364,7 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
 
     override func sleep() async {
         statsRecorder.noteSleep()
+        MITMScriptDiskStore.shared.flush()
         await tunnelStack.sleep()
         TickScheduler.shared.suspend()
     }

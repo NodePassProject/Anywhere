@@ -86,71 +86,71 @@ extension MITMJSONOperation: Codable {
     }
 
     init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        switch try c.decode(Action.self, forKey: .action) {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        switch try container.decode(Action.self, forKey: .action) {
         case .add:
             self = .add(
-                path: try c.decode(String.self, forKey: .path),
-                value: try c.decode(String.self, forKey: .value)
+                path: try container.decode(String.self, forKey: .path),
+                value: try container.decode(String.self, forKey: .value)
             )
         case .replace:
             self = .replace(
-                path: try c.decode(String.self, forKey: .path),
-                value: try c.decode(String.self, forKey: .value)
+                path: try container.decode(String.self, forKey: .path),
+                value: try container.decode(String.self, forKey: .value)
             )
         case .delete:
-            self = .delete(path: try c.decode(String.self, forKey: .path))
+            self = .delete(path: try container.decode(String.self, forKey: .path))
         case .replaceRecursive:
             self = .replaceRecursive(
-                key: try c.decode(String.self, forKey: .key),
-                value: try c.decode(String.self, forKey: .value)
+                key: try container.decode(String.self, forKey: .key),
+                value: try container.decode(String.self, forKey: .value)
             )
         case .deleteRecursive:
-            self = .deleteRecursive(key: try c.decode(String.self, forKey: .key))
+            self = .deleteRecursive(key: try container.decode(String.self, forKey: .key))
         case .removeWhereKeyExists:
             self = .removeWhereKeyExists(
-                path: try c.decode(String.self, forKey: .path),
-                key: try c.decode(String.self, forKey: .key)
+                path: try container.decode(String.self, forKey: .path),
+                key: try container.decode(String.self, forKey: .key)
             )
         case .removeWhereFieldIn:
             self = .removeWhereFieldIn(
-                path: try c.decode(String.self, forKey: .path),
-                field: try c.decode(String.self, forKey: .field),
-                values: try c.decode(String.self, forKey: .values)
+                path: try container.decode(String.self, forKey: .path),
+                field: try container.decode(String.self, forKey: .field),
+                values: try container.decode(String.self, forKey: .values)
             )
         }
     }
 
     func encode(to encoder: Encoder) throws {
-        var c = encoder.container(keyedBy: CodingKeys.self)
+        var container = encoder.container(keyedBy: CodingKeys.self)
         switch self {
         case .add(let path, let value):
-            try c.encode(Action.add, forKey: .action)
-            try c.encode(path, forKey: .path)
-            try c.encode(value, forKey: .value)
+            try container.encode(Action.add, forKey: .action)
+            try container.encode(path, forKey: .path)
+            try container.encode(value, forKey: .value)
         case .replace(let path, let value):
-            try c.encode(Action.replace, forKey: .action)
-            try c.encode(path, forKey: .path)
-            try c.encode(value, forKey: .value)
+            try container.encode(Action.replace, forKey: .action)
+            try container.encode(path, forKey: .path)
+            try container.encode(value, forKey: .value)
         case .delete(let path):
-            try c.encode(Action.delete, forKey: .action)
-            try c.encode(path, forKey: .path)
+            try container.encode(Action.delete, forKey: .action)
+            try container.encode(path, forKey: .path)
         case .replaceRecursive(let key, let value):
-            try c.encode(Action.replaceRecursive, forKey: .action)
-            try c.encode(key, forKey: .key)
-            try c.encode(value, forKey: .value)
+            try container.encode(Action.replaceRecursive, forKey: .action)
+            try container.encode(key, forKey: .key)
+            try container.encode(value, forKey: .value)
         case .deleteRecursive(let key):
-            try c.encode(Action.deleteRecursive, forKey: .action)
-            try c.encode(key, forKey: .key)
+            try container.encode(Action.deleteRecursive, forKey: .action)
+            try container.encode(key, forKey: .key)
         case .removeWhereKeyExists(let path, let key):
-            try c.encode(Action.removeWhereKeyExists, forKey: .action)
-            try c.encode(path, forKey: .path)
-            try c.encode(key, forKey: .key)
+            try container.encode(Action.removeWhereKeyExists, forKey: .action)
+            try container.encode(path, forKey: .path)
+            try container.encode(key, forKey: .key)
         case .removeWhereFieldIn(let path, let field, let values):
-            try c.encode(Action.removeWhereFieldIn, forKey: .action)
-            try c.encode(path, forKey: .path)
-            try c.encode(field, forKey: .field)
-            try c.encode(values, forKey: .values)
+            try container.encode(Action.removeWhereFieldIn, forKey: .action)
+            try container.encode(path, forKey: .path)
+            try container.encode(field, forKey: .field)
+            try container.encode(values, forKey: .values)
         }
     }
 }
@@ -213,67 +213,67 @@ extension MITMOperation: Codable {
     }
 
     init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        let kind = try c.decode(Kind.self, forKey: .kind)
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let kind = try container.decode(Kind.self, forKey: .kind)
         switch kind {
         case .rewrite:
-            self = .rewrite(try c.decode(MITMRewriteAction.self, forKey: .rewrite))
+            self = .rewrite(try container.decode(MITMRewriteAction.self, forKey: .rewrite))
         case .headerAdd:
             self = .headerAdd(
-                name: try c.decode(String.self, forKey: .name),
-                value: try c.decode(String.self, forKey: .value)
+                name: try container.decode(String.self, forKey: .name),
+                value: try container.decode(String.self, forKey: .value)
             )
         case .headerDelete:
-            self = .headerDelete(name: try c.decode(String.self, forKey: .name))
+            self = .headerDelete(name: try container.decode(String.self, forKey: .name))
         case .headerReplace:
             self = .headerReplace(
-                name: try c.decode(String.self, forKey: .name),
-                value: try c.decode(String.self, forKey: .value)
+                name: try container.decode(String.self, forKey: .name),
+                value: try container.decode(String.self, forKey: .value)
             )
         case .script:
-            self = .script(scriptBase64: try c.decode(String.self, forKey: .script))
+            self = .script(scriptBase64: try container.decode(String.self, forKey: .script))
         case .streamScript:
-            self = .streamScript(scriptBase64: try c.decode(String.self, forKey: .script))
+            self = .streamScript(scriptBase64: try container.decode(String.self, forKey: .script))
         case .bodyReplace:
             self = .bodyReplace(
-                search: try c.decode(String.self, forKey: .search),
-                replacement: try c.decode(String.self, forKey: .replacement)
+                search: try container.decode(String.self, forKey: .search),
+                replacement: try container.decode(String.self, forKey: .replacement)
             )
         case .bodyJSON:
-            self = .bodyJSON(try c.decode(MITMJSONOperation.self, forKey: .json))
+            self = .bodyJSON(try container.decode(MITMJSONOperation.self, forKey: .json))
         }
     }
 
     func encode(to encoder: Encoder) throws {
-        var c = encoder.container(keyedBy: CodingKeys.self)
+        var container = encoder.container(keyedBy: CodingKeys.self)
         switch self {
         case .rewrite(let action):
-            try c.encode(Kind.rewrite, forKey: .kind)
-            try c.encode(action, forKey: .rewrite)
+            try container.encode(Kind.rewrite, forKey: .kind)
+            try container.encode(action, forKey: .rewrite)
         case .headerAdd(let name, let value):
-            try c.encode(Kind.headerAdd, forKey: .kind)
-            try c.encode(name, forKey: .name)
-            try c.encode(value, forKey: .value)
+            try container.encode(Kind.headerAdd, forKey: .kind)
+            try container.encode(name, forKey: .name)
+            try container.encode(value, forKey: .value)
         case .headerDelete(let name):
-            try c.encode(Kind.headerDelete, forKey: .kind)
-            try c.encode(name, forKey: .name)
+            try container.encode(Kind.headerDelete, forKey: .kind)
+            try container.encode(name, forKey: .name)
         case .headerReplace(let name, let value):
-            try c.encode(Kind.headerReplace, forKey: .kind)
-            try c.encode(name, forKey: .name)
-            try c.encode(value, forKey: .value)
+            try container.encode(Kind.headerReplace, forKey: .kind)
+            try container.encode(name, forKey: .name)
+            try container.encode(value, forKey: .value)
         case .script(let scriptBase64):
-            try c.encode(Kind.script, forKey: .kind)
-            try c.encode(scriptBase64, forKey: .script)
+            try container.encode(Kind.script, forKey: .kind)
+            try container.encode(scriptBase64, forKey: .script)
         case .streamScript(let scriptBase64):
-            try c.encode(Kind.streamScript, forKey: .kind)
-            try c.encode(scriptBase64, forKey: .script)
+            try container.encode(Kind.streamScript, forKey: .kind)
+            try container.encode(scriptBase64, forKey: .script)
         case .bodyReplace(let search, let replacement):
-            try c.encode(Kind.bodyReplace, forKey: .kind)
-            try c.encode(search, forKey: .search)
-            try c.encode(replacement, forKey: .replacement)
+            try container.encode(Kind.bodyReplace, forKey: .kind)
+            try container.encode(search, forKey: .search)
+            try container.encode(replacement, forKey: .replacement)
         case .bodyJSON(let operation):
-            try c.encode(Kind.bodyJSON, forKey: .kind)
-            try c.encode(operation, forKey: .json)
+            try container.encode(Kind.bodyJSON, forKey: .kind)
+            try container.encode(operation, forKey: .json)
         }
     }
 }
@@ -303,18 +303,18 @@ nonisolated struct MITMRule: Codable, Equatable, Identifiable {
     }
 
     init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let container = try decoder.container(keyedBy: CodingKeys.self)
         self.id = UUID()
-        self.phase = try c.decode(MITMPhase.self, forKey: .phase)
-        self.urlPattern = try c.decode(String.self, forKey: .urlPattern)
-        self.operation = try c.decode(MITMOperation.self, forKey: .operation)
+        self.phase = try container.decode(MITMPhase.self, forKey: .phase)
+        self.urlPattern = try container.decode(String.self, forKey: .urlPattern)
+        self.operation = try container.decode(MITMOperation.self, forKey: .operation)
     }
 
     func encode(to encoder: Encoder) throws {
-        var c = encoder.container(keyedBy: CodingKeys.self)
-        try c.encode(phase, forKey: .phase)
-        try c.encode(urlPattern, forKey: .urlPattern)
-        try c.encode(operation, forKey: .operation)
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(phase, forKey: .phase)
+        try container.encode(urlPattern, forKey: .urlPattern)
+        try container.encode(operation, forKey: .operation)
     }
 }
 
@@ -379,38 +379,38 @@ extension MITMRewriteAction: Codable {
     }
 
     init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        switch try c.decode(Kind.self, forKey: .kind) {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        switch try container.decode(Kind.self, forKey: .kind) {
         case .transparent:
-            self = .transparent(url: try c.decode(String.self, forKey: .url))
+            self = .transparent(url: try container.decode(String.self, forKey: .url))
         case .redirect302:
-            self = .redirect302(url: try c.decode(String.self, forKey: .url))
+            self = .redirect302(url: try container.decode(String.self, forKey: .url))
         case .reject200Text:
-            self = .reject200Text(content: try c.decode(String.self, forKey: .content))
+            self = .reject200Text(content: try container.decode(String.self, forKey: .content))
         case .reject200Gif:
             self = .reject200Gif
         case .reject200Data:
-            self = .reject200Data(base64: try c.decode(String.self, forKey: .base64))
+            self = .reject200Data(base64: try container.decode(String.self, forKey: .base64))
         }
     }
 
     func encode(to encoder: Encoder) throws {
-        var c = encoder.container(keyedBy: CodingKeys.self)
+        var container = encoder.container(keyedBy: CodingKeys.self)
         switch self {
         case .transparent(let url):
-            try c.encode(Kind.transparent, forKey: .kind)
-            try c.encode(url, forKey: .url)
+            try container.encode(Kind.transparent, forKey: .kind)
+            try container.encode(url, forKey: .url)
         case .redirect302(let url):
-            try c.encode(Kind.redirect302, forKey: .kind)
-            try c.encode(url, forKey: .url)
+            try container.encode(Kind.redirect302, forKey: .kind)
+            try container.encode(url, forKey: .url)
         case .reject200Text(let content):
-            try c.encode(Kind.reject200Text, forKey: .kind)
-            try c.encode(content, forKey: .content)
+            try container.encode(Kind.reject200Text, forKey: .kind)
+            try container.encode(content, forKey: .content)
         case .reject200Gif:
-            try c.encode(Kind.reject200Gif, forKey: .kind)
+            try container.encode(Kind.reject200Gif, forKey: .kind)
         case .reject200Data(let base64):
-            try c.encode(Kind.reject200Data, forKey: .kind)
-            try c.encode(base64, forKey: .base64)
+            try container.encode(Kind.reject200Data, forKey: .kind)
+            try container.encode(base64, forKey: .base64)
         }
     }
 }
@@ -446,14 +446,14 @@ nonisolated struct MITMParameter: Codable, Equatable, Identifiable {
         self.label = label
         self.description = description
     }
-    
+
     func accepts(_ value: String) -> Bool {
         switch type {
         case .picker: return options.contains(value)
         case .input:  return true
         }
     }
-    
+
     func effectiveValue(_ override: String?) -> String {
         guard let override, accepts(override) else { return defaultValue }
         return override
@@ -502,7 +502,7 @@ nonisolated struct MITMRuleSet: Codable, Equatable, Identifiable, SoftDeletable 
         self.iconDark = iconDark
         self.updatedAt = updatedAt
     }
-    
+
     func resolvedParameters() -> [(name: String, value: String)] {
         parameters.map { ($0.name, $0.effectiveValue(parameterValues[$0.name])) }
     }
@@ -524,44 +524,44 @@ nonisolated struct MITMRuleSet: Codable, Equatable, Identifiable, SoftDeletable 
     }
 
     init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        self.id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
-        let legacySuffix = try c.decodeIfPresent(String.self, forKey: .domainSuffix)
-        if let suffixes = try c.decodeIfPresent([String].self, forKey: .domainSuffixes) {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        let legacySuffix = try container.decodeIfPresent(String.self, forKey: .domainSuffix)
+        if let suffixes = try container.decodeIfPresent([String].self, forKey: .domainSuffixes) {
             self.domainSuffixes = suffixes
         } else if let legacySuffix {
             self.domainSuffixes = [legacySuffix]
         } else {
             self.domainSuffixes = []
         }
-        self.name = try c.decodeIfPresent(String.self, forKey: .name) ?? legacySuffix ?? ""
-        self.enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
-        self.rules = try c.decodeSkippingInvalid([MITMRule].self, forKey: .rules)
-        self.parameters = (try? c.decodeSkippingInvalid([MITMParameter].self, forKey: .parameters)) ?? []
-        self.parameterValues = (try? c.decodeIfPresent([String: String].self, forKey: .parameterValues)) ?? [:]
-        self.subscriptionURL = try c.decodeIfPresent(URL.self, forKey: .subscriptionURL)
-        self.iconLight = try c.decodeIfPresent(Data.self, forKey: .iconLight)
-        self.iconDark = try c.decodeIfPresent(Data.self, forKey: .iconDark)
-        self.deletedAt = try c.decodeIfPresent(Date.self, forKey: .deletedAt)
-        self.updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? deletedAt ?? .distantPast
+        self.name = try container.decodeIfPresent(String.self, forKey: .name) ?? legacySuffix ?? ""
+        self.enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        self.rules = try container.decodeSkippingInvalid([MITMRule].self, forKey: .rules)
+        self.parameters = (try? container.decodeSkippingInvalid([MITMParameter].self, forKey: .parameters)) ?? []
+        self.parameterValues = (try? container.decodeIfPresent([String: String].self, forKey: .parameterValues)) ?? [:]
+        self.subscriptionURL = try container.decodeIfPresent(URL.self, forKey: .subscriptionURL)
+        self.iconLight = try container.decodeIfPresent(Data.self, forKey: .iconLight)
+        self.iconDark = try container.decodeIfPresent(Data.self, forKey: .iconDark)
+        self.deletedAt = try container.decodeIfPresent(Date.self, forKey: .deletedAt)
+        self.updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? deletedAt ?? .distantPast
     }
 
     func encode(to encoder: Encoder) throws {
-        var c = encoder.container(keyedBy: CodingKeys.self)
-        try c.encode(id, forKey: .id)
-        try c.encode(name, forKey: .name)
-        try c.encode(enabled, forKey: .enabled)
-        try c.encode(domainSuffixes, forKey: .domainSuffixes)
-        try c.encode(rules, forKey: .rules)
-        if !parameters.isEmpty { try c.encode(parameters, forKey: .parameters) }
-        if !parameterValues.isEmpty { try c.encode(parameterValues, forKey: .parameterValues) }
-        try c.encodeIfPresent(subscriptionURL, forKey: .subscriptionURL)
-        try c.encodeIfPresent(iconLight, forKey: .iconLight)
-        try c.encodeIfPresent(iconDark, forKey: .iconDark)
-        try c.encode(updatedAt, forKey: .updatedAt)
-        try c.encodeIfPresent(deletedAt, forKey: .deletedAt)
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(enabled, forKey: .enabled)
+        try container.encode(domainSuffixes, forKey: .domainSuffixes)
+        try container.encode(rules, forKey: .rules)
+        if !parameters.isEmpty { try container.encode(parameters, forKey: .parameters) }
+        if !parameterValues.isEmpty { try container.encode(parameterValues, forKey: .parameterValues) }
+        try container.encodeIfPresent(subscriptionURL, forKey: .subscriptionURL)
+        try container.encodeIfPresent(iconLight, forKey: .iconLight)
+        try container.encodeIfPresent(iconDark, forKey: .iconDark)
+        try container.encode(updatedAt, forKey: .updatedAt)
+        try container.encodeIfPresent(deletedAt, forKey: .deletedAt)
     }
-    
+
     static func validSubscriptionURL(from rawValue: String) -> URL? {
         let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let url = URL(string: trimmed),
@@ -586,15 +586,15 @@ nonisolated struct MITMSnapshot: Codable, Equatable {
     }
 
     init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        self.ruleSets = try c.decodeSkippingInvalid([MITMRuleSet].self, forKey: .ruleSets)
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.ruleSets = try container.decodeSkippingInvalid([MITMRuleSet].self, forKey: .ruleSets)
     }
 
     func encode(to encoder: Encoder) throws {
-        var c = encoder.container(keyedBy: CodingKeys.self)
-        try c.encode(ruleSets, forKey: .ruleSets)
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(ruleSets, forKey: .ruleSets)
     }
-    
+
     @discardableResult
     func exportBinaryToAppGroup() -> Bool {
         let data = MITMBinaryWriter.encode(enabled: AWCore.getMITMEnabled(), ruleSets: liveRuleSets)
@@ -633,7 +633,7 @@ nonisolated struct MITMSnapshot: Codable, Equatable {
 /// Rule:
 ///   phase      UInt8      0 httpRequest · 1 httpResponse
 ///   urlPattern str32
-///   opKind     UInt8      operation discriminator (OpKind)
+///   opKind     UInt8      operation discriminator (OperationKind)
 ///   …operation-specific fields…
 /// ```
 /// Only the *resolved* `name → value` map ships — the parameter definitions
@@ -646,7 +646,7 @@ nonisolated enum MITMBinaryFormat {
 
     enum Phase: UInt8 { case httpRequest = 0, httpResponse = 1 }
 
-    enum OpKind: UInt8 {
+    enum OperationKind: UInt8 {
         case rewrite = 0, headerAdd = 1, headerDelete = 2, headerReplace = 3
         case script = 4, streamScript = 5, bodyReplace = 6, bodyJSON = 7
     }
@@ -676,57 +676,63 @@ nonisolated struct MITMBinaryWriter {
         writer.append(MITMBinaryFormat.magic)
         writer.bytes.append(MITMBinaryFormat.version)
         writer.bytes.append(enabled ? 1 : 0)
-        writer.u32(UInt32(ruleSets.count))
+        writer.appendUInt32(UInt32(ruleSets.count))
         for set in ruleSets { writer.encodeSet(set) }
         return Data(writer.bytes)
     }
 
     private mutating func encodeSet(_ set: MITMRuleSet) {
         append(withUnsafeBytes(of: set.id.uuid) { Array($0) })
-        str16(set.name)
+        appendString16(set.name)
         bytes.append(set.enabled ? 1 : 0)
         let suffixes = set.domainSuffixes.prefix(Int(UInt16.max))
-        u16(UInt16(suffixes.count))
-        for suffix in suffixes { str16(suffix) }
-        u32(UInt32(set.rules.count))
+        appendUInt16(UInt16(suffixes.count))
+        for suffix in suffixes { appendString16(suffix) }
+        appendUInt32(UInt32(set.rules.count))
         for rule in set.rules { encodeRule(rule) }
         // v2: resolved parameters (name → effective value).
-        let params = set.resolvedParameters().prefix(Int(UInt16.max))
-        u16(UInt16(params.count))
-        for param in params { str16(param.name); str16(param.value) }
+        let parameters = set.resolvedParameters().prefix(Int(UInt16.max))
+        appendUInt16(UInt16(parameters.count))
+        for parameter in parameters {
+            appendString16(parameter.name)
+            appendString16(parameter.value)
+        }
     }
 
     private mutating func encodeRule(_ rule: MITMRule) {
         bytes.append(MITMBinaryFormat.phaseByte(rule.phase))
-        str32(rule.urlPattern)
+        appendString32(rule.urlPattern)
         encodeOperation(rule.operation)
     }
 
     private mutating func encodeOperation(_ operation: MITMOperation) {
         switch operation {
         case .rewrite(let action):
-            bytes.append(MITMBinaryFormat.OpKind.rewrite.rawValue)
+            bytes.append(MITMBinaryFormat.OperationKind.rewrite.rawValue)
             encodeRewrite(action)
         case .headerAdd(let name, let value):
-            bytes.append(MITMBinaryFormat.OpKind.headerAdd.rawValue)
-            str16(name); str32(value)
+            bytes.append(MITMBinaryFormat.OperationKind.headerAdd.rawValue)
+            appendString16(name)
+            appendString32(value)
         case .headerDelete(let name):
-            bytes.append(MITMBinaryFormat.OpKind.headerDelete.rawValue)
-            str16(name)
+            bytes.append(MITMBinaryFormat.OperationKind.headerDelete.rawValue)
+            appendString16(name)
         case .headerReplace(let name, let value):
-            bytes.append(MITMBinaryFormat.OpKind.headerReplace.rawValue)
-            str16(name); str32(value)
+            bytes.append(MITMBinaryFormat.OperationKind.headerReplace.rawValue)
+            appendString16(name)
+            appendString32(value)
         case .script(let scriptBase64):
-            bytes.append(MITMBinaryFormat.OpKind.script.rawValue)
-            str32(scriptBase64)
+            bytes.append(MITMBinaryFormat.OperationKind.script.rawValue)
+            appendString32(scriptBase64)
         case .streamScript(let scriptBase64):
-            bytes.append(MITMBinaryFormat.OpKind.streamScript.rawValue)
-            str32(scriptBase64)
+            bytes.append(MITMBinaryFormat.OperationKind.streamScript.rawValue)
+            appendString32(scriptBase64)
         case .bodyReplace(let search, let replacement):
-            bytes.append(MITMBinaryFormat.OpKind.bodyReplace.rawValue)
-            str32(search); str32(replacement)
+            bytes.append(MITMBinaryFormat.OperationKind.bodyReplace.rawValue)
+            appendString32(search)
+            appendString32(replacement)
         case .bodyJSON(let json):
-            bytes.append(MITMBinaryFormat.OpKind.bodyJSON.rawValue)
+            bytes.append(MITMBinaryFormat.OperationKind.bodyJSON.rawValue)
             encodeJSON(json)
         }
     }
@@ -734,63 +740,80 @@ nonisolated struct MITMBinaryWriter {
     private mutating func encodeRewrite(_ action: MITMRewriteAction) {
         switch action {
         case .transparent(let url):
-            bytes.append(MITMBinaryFormat.RewriteKind.transparent.rawValue); str32(url)
+            bytes.append(MITMBinaryFormat.RewriteKind.transparent.rawValue)
+            appendString32(url)
         case .redirect302(let url):
-            bytes.append(MITMBinaryFormat.RewriteKind.redirect302.rawValue); str32(url)
+            bytes.append(MITMBinaryFormat.RewriteKind.redirect302.rawValue)
+            appendString32(url)
         case .reject200Text(let content):
-            bytes.append(MITMBinaryFormat.RewriteKind.reject200Text.rawValue); str32(content)
+            bytes.append(MITMBinaryFormat.RewriteKind.reject200Text.rawValue)
+            appendString32(content)
         case .reject200Gif:
             bytes.append(MITMBinaryFormat.RewriteKind.reject200Gif.rawValue)
         case .reject200Data(let base64):
-            bytes.append(MITMBinaryFormat.RewriteKind.reject200Data.rawValue); str32(base64)
+            bytes.append(MITMBinaryFormat.RewriteKind.reject200Data.rawValue)
+            appendString32(base64)
         }
     }
 
     private mutating func encodeJSON(_ operation: MITMJSONOperation) {
         switch operation {
         case .add(let path, let value):
-            bytes.append(MITMBinaryFormat.JSONAction.add.rawValue); str32(path); str32(value)
+            bytes.append(MITMBinaryFormat.JSONAction.add.rawValue)
+            appendString32(path)
+            appendString32(value)
         case .replace(let path, let value):
-            bytes.append(MITMBinaryFormat.JSONAction.replace.rawValue); str32(path); str32(value)
+            bytes.append(MITMBinaryFormat.JSONAction.replace.rawValue)
+            appendString32(path)
+            appendString32(value)
         case .delete(let path):
-            bytes.append(MITMBinaryFormat.JSONAction.delete.rawValue); str32(path)
+            bytes.append(MITMBinaryFormat.JSONAction.delete.rawValue)
+            appendString32(path)
         case .replaceRecursive(let key, let value):
-            bytes.append(MITMBinaryFormat.JSONAction.replaceRecursive.rawValue); str32(key); str32(value)
+            bytes.append(MITMBinaryFormat.JSONAction.replaceRecursive.rawValue)
+            appendString32(key)
+            appendString32(value)
         case .deleteRecursive(let key):
-            bytes.append(MITMBinaryFormat.JSONAction.deleteRecursive.rawValue); str32(key)
+            bytes.append(MITMBinaryFormat.JSONAction.deleteRecursive.rawValue)
+            appendString32(key)
         case .removeWhereKeyExists(let path, let key):
-            bytes.append(MITMBinaryFormat.JSONAction.removeWhereKeyExists.rawValue); str32(path); str32(key)
+            bytes.append(MITMBinaryFormat.JSONAction.removeWhereKeyExists.rawValue)
+            appendString32(path)
+            appendString32(key)
         case .removeWhereFieldIn(let path, let field, let values):
-            bytes.append(MITMBinaryFormat.JSONAction.removeWhereFieldIn.rawValue); str32(path); str32(field); str32(values)
+            bytes.append(MITMBinaryFormat.JSONAction.removeWhereFieldIn.rawValue)
+            appendString32(path)
+            appendString32(field)
+            appendString32(values)
         }
     }
 
     // MARK: Primitives
 
-    private mutating func u16(_ v: UInt16) {
-        bytes.append(UInt8(truncatingIfNeeded: v))
-        bytes.append(UInt8(truncatingIfNeeded: v >> 8))
+    private mutating func appendUInt16(_ value: UInt16) {
+        bytes.append(UInt8(truncatingIfNeeded: value))
+        bytes.append(UInt8(truncatingIfNeeded: value >> 8))
     }
 
-    private mutating func u32(_ v: UInt32) {
-        bytes.append(UInt8(truncatingIfNeeded: v))
-        bytes.append(UInt8(truncatingIfNeeded: v >> 8))
-        bytes.append(UInt8(truncatingIfNeeded: v >> 16))
-        bytes.append(UInt8(truncatingIfNeeded: v >> 24))
+    private mutating func appendUInt32(_ value: UInt32) {
+        bytes.append(UInt8(truncatingIfNeeded: value))
+        bytes.append(UInt8(truncatingIfNeeded: value >> 8))
+        bytes.append(UInt8(truncatingIfNeeded: value >> 16))
+        bytes.append(UInt8(truncatingIfNeeded: value >> 24))
     }
 
     private mutating func append(_ slice: [UInt8]) { bytes.append(contentsOf: slice) }
-    
-    private mutating func str16(_ string: String) {
+
+    private mutating func appendString16(_ string: String) {
         var utf8 = Array(string.utf8)
         if utf8.count > Int(UInt16.max) { utf8 = Array(utf8.prefix(Int(UInt16.max))) }
-        u16(UInt16(utf8.count))
+        appendUInt16(UInt16(utf8.count))
         bytes.append(contentsOf: utf8)
     }
-    
-    private mutating func str32(_ string: String) {
+
+    private mutating func appendString32(_ string: String) {
         let utf8 = Array(string.utf8)
-        u32(UInt32(utf8.count))
+        appendUInt32(UInt32(utf8.count))
         bytes.append(contentsOf: utf8)
     }
 }

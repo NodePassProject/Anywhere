@@ -7,11 +7,9 @@
 
 import Foundation
 
-nonisolated enum MITMHTTP1Serializer {
+nonisolated private let logger = AnywhereLogger(category: "MITMHTTP1Serializer")
 
-    /// Builds the request line + headers + framing header + blank line. Derives `Host`
-    /// from `head.authority` when absent, coalesces `Cookie` with `"; "` (RFC 6265 §5.4 —
-    /// HTTP/1.1 forbids split `Cookie`), and token-validates names while dropping CR/LF/NUL values.
+nonisolated enum MITMHTTP1Serializer {
     static func requestHead(_ head: MITMRequestHead, host: String) -> Data {
         let startLine = "\(head.method) \(head.path) HTTP/1.1"
 
@@ -19,7 +17,6 @@ nonisolated enum MITMHTTP1Serializer {
         var safe: [(name: String, value: String)] = []
         safe.reserveCapacity(head.headers.count + 2)
 
-        // RFC 9113 §8.3.1: an h2 request carries the origin in :authority; h1 needs Host.
         if !hasHost, !head.authority.isEmpty {
             safe.append((name: "Host", value: head.authority))
         }
@@ -28,7 +25,7 @@ nonisolated enum MITMHTTP1Serializer {
         for (name, value) in head.headers {
             if ASCII.equalsIgnoringCase(name, "content-length")
                 || ASCII.equalsIgnoringCase(name, "transfer-encoding") {
-                continue // the bridge owns framing
+                continue
             }
             if ASCII.equalsIgnoringCase(name, "cookie") {
                 cookies.append(value)
@@ -57,32 +54,26 @@ nonisolated enum MITMHTTP1Serializer {
             size += name.utf8.count + 2 + value.utf8.count + 2
         }
         var out = Data(capacity: size)
-        // ISO-8859-1 bytes so a header octet (HPACK-decoded as latin-1) round-trips to the
-        // upstream unchanged rather than being re-encoded as multi-byte UTF-8.
         HTTPHeader.appendFieldBytes(startLine, to: &out)
-        out.append(0x0D); out.append(0x0A)
+        out.append(contentsOf: [0x0D, 0x0A])
         for (name, value) in safe {
             HTTPHeader.appendFieldBytes(name, to: &out)
-            out.append(0x3A); out.append(0x20)
+            out.append(contentsOf: [0x3A, 0x20])
             HTTPHeader.appendFieldBytes(value, to: &out)
-            out.append(0x0D); out.append(0x0A)
+            out.append(contentsOf: [0x0D, 0x0A])
         }
-        out.append(0x0D); out.append(0x0A)
+        out.append(contentsOf: [0x0D, 0x0A])
         return out
     }
 
-    /// Frames one chunk: `<hex-size>\r\n<data>\r\n` (caller avoids empty `data`).
     static func chunk(_ data: Data) -> Data {
         var out = Data(capacity: data.count + 16)
         out.append(contentsOf: String(data.count, radix: 16).utf8)
-        out.append(0x0D); out.append(0x0A)
+        out.append(contentsOf: [0x0D, 0x0A])
         out.append(data)
-        out.append(0x0D); out.append(0x0A)
+        out.append(contentsOf: [0x0D, 0x0A])
         return out
     }
 
-    /// The final `0\r\n\r\n` chunk terminator (no trailers — the bridge drops them).
     static let chunkTerminator = Data([0x30, 0x0D, 0x0A, 0x0D, 0x0A])
 }
-
-nonisolated private let logger = AnywhereLogger(category: "MITMH1Serializer")

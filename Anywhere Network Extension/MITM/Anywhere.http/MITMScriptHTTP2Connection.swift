@@ -76,7 +76,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
         var maxConcurrentStreams: UInt32 = MITMScriptHTTP2Connection.ownMaxConcurrentStreams
 
         var connectionSendWindow = MITMScriptHTTP2Connection.httpVersionDefaultWindow
-        var connectionRecvConsumed = 0
+        var connectionReceiveConsumed = 0
         var peerInitialWindowSize = MITMScriptHTTP2Connection.httpVersionDefaultWindow
 
         var receiveBuffer = Data()
@@ -84,7 +84,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
 
         var flowGate = H2FlowGate()
 
-        var negotiatedHTTP1 = false
+        var didNegotiateHTTP1 = false
 
         var pendingControlSends = 0
 
@@ -206,20 +206,20 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
         }
 
         let (responseStream, responseSignal) = AsyncThrowingStream.makeStream(of: MITMScriptHTTPClient.Response.self)
-        enum Start { case rejected(Error); case go(MITMScriptHTTP2Stream) }
+        enum Start { case rejected(Error), go(MITMScriptHTTP2Stream) }
         let outcome: Start = state.withLock { state in
             if state.reserved > 0 { state.reserved -= 1 }
             guard state.phase != .closed, state.phase != .goingAway else {
-                if state.negotiatedHTTP1 {
+                if state.didNegotiateHTTP1 {
                     return .rejected(AnywhereError.mitm(.needsHTTP1Fallback))
                 } else {
                     return .rejected(AnywhereError.proxy(.http2, .connectionClosed(detail: "connection closed")))
                 }
             }
-            let sid = state.nextStreamID
+            let streamID = state.nextStreamID
             state.nextStreamID &+= 2
             let stream = MITMScriptHTTP2Stream(
-                streamID: sid,
+                streamID: streamID,
                 connection: self,
                 request: request,
                 hostHeader: hostHeader,
@@ -227,8 +227,8 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
                 resourceTimeout: resourceTimeout,
                 responseSignal: responseSignal
             )
-            state.streams[sid] = stream
-            state.sendWindows[sid] = state.peerInitialWindowSize
+            state.streams[streamID] = stream
+            state.sendWindows[streamID] = state.peerInitialWindowSize
             return .go(stream)
         }
 
@@ -248,7 +248,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
     // MARK: - Setup
 
     private func ensureReady() async throws {
-        enum Kick { case awaitReady; case begin; case fail(Error) }
+        enum Kick { case awaitReady, begin, fail(Error) }
         let kick: Kick = state.withLock { state in
             switch state.phase {
             case .ready:
@@ -259,8 +259,10 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
             case .connecting, .prefaceSent:
                 return .awaitReady
             case .goingAway, .closed:
-                return .fail(state.negotiatedHTTP1 ? AnywhereError.mitm(.needsHTTP1Fallback)
-                                                   : AnywhereError.proxy(.http2, .connectionClosed(detail: "connection closed")))
+                return .fail(
+                    state.didNegotiateHTTP1 ? AnywhereError.mitm(.needsHTTP1Fallback)
+                    : AnywhereError.proxy(.http2, .connectionClosed(detail: "connection closed"))
+                )
             }
         }
         switch kick {
@@ -288,12 +290,12 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
             failSetup(error)
             return
         }
-        let proceed = state.withLock { state -> Bool in
+        let shouldProceed = state.withLock { state -> Bool in
             guard state.phase == .connecting else { return false }
             state.dialed = dialed
             return true
         }
-        guard proceed else {
+        guard shouldProceed else {
             dialed.connection.cancel()
             await dialed.proxyClient?.cancel()
             return
@@ -309,11 +311,11 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
             failSetup(error)
             return
         }
-        enum TLSOutcome { case stale; case http1; case proceed }
+        enum TLSOutcome { case stale, http1, proceed }
         let outcome: TLSOutcome = state.withLock { state in
             guard state.phase == .connecting else { return .stale }
             guard tlsConnection.negotiatedALPN == "h2" else {
-                state.negotiatedHTTP1 = true
+                state.didNegotiateHTTP1 = true
                 return .http1
             }
             state.connection = TLSProxyConnection(tlsConnection: tlsConnection)
@@ -331,7 +333,10 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
         }
 
         let transport: ProxyConnection? = state.withLock { $0.connection }
-        guard let transport else { failSetup(AnywhereError.proxy(.http2, .notReady)); return }
+        guard let transport else {
+            failSetup(AnywhereError.proxy(.http2, .notReady))
+            return
+        }
 
         var data = Data()
         data.append(Self.connectionPreface)
@@ -364,8 +369,8 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
             _ = await group.next()
             group.cancelAll()
         }
-        let stillSettingUp = state.withLock { $0.phase == .connecting || $0.phase == .prefaceSent }
-        guard stillSettingUp else { return }
+        let isStillSettingUp = state.withLock { $0.phase == .connecting || $0.phase == .prefaceSent }
+        guard isStillSettingUp else { return }
         failSetup(AnywhereError.proxy(.http2, .connectionClosed(detail: "handshake/SETTINGS timed out")))
     }
 
@@ -378,19 +383,22 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
 
             let data: Data?
             do { data = try await transport.receive() }
-            catch { handleSessionError(error); return }
+            catch {
+                handleSessionError(error)
+                return
+            }
 
             guard let data, !data.isEmpty else {
                 handleSessionError(AnywhereError.proxy(.http2, .connectionClosed(detail: "connection closed by peer")))
                 return
             }
 
-            let overflow: Bool = state.withLock { state in
+            let didOverflow: Bool = state.withLock { state in
                 guard state.phase != .closed else { return false }
                 state.receiveBuffer.append(data)
                 return state.receiveBuffer.count > Self.maxReceiveBufferSize
             }
-            if overflow {
+            if didOverflow {
                 handleSessionError(AnywhereError.proxy(.http2, .protocolViolation(detail: "receive buffer exceeded \(Self.maxReceiveBufferSize) bytes")))
                 return
             }
@@ -475,7 +483,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
     }
 
     private func appendContinuation(_ frame: HTTP2Frame) {
-        enum Step { case none; case overflow; case complete(streamID: UInt32, flags: UInt8, block: Data) }
+        enum Step { case none, overflow, complete(streamID: UInt32, flags: UInt8, block: Data) }
         let step: Step = state.withLock { state in
             guard var pending = state.pendingHeaders else { return .none }
             pending.block.append(frame.payload)
@@ -533,11 +541,11 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
 
         let (windowUpdate, transport, stream): (HTTP2Frame?, ProxyConnection?, MITMScriptHTTP2Stream?) = state.withLock { state in
             var update: HTTP2Frame?
-            if frame.payload.count > 0 {
-                state.connectionRecvConsumed += frame.payload.count
-                if state.connectionRecvConsumed >= Self.connectionReceiveWindow / 2 {
-                    let increment = UInt32(state.connectionRecvConsumed)
-                    state.connectionRecvConsumed = 0
+            if !frame.payload.isEmpty {
+                state.connectionReceiveConsumed += frame.payload.count
+                if state.connectionReceiveConsumed >= Self.connectionReceiveWindow / 2 {
+                    let increment = UInt32(state.connectionReceiveConsumed)
+                    state.connectionReceiveConsumed = 0
                     update = HTTP2Framer.windowUpdateFrame(streamID: 0, increment: increment)
                 }
             }
@@ -571,7 +579,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
                 case 0x4: // INITIAL_WINDOW_SIZE — adjusts every live stream's send window.
                     let delta = Int(value) - state.peerInitialWindowSize
                     state.peerInitialWindowSize = Int(value)
-                    for sid in state.sendWindows.keys { state.sendWindows[sid]! += delta }
+                    for streamID in state.sendWindows.keys { state.sendWindows[streamID]! += delta }
                 default:
                     break
                 }
@@ -595,9 +603,9 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
             logger.warning("[MITMScriptHTTP2] GOAWAY lastStreamID=\(parsed.lastStreamID) errorCode=\(parsed.errorCode)")
         }
 
-        var failReadiness = false
+        var shouldFailReadiness = false
         var doomed: [MITMScriptHTTP2Stream] = []
-        let closeNow: Bool = state.withLock { state in
+        let shouldCloseNow: Bool = state.withLock { state in
             let previous = state.phase
             guard previous != .closed else { return false }
             state.transition(to: .goingAway)
@@ -609,20 +617,20 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
                 }
             }
             if previous == .connecting || previous == .prefaceSent {
-                failReadiness = true
+                shouldFailReadiness = true
             }
             return state.streams.isEmpty
         }
 
         for stream in doomed { stream.failFromSession(AnywhereError.proxy(.http2, .goaway)) }
-        if failReadiness { readySignal.finish(throwing: AnywhereError.proxy(.http2, .goaway)) }
-        if closeNow { close(error: AnywhereError.proxy(.http2, .goaway)) }
+        if shouldFailReadiness { readySignal.finish(throwing: AnywhereError.proxy(.http2, .goaway)) }
+        if shouldCloseNow { close(error: AnywhereError.proxy(.http2, .goaway)) }
     }
 
     private func handleWindowUpdate(_ frame: HTTP2Frame) {
         guard let increment = HTTP2Framer.parseWindowUpdate(payload: frame.payload), increment > 0 else { return }
 
-        enum Update { case ok; case overflow }
+        enum Update { case ok, overflow }
         let result: Update = state.withLock { state in
             if frame.streamID == 0 {
                 let updated = state.connectionSendWindow + Int(increment)
@@ -672,8 +680,8 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
             switch step {
             case .notReady:
                 throw AnywhereError.proxy(.http2, .notReady)
-            case .streamGone(let sid):
-                throw AnywhereError.proxy(.http2, .streamReset(code: sid))
+            case .streamGone(let streamID):
+                throw AnywhereError.proxy(.http2, .streamReset(code: streamID))
             case .done:
                 return
             case .park:
@@ -733,11 +741,11 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
     }
 
     private func sendFrame(_ frame: HTTP2Frame, on transport: ProxyConnection) {
-        let flooded: Bool = state.withLock { state in
+        let isFlooded: Bool = state.withLock { state in
             state.pendingControlSends += 1
             return state.pendingControlSends > Self.maxPendingControlSends
         }
-        guard !flooded else {
+        guard !isFlooded else {
             connectionError("more than \(Self.maxPendingControlSends) control frames awaiting send (PING/SETTINGS flood)")
             return
         }
@@ -760,20 +768,20 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
     // MARK: - Stream teardown
 
     func removeStream(_ stream: MITMScriptHTTP2Stream, sendRST: Bool) {
-        enum Outcome { case gone; case removed(rst: Bool, closeGoaway: Bool, transport: ProxyConnection?) }
+        enum Outcome { case gone, removed(shouldSendRST: Bool, shouldCloseAfterGoaway: Bool, transport: ProxyConnection?) }
         let outcome: Outcome = state.withLock { state in
             guard state.streams.removeValue(forKey: stream.streamID) != nil else { return .gone }
             state.sendWindows.removeValue(forKey: stream.streamID)
-            let rst = sendRST && (state.phase == .ready || state.phase == .goingAway)
-            let closeGoaway = state.phase == .goingAway && state.streams.isEmpty
-            return .removed(rst: rst, closeGoaway: closeGoaway, transport: state.connection)
+            let shouldSendRST = sendRST && (state.phase == .ready || state.phase == .goingAway)
+            let shouldCloseAfterGoaway = state.phase == .goingAway && state.streams.isEmpty
+            return .removed(shouldSendRST: shouldSendRST, shouldCloseAfterGoaway: shouldCloseAfterGoaway, transport: state.connection)
         }
-        guard case .removed(let rst, let closeGoaway, let transport) = outcome else { return }
+        guard case .removed(let shouldSendRST, let shouldCloseAfterGoaway, let transport) = outcome else { return }
 
-        if rst, let transport {
+        if shouldSendRST, let transport {
             sendFrame(HTTP2Framer.rstStreamFrame(streamID: stream.streamID, errorCode: 0x8 /* CANCEL */), on: transport)
         }
-        if closeGoaway {
+        if shouldCloseAfterGoaway {
             close(error: AnywhereError.proxy(.http2, .goaway))
         }
     }

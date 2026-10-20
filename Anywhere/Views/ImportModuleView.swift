@@ -44,7 +44,7 @@ struct ImportModuleView: View {
                     }
                 case .ready(let module, let routingSeeds):
                     header(for: module)
-                    if !module.mitmRuleSets.isEmpty && !mitmStore.enabled {
+                    if !module.mitmRuleSets.isEmpty && !mitmStore.isEnabled {
                         mitmDisabledWarning
                     }
                     if !module.routingRuleSets.isEmpty {

@@ -23,7 +23,7 @@ nonisolated struct MITMCaptureTemplate: Equatable {
     init(_ raw: String) {
         var tokens: [Token] = []
         var literal = ""
-        var refsCaptures = false
+        var referencesCaptures = false
         let characters = Array(raw)
         var i = 0
 
@@ -33,16 +33,16 @@ nonisolated struct MITMCaptureTemplate: Equatable {
                 literal = ""
             }
         }
-        func appendGroup(_ idx: Int) {
+        func appendGroup(_ index: Int) {
             flushLiteral()
-            tokens.append(.group(idx))
-            refsCaptures = true
+            tokens.append(.group(index))
+            referencesCaptures = true
         }
 
         while i < characters.count {
-            let c = characters[i]
-            guard c == "$" else {
-                literal.append(c)
+            let character = characters[i]
+            guard character == "$" else {
+                literal.append(character)
                 i += 1
                 continue
             }
@@ -51,8 +51,8 @@ nonisolated struct MITMCaptureTemplate: Equatable {
             case "$":
                 literal.append("$")
                 i += 2
-            case .some(let d) where d.isASCII && d.isNumber:
-                appendGroup(d.wholeNumberValue ?? 0)
+            case .some(let digit) where digit.isASCII && digit.isNumber:
+                appendGroup(digit.wholeNumberValue ?? 0)
                 i += 2
             case "{":
                 var j = i + 2
@@ -76,18 +76,17 @@ nonisolated struct MITMCaptureTemplate: Equatable {
         flushLiteral()
 
         self.tokens = tokens
-        self.referencesCaptures = refsCaptures
+        self.referencesCaptures = referencesCaptures
     }
 
-    /// Expands the template; a `nil` from `captureLookup` (out-of-range/non-participating) contributes "".
     func expand(_ captureLookup: (Int) -> String?) -> String {
         // Fast path: literal-only template, the common case.
-        if tokens.count == 1, case .literal(let s) = tokens[0] { return s }
+        if tokens.count == 1, case .literal(let text) = tokens[0] { return text }
         var out = ""
         for token in tokens {
             switch token {
-            case .literal(let s):
-                out += s
+            case .literal(let text):
+                out += text
             case .group(let index):
                 if let value = captureLookup(index) { out += value }
             }

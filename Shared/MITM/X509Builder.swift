@@ -14,7 +14,6 @@ nonisolated enum X509Builder {
 
     // MARK: - Public API
 
-    /// Builds a self-signed CA certificate (ECDSA P-256); returns DER.
     static func buildCACertificate(
         privateKey: SecKey,
         subjectCN: String,
@@ -30,7 +29,7 @@ nonisolated enum X509Builder {
         let subject = encodeName(commonName: subjectCN, organization: organization)
 
         let extensions = encodeExtensions([
-            encodeBasicConstraintsCA(pathLen: 0),
+            encodeBasicConstraintsCA(pathLength: 0),
             encodeKeyUsage(keyCertSign: true, cRLSign: true, digitalSignature: false),
             try encodeSubjectKeyIdentifier(spki: spki),
         ])
@@ -48,8 +47,6 @@ nonisolated enum X509Builder {
         return encodeCertificate(tbs: tbs, signature: signature)
     }
 
-    /// Builds a leaf certificate signed by the CA key; issuer DN and AKID are
-    /// parsed from `caCertificateDER` for byte-exact agreement. Returns DER.
     static func buildLeafCertificate(
         leafPublicKey: P256.Signing.PublicKey,
         caPrivateKey: SecKey,
@@ -60,9 +57,8 @@ nonisolated enum X509Builder {
         notAfter: Date
     ) throws -> Data {
         let leafSPKI = try buildECP256SPKI(publicKeyX963: leafPublicKey.x963Representation)
-        let caComponents = try parseCAComponents(certDER: caCertificateDER)
+        let caComponents = try parseCAComponents(certificateDER: caCertificateDER)
 
-        // Strip IPv6 URI brackets so the CN matches the bracket-free SAN address.
         let cnHostname: String
         if hostname.hasPrefix("["), hostname.hasSuffix("]"), hostname.count >= 2 {
             cnHostname = String(hostname.dropFirst().dropLast())
@@ -94,8 +90,6 @@ nonisolated enum X509Builder {
         return encodeCertificate(tbs: tbs, signature: signature)
     }
 
-    /// Builds a short-lived leaf certificate issued by the CA for signing a
-    /// document (e.g. a configuration profile). Returns DER.
     static func buildSigningCertificate(
         signingKey: SecKey,
         caPrivateKey: SecKey,
@@ -109,7 +103,7 @@ nonisolated enum X509Builder {
             throw AnywhereError.certificate(.publicKeyExportFailed)
         }
         let spki = try buildECP256SPKI(publicKey: publicKey)
-        let caComponents = try parseCAComponents(certDER: caCertificateDER)
+        let caComponents = try parseCAComponents(certificateDER: caCertificateDER)
         let subject = encodeName(commonName: commonName, organization: "Anywhere")
 
         let extensions = encodeExtensions([
@@ -134,90 +128,72 @@ nonisolated enum X509Builder {
 
     // MARK: - CMS Profile Signing
 
-    /// Wraps `profileData` (a `.mobileconfig` plist) in a CMS SignedData structure
-    /// (RFC 5652) signed by `signerPrivateKey`. `certificates` should carry the
-    /// signer's certificate followed by any chain up to the CA.
     static func buildSignedProfile(
         profileData: Data,
         signerPrivateKey: SecKey,
         signerCertificateDER: Data,
         certificates: [Data]
     ) throws -> Data {
-        let (issuer, serial) = try parseIssuerAndSerial(certDER: signerCertificateDER)
+        let (issuer, serial) = try parseIssuerAndSerial(certificateDER: signerCertificateDER)
 
-        // digestAlgorithm SHA-256; parameters omitted per RFC 5754 §2.
         let digestAlgorithm = ASN1.sequence(ASN1OID.sha256)
 
-        // Authenticated attributes bind the signature to the content type and a
-        // digest of the payload (RFC 5652 §5.3). When present, the signature is
-        // computed over their DER, not over the content directly.
         let contentTypeAttr = ASN1.sequence(
             ASN1OID.attrContentType + ASN1.set(ASN1OID.data)
         )
         let messageDigestAttr = ASN1.sequence(
             ASN1OID.attrMessageDigest + ASN1.set(ASN1.octetString(Data(SHA256.hash(data: profileData))))
         )
-        // DER SET OF requires the elements sorted by their encodings (X.690 §11.6).
         let attributes = derSortedSetOf([contentTypeAttr, messageDigestAttr])
 
-        // Sign the attributes under the explicit SET OF tag (0x31); they appear in
-        // the SignerInfo under the [0] IMPLICIT tag (0xA0) with identical content.
         let signature = try sign(privateKey: signerPrivateKey, data: ASN1.set(attributes))
         let signedAttrs = ASN1.contextSpecific(tag: 0, constructed: true, content: attributes)
 
-        // SignerInfo (RFC 5652 §5.3); version 1 for the IssuerAndSerialNumber sid.
         var signerInfo = Data()
         signerInfo.append(ASN1.integer(1))
-        signerInfo.append(ASN1.sequence(issuer + serial))       // sid = IssuerAndSerialNumber
+        signerInfo.append(ASN1.sequence(issuer + serial))
         signerInfo.append(digestAlgorithm)
         signerInfo.append(signedAttrs)
-        signerInfo.append(algorithmECDSAWithSHA256)             // signatureAlgorithm
+        signerInfo.append(algorithmECDSAWithSHA256)
         signerInfo.append(ASN1.octetString(signature))
 
-        // EncapsulatedContentInfo: attached id-data payload (RFC 5652 §5.2).
         let eContent = ASN1.contextSpecific(tag: 0, constructed: true, content: ASN1.octetString(profileData))
         let encapContentInfo = ASN1.sequence(ASN1OID.data + eContent)
 
-        // SignedData (RFC 5652 §5.1), version 1; the signer + chain ride in [0] IMPLICIT.
         var certificateSet = Data()
         for certificate in certificates { certificateSet.append(certificate) }
 
         var signedData = Data()
         signedData.append(ASN1.integer(1))
-        signedData.append(ASN1.set(digestAlgorithm))            // digestAlgorithms
+        signedData.append(ASN1.set(digestAlgorithm))
         signedData.append(encapContentInfo)
-        signedData.append(ASN1.contextSpecific(tag: 0, constructed: true, content: certificateSet))  // certificates [0]
-        signedData.append(ASN1.set(ASN1.sequence(signerInfo)))  // signerInfos
+        signedData.append(ASN1.contextSpecific(tag: 0, constructed: true, content: certificateSet))
+        signedData.append(ASN1.set(ASN1.sequence(signerInfo)))
 
-        // ContentInfo: id-signedData wrapping SignedData in [0] EXPLICIT.
         let content = ASN1.contextSpecific(tag: 0, constructed: true, content: ASN1.sequence(signedData))
         return ASN1.sequence(ASN1OID.signedData + content)
     }
 
-    /// Reads the `issuer` DN and `serialNumber` (full TLVs) from a certificate for
-    /// use as a CMS `IssuerAndSerialNumber`. Assumes the v3 layout this builder emits.
-    private static func parseIssuerAndSerial(certDER: Data) throws -> (issuer: Data, serial: Data) {
-        var parser = ASN1Parser(data: certDER)
-        let cert = try parser.readSequence()                    // Certificate
-        var certParser = ASN1Parser(data: cert)
-        let tbs = try certParser.readSequence()                 // TBSCertificate
+    private static func parseIssuerAndSerial(certificateDER: Data) throws -> (issuer: Data, serial: Data) {
+        var parser = ASN1Parser(data: certificateDER)
+        let certificate = try parser.readSequence()
+        var certificateParser = ASN1Parser(data: certificate)
+        let tbs = try certificateParser.readSequence()
         var tbsParser = ASN1Parser(data: tbs)
-        try tbsParser.skipExplicitContextSpecific(tag: 0)       // version [0]
-        let serial = try tbsParser.readNextWithHeader(expectedTag: 0x02)   // serialNumber
-        try tbsParser.skipNext()                                // signature algorithm
-        let issuer = try tbsParser.readNextWithHeader(expectedTag: 0x30)   // issuer Name
+        try tbsParser.skipExplicitContextSpecific(tag: 0)
+        let serial = try tbsParser.readNextWithHeader(expectedTag: 0x02)
+        try tbsParser.skipNext()
+        let issuer = try tbsParser.readNextWithHeader(expectedTag: 0x30)
         return (issuer, serial)
     }
 
-    /// Concatenates DER elements in ascending encoding order (X.690 §11.6): octet
-    /// strings compared with the shorter padded by trailing zero octets.
     private static func derSortedSetOf(_ elements: [Data]) -> Data {
         let sorted = elements.sorted { lhs, rhs in
             let count = max(lhs.count, rhs.count)
-            for i in 0..<count {
-                let l = i < lhs.count ? lhs[lhs.startIndex + i] : 0
-                let r = i < rhs.count ? rhs[rhs.startIndex + i] : 0
-                if l != r { return l < r }
+            for index in 0..<count {
+                let left = index < lhs.count ? lhs[lhs.startIndex + index] : 0
+                let right = index < rhs.count ? rhs[rhs.startIndex + index] : 0
+                if left != right { return left < right }
             }
             return lhs.count < rhs.count
         }
@@ -236,11 +212,11 @@ nonisolated enum X509Builder {
     }
 
     private static func encodeRDN(oid: Data, value: String) -> Data {
-        var atv = Data()
-        atv.append(oid)
-        atv.append(ASN1.utf8String(value))
-        let atvSeq = ASN1.sequence(atv)
-        return ASN1.set(atvSeq)
+        var attributeTypeAndValue = Data()
+        attributeTypeAndValue.append(oid)
+        attributeTypeAndValue.append(ASN1.utf8String(value))
+        let attributeSequence = ASN1.sequence(attributeTypeAndValue)
+        return ASN1.set(attributeSequence)
     }
 
     // MARK: - Validity
@@ -252,28 +228,29 @@ nonisolated enum X509Builder {
         return ASN1.sequence(validity)
     }
 
-    /// RFC 5280 §4.1.2.5: UTCTime for years 1950–2049, GeneralizedTime otherwise.
     private static func encodeTime(_ date: Date) -> Data {
-        let c = utcComponents(date)
-        if c.year >= 1950 && c.year <= 2049 {
-            let yy = c.year % 100
-            let utc = String(format: "%02d%02d%02d%02d%02d%02dZ",
-                             yy, c.month, c.day, c.hour, c.minute, c.second)
-            return ASN1.utcTime(utc)
+        let components = utcComponents(date)
+        if components.year >= 1950 && components.year <= 2049 {
+            let twoDigitYear = components.year % 100
+            let utcTime = String(
+                format: "%02d%02d%02d%02d%02d%02dZ",
+                twoDigitYear, components.month, components.day, components.hour, components.minute, components.second
+            )
+            return ASN1.utcTime(utcTime)
         } else {
-            let gen = String(format: "%04d%02d%02d%02d%02d%02dZ",
-                             c.year, c.month, c.day, c.hour, c.minute, c.second)
-            return ASN1.generalizedTime(gen)
+            let generalized = String(
+                format: "%04d%02d%02d%02d%02d%02dZ",
+                components.year, components.month, components.day, components.hour, components.minute, components.second
+            )
+            return ASN1.generalizedTime(generalized)
         }
     }
 
-    /// Splits `date` into its UTC calendar fields without constructing a `Calendar`.
     private static func utcComponents(
         _ date: Date
     ) -> (year: Int, month: Int, day: Int, hour: Int, minute: Int, second: Int) {
         let secondsPerDay = 86_400
         let total = Int(date.timeIntervalSince1970.rounded(.down))
-        // Floor-divide so instants before 1970 still map to the correct civil day.
         var days = total / secondsPerDay
         var secondOfDay = total % secondsPerDay
         if secondOfDay < 0 {
@@ -284,22 +261,20 @@ nonisolated enum X509Builder {
         let minute = (secondOfDay % 3600) / 60
         let second = secondOfDay % 60
 
-        // civil_from_days: `days` counts from 1970-01-01 (day 0).
-        let z = days + 719_468                                             // shift epoch to 0000-03-01
+        let z = days + 719_468
         let era = (z >= 0 ? z : z - 146_096) / 146_097
-        let doe = z - era * 146_097                                        // day of era   [0, 146096]
-        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365  // year of era  [0, 399]
-        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)                  // day of year  [0, 365]
-        let mp = (5 * doy + 2) / 153                                       // month, Mar = 0 … Feb = 11
-        let day = doy - (153 * mp + 2) / 5 + 1                             // [1, 31]
-        let month = mp < 10 ? mp + 3 : mp - 9                              // [1, 12]
+        let doe = z - era * 146_097
+        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+        let mp = (5 * doy + 2) / 153
+        let day = doy - (153 * mp + 2) / 5 + 1
+        let month = mp < 10 ? mp + 3 : mp - 9
         let year = yoe + era * 400 + (month <= 2 ? 1 : 0)
         return (year, month, day, hour, minute, second)
     }
 
     // MARK: - SubjectPublicKeyInfo
 
-    /// Builds an SPKI from a `SecKey`. Only ECDSA P-256 is supported.
     private static func buildECP256SPKI(publicKey: SecKey) throws -> Data {
         var error: Unmanaged<CFError>?
         guard let raw = SecKeyCopyExternalRepresentation(publicKey, &error) as Data? else {
@@ -309,8 +284,6 @@ nonisolated enum X509Builder {
         return try buildECP256SPKI(publicKeyX963: raw)
     }
 
-    /// Builds an SPKI from the X9.63 (uncompressed, 0x04-prefixed) point format
-    /// that both CryptoKit and `SecKeyCopyExternalRepresentation` emit for P-256.
     private static func buildECP256SPKI(publicKeyX963: Data) throws -> Data {
         guard publicKeyX963.count == 65, publicKeyX963.first == 0x04 else {
             throw AnywhereError.certificate(.invalidPublicKey)
@@ -319,12 +292,12 @@ nonisolated enum X509Builder {
         var algorithm = Data()
         algorithm.append(ASN1OID.ecPublicKey)
         algorithm.append(ASN1OID.prime256v1)
-        let algorithmSeq = ASN1.sequence(algorithm)
+        let algorithmSequence = ASN1.sequence(algorithm)
 
         let subjectPublicKey = ASN1.bitString(unusedBits: 0, content: publicKeyX963)
 
         var spki = Data()
-        spki.append(algorithmSeq)
+        spki.append(algorithmSequence)
         spki.append(subjectPublicKey)
         return ASN1.sequence(spki)
     }
@@ -333,9 +306,9 @@ nonisolated enum X509Builder {
 
     private static func encodeExtensions(_ extensions: [Data]) -> Data {
         var inner = Data()
-        for e in extensions { inner.append(e) }
-        let seq = ASN1.sequence(inner)
-        return ASN1.contextSpecific(tag: 3, constructed: true, content: seq)
+        for entry in extensions { inner.append(entry) }
+        let sequence = ASN1.sequence(inner)
+        return ASN1.contextSpecific(tag: 3, constructed: true, content: sequence)
     }
 
     private static func encodeExtension(oid: Data, critical: Bool, value: Data) -> Data {
@@ -348,29 +321,25 @@ nonisolated enum X509Builder {
         return ASN1.sequence(inner)
     }
 
-    private static func encodeBasicConstraintsCA(pathLen: Int) -> Data {
+    private static func encodeBasicConstraintsCA(pathLength: Int) -> Data {
         var basicConstraints = Data()
-        basicConstraints.append(ASN1.boolean(true))                 // cA = TRUE
-        basicConstraints.append(ASN1.integer(Int64(pathLen)))       // pathLenConstraint
+        basicConstraints.append(ASN1.boolean(true))
+        basicConstraints.append(ASN1.integer(Int64(pathLength)))
         let value = ASN1.sequence(basicConstraints)
         return encodeExtension(oid: ASN1OID.basicConstraints, critical: true, value: value)
     }
 
     private static func encodeBasicConstraintsLeaf() -> Data {
-        // Empty SEQUENCE — cA defaults to FALSE.
         let value = ASN1.sequence(Data())
         return encodeExtension(oid: ASN1OID.basicConstraints, critical: true, value: value)
     }
 
-    /// RFC 5280 §4.2.1.3 bits (MSB-first): 0 digitalSignature, 5 keyCertSign,
-    /// 6 cRLSign; unusedBits = 7 − highest set position.
     private static func encodeKeyUsage(keyCertSign: Bool, cRLSign: Bool, digitalSignature: Bool) -> Data {
         var positions: [Int] = []
         if digitalSignature { positions.append(0) }
         if keyCertSign      { positions.append(5) }
         if cRLSign          { positions.append(6) }
         guard let highest = positions.max() else {
-            // No bits set: emit a well-formed empty BIT STRING rather than malformed DER.
             let bitString = ASN1.bitString(unusedBits: 0, content: Data())
             return encodeExtension(oid: ASN1OID.keyUsage, critical: true, value: bitString)
         }
@@ -383,15 +352,11 @@ nonisolated enum X509Builder {
         return encodeExtension(oid: ASN1OID.keyUsage, critical: true, value: bitString)
     }
 
-    /// Emits an `iPAddress` GeneralName for IP literals (RFC 5280 §4.2.1.6 —
-    /// Safari and Chrome reject a `dNSName` holding an IP), `dNSName` otherwise.
     private static func encodeSubjectAltName(hostname: String) -> Data {
         let generalName: Data
         if let ipBytes = parseIPAddress(hostname) {
             generalName = ASN1.contextSpecific(tag: 7, constructed: false, content: ipBytes)
         } else {
-            // dNSName is IA5String (ASCII only); convert U-labels to IDNA A-labels
-            // or SecTrust hostname matching fails.
             let asciiHost = Self.idnaASCII(hostname) ?? hostname
             let nameBytes = Data(asciiHost.utf8)
             generalName = ASN1.contextSpecific(tag: 2, constructed: false, content: nameBytes)
@@ -400,10 +365,7 @@ nonisolated enum X509Builder {
         return encodeExtension(oid: ASN1OID.subjectAltName, critical: false, value: value)
     }
 
-    /// Returns the 4- or 16-byte network-order address, or nil if `hostname` is not an
-    /// IP literal; zone identifiers (`%en0`) are invalid in certificates.
     private static func parseIPAddress(_ hostname: String) -> Data? {
-        // SNI wraps IPv6 literals in [brackets].
         let trimmed: String
         if hostname.hasPrefix("["), hostname.hasSuffix("]") {
             trimmed = String(hostname.dropFirst().dropLast())
@@ -411,9 +373,6 @@ nonisolated enum X509Builder {
             trimmed = hostname
         }
         if trimmed.contains("%") { return nil }
-        // `IPv4Address` accepts inet_aton shorthands ("1.2.3") that are valid DNS
-        // hostnames; gate on a strict dotted-quad so such hosts aren't mis-encoded
-        // as `iPAddress` SANs.
         if Self.isDottedQuadIPv4(trimmed), let v4 = IPv4Address(trimmed) {
             return v4.rawValue
         }
@@ -423,9 +382,8 @@ nonisolated enum X509Builder {
         return nil
     }
 
-    /// True only for a canonical dotted-quad; rejects inet_aton shorthands.
-    private static func isDottedQuadIPv4(_ s: String) -> Bool {
-        let parts = s.split(separator: ".", omittingEmptySubsequences: false)
+    private static func isDottedQuadIPv4(_ string: String) -> Bool {
+        let parts = string.split(separator: ".", omittingEmptySubsequences: false)
         guard parts.count == 4 else { return false }
         for part in parts {
             guard (1...3).contains(part.count),
@@ -436,7 +394,6 @@ nonisolated enum X509Builder {
         return true
     }
 
-    /// Converts `hostname` to IDNA ASCII (A-label); nil only on Punycode delta overflow.
     private static func idnaASCII(_ hostname: String) -> String? {
         guard hostname.contains(where: { !$0.isASCII }) else { return hostname }
         var labels: [String] = []
@@ -444,20 +401,19 @@ nonisolated enum X509Builder {
             if label.allSatisfy({ $0.isASCII }) {
                 labels.append(String(label))
             } else {
-                guard let puny = punycodeEncode(String(label)) else { return nil }
-                labels.append("xn--" + puny)
+                guard let punycode = punycodeEncode(String(label)) else { return nil }
+                labels.append("xn--" + punycode)
             }
         }
         return labels.joined(separator: ".")
     }
 
-    /// RFC 3492 Punycode encode of one label (no `xn--` prefix); nil on delta overflow.
     private static func punycodeEncode(_ input: String) -> String? {
         let base = 36, tmin = 1, tmax = 26, skew = 38, damp = 700
         let initialBias = 72, initialN = 128
-        func adapt(_ delta: Int, _ numPoints: Int, _ firstTime: Bool) -> Int {
+        func adapt(_ delta: Int, _ pointCount: Int, _ firstTime: Bool) -> Int {
             var delta = firstTime ? delta / damp : delta / 2
-            delta += delta / numPoints
+            delta += delta / pointCount
             var k = 0
             while delta > ((base - tmin) * tmax) / 2 {
                 delta /= (base - tmin)
@@ -465,33 +421,32 @@ nonisolated enum X509Builder {
             }
             return k + (((base - tmin + 1) * delta) / (delta + skew))
         }
-        // 0…25 → 'a'…'z', 26…35 → '0'…'9'.
-        func digit(_ d: Int) -> Character {
-            Character(UnicodeScalar(UInt8(d < 26 ? d + 97 : d - 26 + 48)))
+        func digit(_ value: Int) -> Character {
+            Character(UnicodeScalar(UInt8(value < 26 ? value + 97 : value - 26 + 48)))
         }
         let scalars = Array(input.unicodeScalars)
         var output = ""
         var n = initialN, delta = 0, bias = initialBias
         var basic = 0
-        for s in scalars where s.value < 0x80 {
-            output.append(Character(s))
+        for scalar in scalars where scalar.value < 0x80 {
+            output.append(Character(scalar))
             basic += 1
         }
         if basic > 0 { output.append("-") }
         var handled = basic
         while handled < scalars.count {
             var m = Int.max
-            for s in scalars where Int(s.value) >= n && Int(s.value) < m { m = Int(s.value) }
+            for scalar in scalars where Int(scalar.value) >= n && Int(scalar.value) < m { m = Int(scalar.value) }
             if m - n > (Int.max - delta) / (handled + 1) { return nil }
             delta += (m - n) * (handled + 1)
             n = m
-            for s in scalars {
-                let c = Int(s.value)
-                if c < n {
+            for scalar in scalars {
+                let codePoint = Int(scalar.value)
+                if codePoint < n {
                     delta += 1
                     if delta == 0 { return nil }
                 }
-                if c == n {
+                if codePoint == n {
                     var q = delta
                     var k = base
                     while true {
@@ -519,7 +474,6 @@ nonisolated enum X509Builder {
     }
 
     private static func encodeSubjectKeyIdentifier(spki: Data) throws -> Data {
-        // SKI = SHA-1 of the BIT STRING content (RFC 5280 §4.2.1.2, method 1).
         let publicKeyContent = try extractSubjectPublicKey(spki: spki)
         let digest = sha1(publicKeyContent)
         let value = ASN1.octetString(Data(digest))
@@ -527,7 +481,6 @@ nonisolated enum X509Builder {
     }
 
     private static func encodeAuthorityKeyIdentifier(keyIdentifier: Data) -> Data {
-        // AuthorityKeyIdentifier: keyIdentifier is [0] IMPLICIT OCTET STRING.
         let inner = ASN1.contextSpecific(tag: 0, constructed: false, content: keyIdentifier)
         let value = ASN1.sequence(inner)
         return encodeExtension(oid: ASN1OID.authorityKeyIdentifier, critical: false, value: value)
@@ -535,7 +488,6 @@ nonisolated enum X509Builder {
 
     // MARK: - Algorithm Identifier
 
-    /// ECDSA-with-SHA256, used in both `tbsCertificate.signature` and the outer `signatureAlgorithm`.
     private static let algorithmECDSAWithSHA256: Data = {
         ASN1.sequence(ASN1OID.ecdsaWithSHA256)
     }()
@@ -551,7 +503,6 @@ nonisolated enum X509Builder {
         extensions: Data
     ) -> Data {
         var tbs = Data()
-        // version [0] EXPLICIT INTEGER (v3 = 2)
         let versionInner = ASN1.integer(2)
         let versionWrapped = ASN1.contextSpecific(tag: 0, constructed: true, content: versionInner)
         tbs.append(versionWrapped)
@@ -582,8 +533,8 @@ nonisolated enum X509Builder {
         var error: Unmanaged<CFError>?
         let algorithm: SecKeyAlgorithm = .ecdsaSignatureMessageX962SHA256
         guard let signature = SecKeyCreateSignature(privateKey, algorithm, data as CFData, &error) as Data? else {
-            let err = error?.takeRetainedValue()
-            throw AnywhereError.certificate(.signingFailed(detail: err.flatMap { CFErrorCopyDescription($0) as String? } ?? "unknown"))
+            let cfError = error?.takeRetainedValue()
+            throw AnywhereError.certificate(.signingFailed(detail: cfError.flatMap { CFErrorCopyDescription($0) as String? } ?? "unknown"))
         }
         return signature
     }
@@ -595,40 +546,39 @@ nonisolated enum X509Builder {
         let subjectKeyIdentifier: Data
     }
 
-    private static func parseCAComponents(certDER: Data) throws -> CAComponents {
-        var parser = ASN1Parser(data: certDER)
-        let cert = try parser.readSequence()                        // Certificate
-        var certParser = ASN1Parser(data: cert)
-        let tbs = try certParser.readSequence()                     // TBSCertificate
+    private static func parseCAComponents(certificateDER: Data) throws -> CAComponents {
+        var parser = ASN1Parser(data: certificateDER)
+        let certificate = try parser.readSequence()
+        var certificateParser = ASN1Parser(data: certificate)
+        let tbs = try certificateParser.readSequence()
         var tbsParser = ASN1Parser(data: tbs)
-        try tbsParser.skipExplicitContextSpecific(tag: 0)           // version
-        try tbsParser.skipNext()                                    // serialNumber
-        try tbsParser.skipNext()                                    // signature algorithm
-        try tbsParser.skipNext()                                    // issuer
-        try tbsParser.skipNext()                                    // validity
+        try tbsParser.skipExplicitContextSpecific(tag: 0)
+        try tbsParser.skipNext()
+        try tbsParser.skipNext()
+        try tbsParser.skipNext()
+        try tbsParser.skipNext()
         let subjectDN = try tbsParser.readNextWithHeader(expectedTag: 0x30)
-        try tbsParser.skipNext()                                    // SPKI
+        try tbsParser.skipNext()
         let extensionsBlob = try tbsParser.readExplicitContextSpecific(tag: 3)
-        let ski = try extractSKIFromExtensions(extensionsBlob)
-        return CAComponents(subjectDN: subjectDN, subjectKeyIdentifier: ski)
+        let keyIdentifier = try extractSKIFromExtensions(extensionsBlob)
+        return CAComponents(subjectDN: subjectDN, subjectKeyIdentifier: keyIdentifier)
     }
 
     private static func extractSKIFromExtensions(_ blob: Data) throws -> Data {
         var parser = ASN1Parser(data: blob)
-        let seq = try parser.readSequence()
-        var seqParser = ASN1Parser(data: seq)
-        while !seqParser.isAtEnd {
-            let ext = try seqParser.readSequence()
-            var extParser = ASN1Parser(data: ext)
-            let oid = try extParser.readNextWithHeader(expectedTag: 0x06)
+        let sequence = try parser.readSequence()
+        var sequenceParser = ASN1Parser(data: sequence)
+        while !sequenceParser.isAtEnd {
+            let extensionData = try sequenceParser.readSequence()
+            var extensionParser = ASN1Parser(data: extensionData)
+            let oid = try extensionParser.readNextWithHeader(expectedTag: 0x06)
             let oidContent = try ASN1Parser.contentOf(oid)
-            if try extParser.peekTag() == 0x01 {  // skip optional critical BOOLEAN
-                try extParser.skipNext()
+            if try extensionParser.peekTag() == 0x01 {
+                try extensionParser.skipNext()
             }
-            let octets = try extParser.readNextWithHeader(expectedTag: 0x04)
+            let octets = try extensionParser.readNextWithHeader(expectedTag: 0x04)
             let octetContent = try ASN1Parser.contentOf(octets)
             if oidContent == ASN1OID.contentSubjectKeyIdentifier {
-                // octetContent is an OCTET STRING wrapping another OCTET STRING.
                 var inner = ASN1Parser(data: octetContent)
                 let identifier = try inner.readNextWithHeader(expectedTag: 0x04)
                 return try ASN1Parser.contentOf(identifier)
@@ -639,32 +589,28 @@ nonisolated enum X509Builder {
 
     private static func extractSubjectPublicKey(spki: Data) throws -> Data {
         var parser = ASN1Parser(data: spki)
-        let seq = try parser.readSequence()
-        var seqParser = ASN1Parser(data: seq)
-        try seqParser.skipNext()                                    // algorithm
-        let bitString = try seqParser.readNextWithHeader(expectedTag: 0x03)
+        let sequence = try parser.readSequence()
+        var sequenceParser = ASN1Parser(data: sequence)
+        try sequenceParser.skipNext()
+        let bitString = try sequenceParser.readNextWithHeader(expectedTag: 0x03)
         let content = try ASN1Parser.contentOf(bitString)
         // First content byte is "unused bits" — skip it.
-        guard let first = content.first else {
+        guard !content.isEmpty else {
             throw AnywhereError.certificate(.asn1ParseFailed(detail: "Empty BIT STRING"))
         }
-        _ = first
         return content.dropFirst()
     }
 
     // MARK: - Helpers
 
     private static func normalizeSerial(_ serial: Data) -> Data {
-        // RFC 5280 §4.1.2.2: serial must be a positive integer.
         var trimmed = serial
         while trimmed.count > 1 && trimmed.first == 0x00 {
             trimmed = trimmed.dropFirst()
         }
-        // All-zero collapses to 0x00; substitute 1 (RFC 5280 forbids serial 0).
         if trimmed.isEmpty || (trimmed.count == 1 && trimmed.first == 0x00) {
             trimmed = Data([0x01])
         }
-        // If top bit set, prepend 0x00 to keep INTEGER positive.
         if let first = trimmed.first, first & 0x80 != 0 {
             var prefixed = Data([0x00])
             prefixed.append(trimmed)
@@ -681,7 +627,6 @@ nonisolated enum X509Builder {
 // MARK: - ASN.1 Encoding Primitives
 
 nonisolated private enum ASN1 {
-
     static func sequence(_ content: Data) -> Data {
         emit(tag: 0x30, content: content)
     }
@@ -701,14 +646,13 @@ nonisolated private enum ASN1 {
             return Data([0x02, 0x01, 0x00])
         }
         var bytes: [UInt8] = []
-        var v = value
-        let negative = v < 0
+        var remaining = value
+        let negative = remaining < 0
         repeat {
-            bytes.insert(UInt8(truncatingIfNeeded: v & 0xFF), at: 0)
-            v >>= 8
-        } while !(v == 0 || v == -1)
+            bytes.insert(UInt8(truncatingIfNeeded: remaining & 0xFF), at: 0)
+            remaining >>= 8
+        } while !(remaining == 0 || remaining == -1)
 
-        // DER INTEGER sign correction: pad 0x00 to keep positives positive, 0xFF for negatives.
         if !negative, let first = bytes.first, first & 0x80 != 0 {
             bytes.insert(0x00, at: 0)
         } else if negative, let first = bytes.first, first & 0x80 == 0 {
@@ -717,7 +661,6 @@ nonisolated private enum ASN1 {
         return emit(tag: 0x02, content: Data(bytes))
     }
 
-    /// Wraps a raw big-endian INTEGER content blob; caller ensures sign-correctness.
     static func rawInteger(_ content: Data) -> Data {
         emit(tag: 0x02, content: content)
     }
@@ -761,10 +704,10 @@ nonisolated private enum ASN1 {
             return Data([UInt8(length)])
         }
         var bytes: [UInt8] = []
-        var v = length
-        while v > 0 {
-            bytes.insert(UInt8(v & 0xFF), at: 0)
-            v >>= 8
+        var remaining = length
+        while remaining > 0 {
+            bytes.insert(UInt8(remaining & 0xFF), at: 0)
+            remaining >>= 8
         }
         return Data([0x80 | UInt8(bytes.count)] + bytes)
     }
@@ -773,37 +716,26 @@ nonisolated private enum ASN1 {
 // MARK: - Pre-encoded OIDs and constants
 
 nonisolated private enum ASN1OID {
-    static let commonName               = Data([0x06, 0x03, 0x55, 0x04, 0x03])              // 2.5.4.3
-    static let organizationName         = Data([0x06, 0x03, 0x55, 0x04, 0x0A])              // 2.5.4.10
-    static let basicConstraints         = Data([0x06, 0x03, 0x55, 0x1D, 0x13])              // 2.5.29.19
-    static let keyUsage                 = Data([0x06, 0x03, 0x55, 0x1D, 0x0F])              // 2.5.29.15
-    static let extKeyUsage              = Data([0x06, 0x03, 0x55, 0x1D, 0x25])              // 2.5.29.37
-    static let subjectAltName           = Data([0x06, 0x03, 0x55, 0x1D, 0x11])              // 2.5.29.17
-    static let subjectKeyIdentifier     = Data([0x06, 0x03, 0x55, 0x1D, 0x0E])              // 2.5.29.14
-    static let authorityKeyIdentifier   = Data([0x06, 0x03, 0x55, 0x1D, 0x23])              // 2.5.29.35
+    static let commonName               = Data([0x06, 0x03, 0x55, 0x04, 0x03])
+    static let organizationName         = Data([0x06, 0x03, 0x55, 0x04, 0x0A])
+    static let basicConstraints         = Data([0x06, 0x03, 0x55, 0x1D, 0x13])
+    static let keyUsage                 = Data([0x06, 0x03, 0x55, 0x1D, 0x0F])
+    static let extKeyUsage              = Data([0x06, 0x03, 0x55, 0x1D, 0x25])
+    static let subjectAltName           = Data([0x06, 0x03, 0x55, 0x1D, 0x11])
+    static let subjectKeyIdentifier     = Data([0x06, 0x03, 0x55, 0x1D, 0x0E])
+    static let authorityKeyIdentifier   = Data([0x06, 0x03, 0x55, 0x1D, 0x23])
 
-    /// The raw OID body (minus tag/length), used for parsing comparisons.
     static let contentSubjectKeyIdentifier = Data([0x55, 0x1D, 0x0E])
 
-    /// id-ecPublicKey 1.2.840.10045.2.1
     static let ecPublicKey = Data([0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01])
-    /// secp256r1 1.2.840.10045.3.1.7
     static let prime256v1  = Data([0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07])
-    /// ecdsa-with-SHA256 1.2.840.10045.4.3.2
     static let ecdsaWithSHA256 = Data([0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x02])
-    /// id-kp-serverAuth 1.3.6.1.5.5.7.3.1
     static let serverAuth  = Data([0x06, 0x08, 0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01])
 
-    // CMS / PKCS#7 (RFC 5652) — used to wrap the .mobileconfig in a SignedData.
-    /// id-data 1.2.840.113549.1.7.1
     static let data             = Data([0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x01])
-    /// id-signedData 1.2.840.113549.1.7.2
     static let signedData       = Data([0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x02])
-    /// id-sha256 2.16.840.1.101.3.4.2.1
     static let sha256           = Data([0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01])
-    /// id-contentType 1.2.840.113549.1.9.3
     static let attrContentType  = Data([0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x03])
-    /// id-messageDigest 1.2.840.113549.1.9.4
     static let attrMessageDigest = Data([0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x04])
 }
 
@@ -879,16 +811,13 @@ nonisolated private struct ASN1Parser {
             return (Int(first), 1)
         }
         let count = Int(first & 0x7F)
-        // 0x80 alone is BER indefinite-length (invalid DER); cap length bytes at 4.
         guard count > 0, count <= 4, start + count < data.endIndex else {
             throw AnywhereError.certificate(.asn1ParseFailed(detail: "Length encoding invalid"))
         }
-        // Accumulate in UInt64 — a 4-byte length can overflow a 32-bit `Int`.
         var length: UInt64 = 0
         for i in 0..<count {
             length = (length << 8) | UInt64(data[start + 1 + i])
         }
-        // Bound to remaining buffer; a huge length would overflow Int in readNextWithHeader.
         let remaining = data.endIndex - (start + 1 + count)
         guard length <= UInt64(Int.max), length <= UInt64(remaining) else {
             throw AnywhereError.certificate(.asn1ParseFailed(detail:
@@ -898,7 +827,6 @@ nonisolated private struct ASN1Parser {
         return (Int(length), 1 + count)
     }
 
-    /// Returns the content bytes of a TLV blob (strips the tag and length header).
     static func contentOf(_ tlv: Data) throws -> Data {
         guard tlv.count >= 2 else {
             throw AnywhereError.certificate(.asn1ParseFailed(detail: "TLV too short"))

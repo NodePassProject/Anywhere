@@ -17,17 +17,17 @@ final class MITMCertificateController {
     @ObservationIgnored private let store = MITMCertificateStore()
 
     private(set) var hasCA: Bool = false
-    private(set) var trusted: Bool = false
+    private(set) var isTrusted: Bool = false
 
     init() {
-        (hasCA, trusted) = currentState()
+        (hasCA, isTrusted) = currentState()
     }
 
     func refresh() {
-        let (exists, isTrusted) = currentState()
-        guard exists != hasCA || isTrusted != trusted else { return }
+        let (exists, trustedNow) = currentState()
+        guard exists != hasCA || trustedNow != isTrusted else { return }
         hasCA = exists
-        trusted = isTrusted
+        isTrusted = trustedNow
         AWNotificationCenter.notifyMITMChanged()
     }
 
@@ -54,7 +54,7 @@ final class MITMCertificateController {
         store.exportMobileConfig()
     }
 
-    private func currentState() -> (hasCA: Bool, trusted: Bool) {
+    private func currentState() -> (hasCA: Bool, isTrusted: Bool) {
         let exists = store.exportCertificateDER() != nil
         return (exists, exists && store.isCATrusted())
     }
@@ -65,11 +65,10 @@ struct MITMCertificateView: View {
 
     @Environment(MITMCertificateController.self) private var controller
 
-    @State private var exportingCertificate = false
+    @State private var isExportingCertificate = false
     @State private var showRegenerateConfirm = false
     @State private var showDeleteConfirm = false
     @State private var errorMessage: String?
-    @State private var profileServerStarted = false
 
     var body: some View {
         Form {
@@ -175,7 +174,7 @@ struct MITMCertificateView: View {
         } message: {
             Text(errorMessage ?? "")
         }
-        .sheet(isPresented: $exportingCertificate) {
+        .sheet(isPresented: $isExportingCertificate) {
             if let url = certificateURL() {
                 ShareSheet(items: [url])
             }
@@ -197,24 +196,24 @@ struct MITMCertificateView: View {
 
     private var badgeIcon: String {
         if !controller.hasCA { return "xmark.circle.fill" }
-        return controller.trusted ? "checkmark.circle.fill" : "exclamationmark.circle.fill"
+        return controller.isTrusted ? "checkmark.circle.fill" : "exclamationmark.circle.fill"
     }
 
     private var badgeColor: Color {
         if !controller.hasCA { return .red }
-        return controller.trusted ? .green : .orange
+        return controller.isTrusted ? .green : .orange
     }
 
     private var badgeTitle: String {
         if !controller.hasCA { return String(localized: "No Certificate") }
-        return controller.trusted ? String(localized: "Trusted") : String(localized: "Not Trusted")
+        return controller.isTrusted ? String(localized: "Trusted") : String(localized: "Not Trusted")
     }
 
     private var badgeSubtitle: String {
         if !controller.hasCA {
             return String(localized: "Generate a certificate to begin.")
         }
-        return controller.trusted
+        return controller.isTrusted
             ? String(localized: "Anywhere Root Certificate is installed and trusted.")
             : String(localized: "Install the profile and trust in Settings to use MITM.")
     }
@@ -226,7 +225,7 @@ struct MITMCertificateView: View {
             errorMessage = String(localized: "Failed to export certificate.")
             return
         }
-        exportingCertificate = true
+        isExportingCertificate = true
     }
 
     /// Profile install requires a URL; serve the .mobileconfig over a one-shot 127.0.0.1 HTTP server.

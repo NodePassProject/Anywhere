@@ -7,10 +7,7 @@
 
 import Foundation
 
-/// Read offset makes prefix removal O(1) (not the O(n²) memmove of `Data.removeFirst`); the visible region is always 0-indexed.
 nonisolated struct MITMByteBuffer {
-
-    /// Compact once the consumed prefix exceeds this; 64 KiB = 4× the upstream TLS plaintext record size.
     private static let compactAbsoluteThreshold = 64 * 1024
 
     private var storage: Data
@@ -25,48 +22,43 @@ nonisolated struct MITMByteBuffer {
 
     var isEmpty: Bool { offset >= storage.count }
 
-    /// Always 0; the underlying storage offset is hidden from callers.
     var startIndex: Int { 0 }
 
     var endIndex: Int { count }
 
-    subscript(_ i: Int) -> UInt8 {
-        return storage[storage.startIndex + offset + i]
+    subscript(_ index: Int) -> UInt8 {
+        storage[storage.startIndex + offset + index]
     }
 
-    func prefix(_ n: Int) -> Data {
-        let take = Swift.min(n, count)
+    func prefix(_ maxLength: Int) -> Data {
+        let take = Swift.min(maxLength, count)
         let absoluteStart = storage.startIndex + offset
         return storage.subdata(in: absoluteStart..<(absoluteStart + take))
     }
 
     func subdata(in range: Range<Int>) -> Data {
-        let s = storage.startIndex + offset
-        return storage.subdata(in: (s + range.lowerBound)..<(s + range.upperBound))
+        let base = storage.startIndex + offset
+        return storage.subdata(in: (base + range.lowerBound)..<(base + range.upperBound))
     }
 
-    /// 0-relative range of the first occurrence of `pattern` at or after `start` (clamped).
-    /// Incremental scans must overlap by `pattern.count - 1` to catch straddling matches.
     func range(of pattern: Data, from start: Int = 0) -> Range<Int>? {
-        let s = storage.startIndex + offset
+        let base = storage.startIndex + offset
         let clamped = Swift.max(0, Swift.min(start, count))
-        guard let r = storage.range(of: pattern, in: (s + clamped)..<storage.endIndex) else {
+        guard let found = storage.range(of: pattern, in: (base + clamped)..<storage.endIndex) else {
             return nil
         }
-        return (r.lowerBound - s)..<(r.upperBound - s)
+        return (found.lowerBound - base)..<(found.upperBound - base)
     }
 
-    /// Index of the CR in the first CRLF at or after `start` (clamped).
-    /// Incremental scans pass the prior `count - 1` to catch a straddling CRLF.
     func firstCRLF(from start: Int = 0) -> Int? {
         guard count >= 2 else { return nil }
-        var i = Swift.max(0, Swift.min(start, count))
+        var index = Swift.max(0, Swift.min(start, count))
         let last = count - 1
-        while i < last {
-            if self[i] == 0x0D, self[i + 1] == 0x0A {
-                return i
+        while index < last {
+            if self[index] == 0x0D, self[index + 1] == 0x0A {
+                return index
             }
-            i += 1
+            index += 1
         }
         return nil
     }
@@ -76,9 +68,8 @@ nonisolated struct MITMByteBuffer {
         storage.append(other)
     }
 
-    mutating func removeFirst(_ n: Int) {
-        // Overshoot past count is tolerated — the reset below clamps to empty.
-        offset += n
+    mutating func removeFirst(_ k: Int) {
+        offset += k
         if offset >= storage.count {
             storage.removeAll(keepingCapacity: true)
             offset = 0
@@ -95,6 +86,67 @@ nonisolated struct MITMByteBuffer {
         if offset >= Self.compactAbsoluteThreshold || offset * 2 > storage.count {
             storage = storage.subdata(in: (storage.startIndex + offset)..<storage.endIndex)
             offset = 0
+        }
+    }
+}
+
+nonisolated struct MITMByteQueue {
+    private static let compactHeadThreshold = 32
+
+    private var chunks: [Data] = []
+    private var head = 0
+    private var headOffset = 0
+
+    private(set) var count = 0
+
+    var isEmpty: Bool { count == 0 }
+
+    mutating func append(_ data: Data) {
+        guard !data.isEmpty else { return }
+        chunks.append(data)
+        count += data.count
+    }
+
+    mutating func popFirst(_ maxCount: Int) -> Data {
+        let take = min(max(maxCount, 0), count)
+        guard take > 0 else { return Data() }
+        count -= take
+        let first = chunks[head]
+        let firstStart = first.startIndex + headOffset
+        let firstAvailable = first.endIndex - firstStart
+        if take <= firstAvailable {
+            if take == firstAvailable { advanceHead() } else { headOffset += take }
+            return first[firstStart..<(firstStart + take)]
+        }
+        var out = Data(capacity: take)
+        var needed = take
+        while needed > 0 {
+            let chunk = chunks[head]
+            let start = chunk.startIndex + headOffset
+            let available = chunk.endIndex - start
+            if needed < available {
+                out.append(chunk[start..<(start + needed)])
+                headOffset += needed
+                needed = 0
+            } else {
+                out.append(chunk[start..<chunk.endIndex])
+                needed -= available
+                advanceHead()
+            }
+        }
+        return out
+    }
+
+    private mutating func advanceHead() {
+        chunks[head] = Data()
+        head += 1
+        headOffset = 0
+        if head == chunks.count {
+            chunks.removeAll(keepingCapacity: true)
+            head = 0
+        } else if head >= Self.compactHeadThreshold, head * 2 >= chunks.count {
+            chunks.removeFirst(head)
+            head = 0
         }
     }
 }

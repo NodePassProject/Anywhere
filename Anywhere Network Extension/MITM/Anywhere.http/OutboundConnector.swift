@@ -17,7 +17,7 @@ nonisolated enum OutboundConnector {
     }
 
     // MARK: - Ambient Routing Context
-    
+
     struct RoutingContext {
         let domainRouter: DomainRouter
         let requestLog: RequestLog
@@ -31,7 +31,7 @@ nonisolated enum OutboundConnector {
     }
 
     private static let context = Mutex<RoutingContext?>(nil)
-    
+
     static func setRoutingContext(_ context: RoutingContext?) {
         Self.context.withLock { $0 = context }
     }
@@ -41,18 +41,18 @@ nonisolated enum OutboundConnector {
     }
 
     // MARK: - Route resolution
-    
+
     static func resolveRoute(host: String) async -> (target: RouteTarget, ruleSetName: String?) {
         guard let context = routingContext() else { return (.direct, nil) }
         let router = context.domainRouter
 
-        let literal = isIPLiteral(host)
-        let matched = literal ? router.matchIP(host) : router.matchDomain(host)
+        let isLiteral = isIPLiteral(host)
+        let matched = isLiteral ? router.matchIP(host) : router.matchDomain(host)
         if let matched { return (matched.action, matched.ruleSetName) }
 
         if isLoopbackOrPrivate(host) { return (.direct, nil) }
 
-        if !literal, !context.preventDNSLeak,
+        if !isLiteral, !context.preventDNSLeak,
            let ip = await DNSResolver.localRequests.resolveHost(host, family: .ipv4),
            let ruleMatch = router.matchIP(ip) {
             return (ruleMatch.action, ruleMatch.ruleSetName)
@@ -62,7 +62,7 @@ nonisolated enum OutboundConnector {
     }
 
     // MARK: - Dial
-    
+
     static func dial(host: String, port: UInt16) async throws -> Dialed {
         let (route, ruleSetName) = await resolveRoute(host: host)
         let context = routingContext()
@@ -151,7 +151,10 @@ nonisolated enum OutboundConnector {
             return withUnsafeBytes(of: &v6) { raw -> Bool in
                 var isLoopback = raw[15] == 1
                 if isLoopback {
-                    for i in 0..<15 where raw[i] != 0 { isLoopback = false; break }
+                    for i in 0..<15 where raw[i] != 0 {
+                        isLoopback = false
+                        break
+                    }
                 }
                 if isLoopback { return true }
                 if raw[0] == 0xFE && (raw[1] & 0xC0) == 0x80 { return true } // fe80::/10 link-local

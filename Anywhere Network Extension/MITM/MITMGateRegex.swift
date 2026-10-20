@@ -11,31 +11,38 @@ import Synchronization
 nonisolated private let logger = AnywhereLogger(category: "MITMGateRegex")
 
 nonisolated final class MITMGateRegex: Sendable {
+    typealias Verdict = MITMRegexConcurrencyBridge.GateMatch
+
+    struct Request {
+        let gate: MITMGateRegex
+        let wantsCaptures: Bool
+    }
+
     private let regex: NSRegularExpression
     private let pattern: String
-    
+
     private let isLiteral: Bool
     private let literalPattern: String
-    
+
     private static let regexMetacharacters: Set<Character> = [
         "\\", "^", "$", ".", "|", "?", "*", "+", "(", ")", "[", "]", "{", "}"
     ]
-    
+
     static let matchDeadlineMillis = 100
     static let hardCapSeconds = 30
     static let strikeLimit = 3
-    
+
     private static let maxCacheEntries = 64
 
     private struct State {
-        var cache: [String: Bool] = [:]
+        var cache: [String: Verdict] = [:]
         var cacheOrder: [String] = []
         var timeoutStrikes = 0
-        var quarantined = false
+        var isQuarantined = false
     }
 
     private let state = Mutex(State())
-    
+
     init?(pattern: String) {
         guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
             return nil
@@ -52,115 +59,122 @@ nonisolated final class MITMGateRegex: Sendable {
             Self.warnIfHostRegionHasUppercase(pattern)
         }
     }
-    
+
     private static func lowercasingHostRegion(_ pattern: String) -> String {
-        guard let sep = pattern.range(of: "://") else { return pattern }
-        let authStart = sep.upperBound
-        let authEnd = pattern[authStart...].firstIndex(where: { $0 == "/" || $0 == "?" || $0 == "#" }) ?? pattern.endIndex
-        return pattern[..<authStart].lowercased()
-            + pattern[authStart..<authEnd].lowercased()
-            + String(pattern[authEnd...])
+        guard let schemeSeparator = pattern.range(of: "://") else { return pattern }
+        let authorityStart = schemeSeparator.upperBound
+        let authorityEnd = pattern[authorityStart...].firstIndex(where: { $0 == "/" || $0 == "?" || $0 == "#" }) ?? pattern.endIndex
+        return pattern[..<authorityStart].lowercased()
+            + pattern[authorityStart..<authorityEnd].lowercased()
+            + String(pattern[authorityEnd...])
     }
-    
+
     private static func warnIfHostRegionHasUppercase(_ pattern: String) {
         guard let schemeRange = pattern.range(of: "://") else { return }
         let authority = pattern[schemeRange.upperBound...].prefix { $0 != "/" }
         if authority.contains(where: { $0.isASCII && $0.isUppercase }) {
-            logger.warning("gate pattern \"\(pattern)\" has an uppercase letter in its host region; the URL host is matched lowercased, so this rule will never fire — write the host in lowercase")
+            logger.warning("gate pattern \"\(pattern)\" has an uppercase letter in its host region; the URL host is matched lowercased, so this rule will never fire")
         }
     }
-    
-    func peekMatches(_ normalizedURL: String) -> Bool? {
+
+    func peek(_ normalizedURL: String, wantsCaptures: Bool) -> Verdict? {
         if isLiteral {
-            return normalizedURL.range(of: literalPattern, options: .literal) != nil
+            guard let range = normalizedURL.range(of: literalPattern, options: .literal) else { return .noMatch }
+            return .match(wantsCaptures ? [String(normalizedURL[range])] : nil)
         }
         return state.withLock { state in
-            if state.quarantined { return false }
-            return state.cache[normalizedURL]
-        }
-    }
-    
-    func matches(_ normalizedURL: String) async -> Bool {
-        if let verdict = peekMatches(normalizedURL) { return verdict }
-        if Task.isCancelled { return false }
-        
-        let regex = self.regex
-        let pattern = self.pattern
-        let outcome = await MITMRegexConcurrencyBridge.shared.firstMatch(
-            regex, in: normalizedURL,
-            deadlineMillis: Self.matchDeadlineMillis,
-            hardCapSeconds: Self.hardCapSeconds,
-            hardCapMessage: { Self.hardCapMessage(pattern: pattern) },
-            onResolved: { [weak self] matched in self?.store(normalizedURL, matched) }
-        )
-        switch outcome {
-        case .completed(let matched):
-            return matched
-        case .timedOut:
-            if !Task.isCancelled { recordStrike() }
-            return false
-        }
-    }
-    
-    func peekFirstMatchCaptures(_ normalizedURL: String) -> [String?]?? {
-        if isLiteral {
-            guard let r = normalizedURL.range(of: literalPattern, options: .literal) else {
-                return .some(nil)
+            if state.isQuarantined { return .noMatch }
+            switch state.cache[normalizedURL] {
+            case .noMatch:
+                return .noMatch
+            case .match(let captures):
+                guard wantsCaptures, captures == nil else { return .match(captures) }
+                return nil
+            case nil:
+                return nil
             }
-            return [String(normalizedURL[r])]
         }
-        if state.withLock({ $0.quarantined }) { return .some(nil) }
-        return nil
     }
-    
-    func firstMatchCaptures(_ normalizedURL: String) async -> [String?]? {
-        if let captures = peekFirstMatchCaptures(normalizedURL) { return captures }
-        if Task.isCancelled { return nil }
-        
-        let regex = self.regex
-        let pattern = self.pattern
-        let outcome = await MITMRegexConcurrencyBridge.shared.firstMatchCaptureGroups(
-            regex, in: normalizedURL,
-            deadlineMillis: Self.matchDeadlineMillis,
-            hardCapSeconds: Self.hardCapSeconds,
-            hardCapMessage: { Self.hardCapMessage(pattern: pattern) }
+
+    static func resolve(_ requests: [Request], in normalizedURL: String) async -> [Verdict] {
+        var verdicts = [Verdict?](repeating: nil, count: requests.count)
+        var slots: [ObjectIdentifier: Int] = [:]
+        var pending: [(gate: MITMGateRegex, wantsCaptures: Bool, requests: [Int])] = []
+        for (index, request) in requests.enumerated() {
+            if let verdict = request.gate.peek(normalizedURL, wantsCaptures: request.wantsCaptures) {
+                verdicts[index] = verdict
+                continue
+            }
+            let key = ObjectIdentifier(request.gate)
+            if let slot = slots[key] {
+                pending[slot].wantsCaptures = pending[slot].wantsCaptures || request.wantsCaptures
+                pending[slot].requests.append(index)
+            } else {
+                slots[key] = pending.count
+                pending.append((gate: request.gate, wantsCaptures: request.wantsCaptures, requests: [index]))
+            }
+        }
+        guard !pending.isEmpty, !Task.isCancelled else { return verdicts.map { $0 ?? .noMatch } }
+
+        let outcomes = await MITMRegexConcurrencyBridge.shared.firstMatches(
+            pending.map { entry in
+                let gate = entry.gate
+                return MITMRegexConcurrencyBridge.GateRequest(
+                    regex: gate.regex,
+                    wantsCaptures: entry.wantsCaptures,
+                    onResolved: { [weak gate] verdict in gate?.store(normalizedURL, verdict) },
+                    hardCapMessage: { Self.hardCapMessage(pattern: gate.pattern) }
+                )
+            },
+            in: normalizedURL,
+            deadlineMillis: matchDeadlineMillis,
+            hardCapSeconds: hardCapSeconds
         )
-        switch outcome {
-        case .completed(let captures):
-            return captures
-        case .timedOut:
-            if !Task.isCancelled { recordStrike() }
-            return nil
+        let cancelled = Task.isCancelled
+        for (entry, outcome) in zip(pending, outcomes) {
+            let verdict: Verdict
+            switch outcome {
+            case .completed(let resolved):
+                verdict = resolved
+            case .timedOut:
+                if !cancelled { entry.gate.recordStrike() }
+                verdict = .noMatch
+            }
+            for index in entry.requests { verdicts[index] = verdict }
         }
+        return verdicts.map { $0 ?? .noMatch }
     }
-    
+
     private static func hardCapMessage(pattern: String) -> String {
         let shown = pattern.count > 200 ? String(pattern.prefix(200)) + "…" : pattern
         return "URL-gate regex did not return \(hardCapSeconds)s after blowing its \(matchDeadlineMillis)ms budget — a worker thread is permanently pinned by catastrophic backtracking and can't be reclaimed. Crashing the Network Extension so the system relaunches it clean. Offending pattern: \(shown)"
     }
-    
-    private func store(_ url: String, _ matched: Bool) {
+
+    private func store(_ url: String, _ verdict: Verdict) {
         state.withLock { state in
-            guard !state.quarantined else { return }
-            if state.cache[url] == nil {
-                state.cache[url] = matched
+            guard !state.isQuarantined else { return }
+            switch (state.cache[url], verdict) {
+            case (nil, _):
+                state.cache[url] = verdict
                 state.cacheOrder.append(url)
                 if state.cacheOrder.count > Self.maxCacheEntries {
                     let evicted = state.cacheOrder.removeFirst()
                     state.cache.removeValue(forKey: evicted)
                 }
-            } else {
-                state.cache[url] = matched
+            case (.some(.match(.some)), .match(.none)):
+                return
+            default:
+                state.cache[url] = verdict
             }
         }
     }
-    
+
     private func recordStrike() {
         let message: String? = state.withLock { state in
-            guard !state.quarantined else { return nil }
+            guard !state.isQuarantined else { return nil }
             state.timeoutStrikes += 1
             if state.timeoutStrikes >= Self.strikeLimit {
-                state.quarantined = true
+                state.isQuarantined = true
                 state.cache.removeAll(keepingCapacity: false)
                 state.cacheOrder.removeAll(keepingCapacity: false)
                 return "URL-gate pattern quarantined after \(Self.strikeLimit) match timeouts (\(Self.matchDeadlineMillis)ms each); the rule is disabled. Pattern: \(pattern)"

@@ -221,13 +221,13 @@ actor TunnelStack {
     private let _mitmEnabled = Atomic<Bool>(false)
     nonisolated var mitmEnabled: Bool { _mitmEnabled.load(ordering: .relaxed) }
     nonisolated let mitmPolicy = MITMRewritePolicy()
-    private let _mitmLeafCache = Mutex<MITMLeafCertCache?>(nil)
+    private let _mitmLeafCache = Mutex<MITMLeafCertificateCache?>(nil)
     nonisolated let mitmCertificateStore = MITMCertificateStore()
 
-    nonisolated func mitmLeafCacheCreatingIfNeeded() throws(AnywhereError) -> MITMLeafCertCache {
+    nonisolated func mitmLeafCacheCreatingIfNeeded() throws(AnywhereError) -> MITMLeafCertificateCache {
         try _mitmLeafCache.withLock { (cache) throws(AnywhereError) in
             if let cache { return cache }
-            let made = try MITMLeafCertCache(store: mitmCertificateStore)
+            let made = try MITMLeafCertificateCache(store: mitmCertificateStore)
             cache = made
             return made
         }

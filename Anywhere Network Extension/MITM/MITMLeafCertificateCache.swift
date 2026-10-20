@@ -1,5 +1,5 @@
 //
-//  MITMLeafCertCache.swift
+//  MITMLeafCertificateCache.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 5/3/26.
@@ -9,12 +9,12 @@ import Foundation
 import CryptoKit
 import Synchronization
 
-nonisolated private let logger = AnywhereLogger(category: "MITMLeafCertCache")
+nonisolated private let logger = AnywhereLogger(category: "MITMLeafCertificateCache")
 
-nonisolated final class MITMLeafCertCache: Sendable {
+nonisolated final class MITMLeafCertificateCache: Sendable {
 
     // MARK: - Public Types
-    
+
     struct Leaf: Sendable {
         let certificateDER: Data
         let privateKey: P256.Signing.PrivateKey
@@ -75,7 +75,7 @@ nonisolated final class MITMLeafCertCache: Sendable {
     }
 
     private func mintLeaf(for hostname: String) throws -> Leaf {
-        guard let (caKey, caCertDER) = store.loadCA() else {
+        guard let (caPrivateKey, caCertificateDER) = store.loadCA() else {
             throw AnywhereError.certificate(.missingCAComponents)
         }
 
@@ -83,8 +83,8 @@ nonisolated final class MITMLeafCertCache: Sendable {
         let serial = store.nextSerial()
         let der = try X509Builder.buildLeafCertificate(
             leafPublicKey: leafPrivateKey.publicKey,
-            caPrivateKey: caKey,
-            caCertificateDER: caCertDER,
+            caPrivateKey: caPrivateKey,
+            caCertificateDER: caCertificateDER,
             hostname: hostname,
             serial: serial,
             notBefore: now.addingTimeInterval(-60 * 60),

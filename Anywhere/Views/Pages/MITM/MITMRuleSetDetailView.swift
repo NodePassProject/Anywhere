@@ -19,18 +19,18 @@ enum MITMRuleSetTarget: Hashable {
 
 struct MITMRuleSetDetailView: View {
     @Environment(\.editMode) private var editMode
-    
+
     @Environment(Operations.self) private var operations
     @Environment(MITMRuleSetStore.self) private var mitmRuleSetStore
     @Environment(ModuleStore.self) private var moduleStore
-    
+
     let target: MITMRuleSetTarget
 
-    @State private var enabled: Bool = true
+    @State private var isEnabled: Bool = true
     @State private var suffixDrafts: [MITMDomainSuffixDraft] = []
 
     @State private var rules: [MITMRule] = []
-    
+
     @State private var parameters: [MITMParameter] = []
     @State private var parameterValues: [String: String] = [:]
 
@@ -52,7 +52,7 @@ struct MITMRuleSetDetailView: View {
     }
 
     private var isEditing: Bool? { editMode?.wrappedValue.isEditing }
-    
+
     private var currentRuleSet: MITMRuleSet? {
         switch target {
         case .standalone(let id):
@@ -61,12 +61,12 @@ struct MITMRuleSetDetailView: View {
             return moduleStore.mitmRuleSet(ruleSetId, in: moduleId)?.asMITMRuleSet()
         }
     }
-    
+
     private var subscriptionURL: URL? {
         guard case .standalone = target else { return nil }
         return currentRuleSet?.subscriptionURL
     }
-    
+
     private var isReadOnly: Bool {
         guard case .module(let moduleId, _) = target else { return false }
         return moduleStore.module(id: moduleId)?.isSubscribed ?? true
@@ -76,9 +76,9 @@ struct MITMRuleSetDetailView: View {
         Form {
             Section {
                 Toggle("Enable", isOn: Binding(
-                    get: { enabled },
+                    get: { isEnabled },
                     set: { newValue in
-                        enabled = newValue
+                        isEnabled = newValue
                         setEnabled(newValue)
                     }
                 ))
@@ -148,7 +148,7 @@ struct MITMRuleSetDetailView: View {
             }
         }
     }
-    
+
     private func ensureTrailingBlankDraft() {
         if suffixDrafts.last?.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != true {
             suffixDrafts.append(MITMDomainSuffixDraft(value: ""))
@@ -206,7 +206,7 @@ struct MITMRuleSetDetailView: View {
     }
 
     // MARK: - Parameters
-    
+
     @ViewBuilder
     private var parametersSection: some View {
         ForEach(parameters) { parameter in
@@ -251,7 +251,7 @@ struct MITMRuleSetDetailView: View {
             }
         }
     }
-    
+
     private func parameterBinding(_ parameter: MITMParameter) -> Binding<String> {
         Binding(
             get: { parameterValues[parameter.name] ?? parameter.defaultValue },
@@ -261,9 +261,9 @@ struct MITMRuleSetDetailView: View {
             }
         )
     }
-    
+
     // MARK: - Domain Suffixes
-    
+
     @ViewBuilder
     private var domainSuffixesSection: some View {
         Section("Domain Suffixes") {
@@ -288,9 +288,9 @@ struct MITMRuleSetDetailView: View {
             })
         }
     }
-    
+
     // MARK: - Rules
-    
+
     @ViewBuilder
     private var rulesSection: some View {
         Section("Rules") {
@@ -359,9 +359,9 @@ struct MITMRuleSetDetailView: View {
         guard let ruleSet = currentRuleSet else { return }
         loadState(from: ruleSet)
     }
-    
+
     private func loadState(from ruleSet: MITMRuleSet) {
-        enabled = ruleSet.enabled
+        isEnabled = ruleSet.enabled
         suffixDrafts = ruleSet.domainSuffixes.map { MITMDomainSuffixDraft(value: $0) }
         rules = ruleSet.rules
         guard case .standalone = target else { return }

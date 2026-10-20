@@ -38,7 +38,7 @@ nonisolated final class MITMScriptHTTP2Pool: TransportPool {
     }
 
     // MARK: - Perform
-    
+
     func perform(
         request: URLRequest,
         host: String,
@@ -52,27 +52,28 @@ nonisolated final class MITMScriptHTTP2Pool: TransportPool {
         if isKnownHTTP1(key) {
             return .fallbackToHTTP1
         }
-        
-        let connection: MITMScriptHTTP2Connection = pool.state.withLock { st in
-            st.multiplexers[key]?.removeAll { $0.isClosed || $0.poolIsGoingAway }
 
-            if let existing = st.multiplexers[key]?.first(where: { $0.tryReserveStream() }) {
-                st.lastActivity[ObjectIdentifier(existing)] = MonotonicClock.now
-                return existing
+        let (connection, didDial): (MITMScriptHTTP2Connection, Bool) = pool.state.withLock { state in
+            state.multiplexers[key]?.removeAll { $0.isClosed || $0.poolIsGoingAway }
+
+            if let existing = state.multiplexers[key]?.first(where: { $0.tryReserveStream() }) {
+                state.lastActivity[ObjectIdentifier(existing)] = MonotonicClock.now
+                return (existing, false)
             } else {
-                let new = MITMScriptHTTP2Connection(
+                let created = MITMScriptHTTP2Connection(
                     host: host, port: port, insecure: insecure,
                     onClose: { [weak self] connection in
                         self?.pool.removeMultiplexer(connection, key: key)
                     },
                     onNegotiatedHTTP1: { [weak self] in self?.markHTTP1(key) }
                 )
-                _ = new.tryReserveStream()   // fresh connection always has capacity
-                st.multiplexers[key, default: []].append(new)
-                st.lastActivity[ObjectIdentifier(new)] = MonotonicClock.now
-                return new
+                _ = created.tryReserveStream()
+                state.multiplexers[key, default: []].append(created)
+                state.lastActivity[ObjectIdentifier(created)] = MonotonicClock.now
+                return (created, true)
             }
         }
+        if didDial { pool.noteMultiplexersChanged() }
 
         do {
             let response = try await connection.perform(

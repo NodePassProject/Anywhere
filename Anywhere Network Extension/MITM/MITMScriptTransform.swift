@@ -89,45 +89,22 @@ nonisolated enum MITMScriptTransform {
 
     private static func applyNativeBodyEdits(
         _ message: HTTPMessage,
-        rules: [CompiledMITMRule]
+        operations: [CompiledMITMOperation]
     ) async -> HTTPMessage {
-        let requestURL = message.url
         var message = message
-        let jsonOperations = await matchingBodyJSONOperations(in: rules, requestURL: requestURL)
+        var jsonOperations: [MITMJSONPatch.CompiledOperation] = []
+        var replaceOperations: [MITMBodyReplace.CompiledOperation] = []
+        for operation in operations {
+            if case .bodyJSON(let jsonOperation) = operation { jsonOperations.append(jsonOperation) }
+            if case .bodyReplace(let replaceOperation) = operation { replaceOperations.append(replaceOperation) }
+        }
         if !jsonOperations.isEmpty {
             message.body = MITMJSONPatch.applyAll(jsonOperations, to: message.body)
         }
-        let replaceOperations = await matchingBodyReplaceOperations(in: rules, requestURL: requestURL)
         if !replaceOperations.isEmpty {
             message.body = await MITMBodyReplace.applyAll(replaceOperations, to: message.body)
         }
         return message
-    }
-
-    private static func matchingBodyJSONOperations(
-        in rules: [CompiledMITMRule],
-        requestURL: String?
-    ) async -> [MITMJSONPatch.CompiledOperation] {
-        var operations: [MITMJSONPatch.CompiledOperation] = []
-        for rule in rules {
-            if case .bodyJSON(let operation) = rule.operation, await rule.matchesURL(requestURL) {
-                operations.append(operation)
-            }
-        }
-        return operations
-    }
-
-    private static func matchingBodyReplaceOperations(
-        in rules: [CompiledMITMRule],
-        requestURL: String?
-    ) async -> [MITMBodyReplace.CompiledOperation] {
-        var operations: [MITMBodyReplace.CompiledOperation] = []
-        for rule in rules {
-            if case .bodyReplace(let operation) = rule.operation, await rule.matchesURL(requestURL) {
-                operations.append(operation)
-            }
-        }
-        return operations
     }
 
     static func apply(
@@ -135,13 +112,22 @@ nonisolated enum MITMScriptTransform {
         rules: [CompiledMITMRule]
     ) async -> Outcome {
         if Task.isCancelled { return .message(message) }
-        let requestURL = message.url
-        let edited = await applyNativeBodyEdits(message, rules: rules)
-        if Task.isCancelled { return .message(edited) }
-        guard let match = await lastMatchingScriptSource(in: rules, requestURL: requestURL) else {
-            return .message(edited)
+        let bodyRules = rules.filter { rule in
+            switch rule.operation {
+            case .script, .bodyReplace, .bodyJSON: return true
+            case .rewrite, .headerAdd, .headerDelete, .headerReplace, .streamScript: return false
+            }
         }
-        let outcome = await MITMScriptEngine.shared.applyAsync(edited, source: match.source)
+        let verdicts = await MITMGateVerdictTable.resolve(rules: bodyRules, url: message.url)
+        let matched = bodyRules.indices.filter { verdicts.matches(at: $0) }.map { bodyRules[$0].operation }
+        let edited = await applyNativeBodyEdits(message, operations: matched)
+        if Task.isCancelled { return .message(edited) }
+        var scriptSource: String?
+        for operation in matched {
+            if case .script(let source) = operation { scriptSource = source }
+        }
+        guard let scriptSource else { return .message(edited) }
+        let outcome = await MITMScriptEngine.shared.applyAsync(edited, source: scriptSource)
         switch outcome {
         case .modified(let updated):  return .message(updated)
         case .done(let updated):      return .message(updated)
@@ -149,11 +135,11 @@ nonisolated enum MITMScriptTransform {
         case .respond(let response):  return .synthesizedResponse(response)
         }
     }
-    
+
     final class FrameCursor: Sendable {
         struct Mutable {
             var run: MITMScriptEngine.ScriptRun?
-            var bypass = false
+            var isBypassed = false
         }
         let mutable = Mutex(Mutable())
 
@@ -186,7 +172,7 @@ nonisolated enum MITMScriptTransform {
 
     struct StreamFrameResult {
         let body: Data
-        let bypass: Bool
+        let isBypassed: Bool
     }
 
     static func applyFrame(
@@ -195,7 +181,7 @@ nonisolated enum MITMScriptTransform {
         cursor: FrameCursor
     ) -> StreamFrameResult {
         guard let match = cursor.resolvedMatch
-        else { return StreamFrameResult(body: frame, bypass: false) }
+        else { return StreamFrameResult(body: frame, isBypassed: false) }
         return MITMScriptEngine.shared.assumeIsolated { engine -> StreamFrameResult in
             let run: MITMScriptEngine.ScriptRun
             if let open = cursor.mutable.withLock({ $0.run }) {
@@ -204,8 +190,8 @@ nonisolated enum MITMScriptTransform {
                 cursor.mutable.withLock { $0.run = opened }
                 run = opened
             } else {
-                cursor.mutable.withLock { $0.bypass = true }
-                return StreamFrameResult(body: frame, bypass: true)
+                cursor.mutable.withLock { $0.isBypassed = true }
+                return StreamFrameResult(body: frame, isBypassed: true)
             }
 
             let outcome = engine.applyFrame(
@@ -213,15 +199,21 @@ nonisolated enum MITMScriptTransform {
             )
             switch outcome {
             case .modified(let body):
-                return StreamFrameResult(body: body, bypass: false)
+                return StreamFrameResult(body: body, isBypassed: false)
             case .done(let body):
                 engine.closeStreamRun(run)
-                cursor.mutable.withLock { $0.run = nil; $0.bypass = true }
-                return StreamFrameResult(body: body, bypass: true)
+                cursor.mutable.withLock {
+                    $0.run = nil
+                    $0.isBypassed = true
+                }
+                return StreamFrameResult(body: body, isBypassed: true)
             case .exit:
                 engine.closeStreamRun(run)
-                cursor.mutable.withLock { $0.run = nil; $0.bypass = true }
-                return StreamFrameResult(body: frame, bypass: true)
+                cursor.mutable.withLock {
+                    $0.run = nil
+                    $0.isBypassed = true
+                }
+                return StreamFrameResult(body: frame, isBypassed: true)
             }
         }
     }
@@ -231,7 +223,7 @@ nonisolated enum MITMScriptTransform {
         frameContext: MITMScriptEngine.FrameContext,
         cursor: FrameCursor
     ) async -> StreamFrameResult {
-        if Task.isCancelled { return StreamFrameResult(body: frame, bypass: false) }
+        if Task.isCancelled { return StreamFrameResult(body: frame, isBypassed: false) }
         return await JSCConcurrencyBridge.shared.run {
             applyFrame(
                 frame,
@@ -241,22 +233,7 @@ nonisolated enum MITMScriptTransform {
         }
     }
 
-    // MARK: - Last-match selection
-
     fileprivate struct ScriptMatch {
         let source: String
-    }
-
-    private static func lastMatchingScriptSource(
-        in rules: [CompiledMITMRule],
-        requestURL: String?
-    ) async -> ScriptMatch? {
-        for rule in rules.reversed() {
-            if case .script(let source) = rule.operation,
-               await rule.matchesURL(requestURL) {
-                return ScriptMatch(source: source)
-            }
-        }
-        return nil
     }
 }

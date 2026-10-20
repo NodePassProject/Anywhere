@@ -45,15 +45,15 @@ struct MITMRuleEditorView: View {
             case .bodyReplace:   return String(localized: "Body Replace")
             }
         }
-        
-        var requestPhaseOnly: Bool {
+
+        var isRequestPhaseOnly: Bool {
             switch self {
             case .rewrite: return true
             default:       return false
             }
         }
     }
-    
+
     private enum RewriteMode: String, CaseIterable, Identifiable {
         case transparent
         case redirect302
@@ -75,7 +75,7 @@ struct MITMRuleEditorView: View {
 
     var body: some View {
         Form {
-            if !operationKind.requestPhaseOnly {
+            if !operationKind.isRequestPhaseOnly {
                 Section {
                     LabeledContent {
                         Picker("Phase", selection: $phase) {
@@ -258,8 +258,8 @@ struct MITMRuleEditorView: View {
                     validationError = String(localized: "URL is required.")
                     return
                 }
-                guard let comps = URLComponents(string: url),
-                      let host = comps.host, !host.isEmpty else {
+                guard let components = URLComponents(string: url),
+                      let host = components.host, !host.isEmpty else {
                     validationError = String(localized: "URL is not valid.")
                     return
                 }
@@ -308,7 +308,7 @@ struct MITMRuleEditorView: View {
 
         let result = MITMRule(
             id: rule?.id ?? UUID(),
-            phase: operationKind.requestPhaseOnly ? .httpRequest : phase,
+            phase: operationKind.isRequestPhaseOnly ? .httpRequest : phase,
             urlPattern: urlPattern,
             operation: operation
         )

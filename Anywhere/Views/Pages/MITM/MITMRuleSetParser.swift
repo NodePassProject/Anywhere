@@ -34,7 +34,7 @@ enum MITMRuleSetParser {
                 section = next
                 continue
             }
-            
+
             if let header = parseHeader(line) {
                 switch header.key {
                 case "name":
@@ -78,7 +78,7 @@ enum MITMRuleSetParser {
             iconDark: iconDark
         )
     }
-    
+
     private static func parseSection(_ line: String) -> Section? {
         guard line.hasPrefix("["), line.hasSuffix("]"), line.count >= 2 else { return nil }
         let inner = line.dropFirst().dropLast()
@@ -100,7 +100,7 @@ enum MITMRuleSetParser {
         "icon-light",
         "icon-dark",
     ]
-    
+
     private static func parseHeader(_ line: String) -> (key: String, value: String)? {
         guard let equal = line.firstIndex(of: "=") else { return nil }
         let key = line[line.startIndex..<equal]
@@ -113,7 +113,7 @@ enum MITMRuleSetParser {
     }
 
     // MARK: - Rewrite sub-mode parsing
-    
+
     private static func parseRewriteAction(subMode: String, fields: [String]) -> MITMRewriteAction? {
         switch subMode.trimmingCharacters(in: .whitespaces) {
         case "0":
@@ -135,7 +135,7 @@ enum MITMRuleSetParser {
             return nil
         }
     }
-    
+
     private static func validRewriteURL(_ raw: String) -> String? {
         let trimmed = raw.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty,
@@ -149,60 +149,60 @@ enum MITMRuleSetParser {
     private static func parseRuleLine(_ trimmed: String) -> MITMRule? {
         let fields = splitCSV(trimmed)
         guard fields.count >= 2 else { return nil }
-        guard let phaseInt = Int(fields[0]),
-              let phase = phase(from: phaseInt) else { return nil }
-        guard let opInt = Int(fields[1]) else { return nil }
-        let args = Array(fields.dropFirst(2))
-        
-        switch opInt {
+        guard let phaseCode = Int(fields[0]),
+              let phase = phase(from: phaseCode) else { return nil }
+        guard let operationCode = Int(fields[1]) else { return nil }
+        let arguments = Array(fields.dropFirst(2))
+
+        switch operationCode {
         case 0:
-            guard args.count >= 2 else { return nil }
-            let urlPattern = args[0]
+            guard arguments.count >= 2 else { return nil }
+            let urlPattern = arguments[0]
             guard !urlPattern.isEmpty, isValidRegex(urlPattern) else { return nil }
-            guard let action = parseRewriteAction(subMode: args[1], fields: Array(args.dropFirst(2))) else { return nil }
+            guard let action = parseRewriteAction(subMode: arguments[1], fields: Array(arguments.dropFirst(2))) else { return nil }
             return MITMRule(phase: .httpRequest, urlPattern: urlPattern, operation: .rewrite(action))
 
         case 1:
-            guard args.count == 3 else { return nil }
-            let urlPattern = args[0]
-            let name = args[1]
+            guard arguments.count == 3 else { return nil }
+            let urlPattern = arguments[0]
+            let name = arguments[1]
             guard !urlPattern.isEmpty, isValidRegex(urlPattern), !name.isEmpty else { return nil }
-            return MITMRule(phase: phase, urlPattern: urlPattern, operation: .headerAdd(name: name, value: args[2]))
+            return MITMRule(phase: phase, urlPattern: urlPattern, operation: .headerAdd(name: name, value: arguments[2]))
 
         case 2:
-            guard args.count == 2 else { return nil }
-            let urlPattern = args[0]
-            let name = args[1]
+            guard arguments.count == 2 else { return nil }
+            let urlPattern = arguments[0]
+            let name = arguments[1]
             guard !urlPattern.isEmpty, isValidRegex(urlPattern), !name.isEmpty else { return nil }
             return MITMRule(phase: phase, urlPattern: urlPattern, operation: .headerDelete(name: name))
 
         case 3:
-            guard args.count == 3 else { return nil }
-            let urlPattern = args[0]
-            let name = args[1]
+            guard arguments.count == 3 else { return nil }
+            let urlPattern = arguments[0]
+            let name = arguments[1]
             guard !urlPattern.isEmpty, isValidRegex(urlPattern), !name.isEmpty else { return nil }
-            return MITMRule(phase: phase, urlPattern: urlPattern, operation: .headerReplace(name: name, value: args[2]))
+            return MITMRule(phase: phase, urlPattern: urlPattern, operation: .headerReplace(name: name, value: arguments[2]))
 
         case 4:
-            guard args.count == 3 else { return nil }
-            let urlPattern = args[0]
-            let search = args[1]
+            guard arguments.count == 3 else { return nil }
+            let urlPattern = arguments[0]
+            let search = arguments[1]
             guard !urlPattern.isEmpty, isValidRegex(urlPattern),
                   !search.isEmpty, isValidSearchRegex(search) else { return nil }
-            return MITMRule(phase: phase, urlPattern: urlPattern, operation: .bodyReplace(search: search, replacement: args[2]))
+            return MITMRule(phase: phase, urlPattern: urlPattern, operation: .bodyReplace(search: search, replacement: arguments[2]))
 
         case 5:
-            guard args.count >= 2 else { return nil }
-            let urlPattern = args[0]
+            guard arguments.count >= 2 else { return nil }
+            let urlPattern = arguments[0]
             guard !urlPattern.isEmpty, isValidRegex(urlPattern) else { return nil }
-            guard let operation = parseJSONOperation(action: args[1], fields: Array(args.dropFirst(2))) else { return nil }
+            guard let operation = parseJSONOperation(action: arguments[1], fields: Array(arguments.dropFirst(2))) else { return nil }
             return MITMRule(phase: phase, urlPattern: urlPattern, operation: .bodyJSON(operation))
-            
+
         case 100:
-            guard args.count == 2 else { return nil }
-            let urlPattern = args[0]
+            guard arguments.count == 2 else { return nil }
+            let urlPattern = arguments[0]
             guard !urlPattern.isEmpty, isValidRegex(urlPattern) else { return nil }
-            let scriptBase64 = args[1]
+            let scriptBase64 = arguments[1]
             guard !scriptBase64.isEmpty, isValidScriptBase64(scriptBase64) else { return nil }
             return MITMRule(
                 phase: phase,
@@ -211,22 +211,22 @@ enum MITMRuleSetParser {
             )
 
         case 101:
-            guard args.count == 2 else { return nil }
-            let urlPattern = args[0]
+            guard arguments.count == 2 else { return nil }
+            let urlPattern = arguments[0]
             guard !urlPattern.isEmpty, isValidRegex(urlPattern) else { return nil }
-            let b64 = args[1]
-            guard !b64.isEmpty, isValidScriptBase64(b64) else { return nil }
+            let scriptBase64 = arguments[1]
+            guard !scriptBase64.isEmpty, isValidScriptBase64(scriptBase64) else { return nil }
             return MITMRule(
                 phase: phase,
                 urlPattern: urlPattern,
-                operation: .streamScript(scriptBase64: b64)
+                operation: .streamScript(scriptBase64: scriptBase64)
             )
 
         default:
             return nil
         }
     }
-    
+
     private static func parseJSONOperation(action rawAction: String, fields: [String]) -> MITMJSONOperation? {
         switch rawAction.trimmingCharacters(in: .whitespaces).lowercased() {
         case "add":
@@ -256,7 +256,7 @@ enum MITMRuleSetParser {
     }
 
     // MARK: - Parameter line parsing
-    
+
     private static func parseParameterLine(_ line: String) -> MITMParameter? {
         let fields = splitCSV(line)
         guard fields.count >= 6 else { return nil }
@@ -304,7 +304,7 @@ enum MITMRuleSetParser {
             )
         }
     }
-    
+
     private static func parseOptionList(_ field: String) -> [String] {
         var inner = field.trimmingCharacters(in: .whitespaces)
         if inner.hasPrefix("[") { inner.removeFirst() }
@@ -327,7 +327,7 @@ enum MITMRuleSetParser {
         default: return nil
         }
     }
-    
+
     private static func splitCSV(_ input: String) -> [String] {
         var fields: [String] = []
         var current = ""
@@ -339,8 +339,8 @@ enum MITMRuleSetParser {
             if i < input.endIndex, input[i] == "\"" {
                 i = input.index(after: i)
                 while i < input.endIndex {
-                    let ch = input[i]
-                    if ch == "\"" {
+                    let character = input[i]
+                    if character == "\"" {
                         let next = input.index(after: i)
                         if next < input.endIndex, input[next] == "\"" {
                             current.append("\"")
@@ -350,7 +350,7 @@ enum MITMRuleSetParser {
                             break
                         }
                     } else {
-                        current.append(ch)
+                        current.append(character)
                         i = input.index(after: i)
                     }
                 }
@@ -375,13 +375,13 @@ enum MITMRuleSetParser {
     private static func isValidRegex(_ pattern: String) -> Bool {
         (try? NSRegularExpression(pattern: pattern, options: [])) != nil
     }
-    
+
     private static func isValidSearchRegex(_ search: String) -> Bool {
         (try? Regex(search)) != nil
     }
-    
-    private static func isValidScriptBase64(_ b64: String) -> Bool {
-        guard let raw = Data(base64Encoded: b64),
+
+    private static func isValidScriptBase64(_ base64: String) -> Bool {
+        guard let raw = Data(base64Encoded: base64),
               let source = String(data: raw, encoding: .utf8)
         else { return false }
         let wrapped = "(function(){\n\(source)\nreturn process;\n})()"

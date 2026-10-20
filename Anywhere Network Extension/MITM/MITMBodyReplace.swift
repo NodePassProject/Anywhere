@@ -16,13 +16,13 @@ nonisolated enum MITMBodyReplace {
         let template: MITMCaptureTemplate
         let staticReplacement: String?
     }
-    
+
     static func compile(search: String, replacement: String) -> CompiledOperation? {
         guard let regex = try? Regex(search) else { return nil }
         let template = MITMCaptureTemplate(replacement)
         return CompiledOperation(search: regex, template: template, staticReplacement: template.staticReplacement)
     }
-    
+
     static func applyAll(_ operations: [CompiledOperation], to body: Data) async -> Data {
         guard !operations.isEmpty else { return body }
         let encoding: String.Encoding
@@ -46,12 +46,12 @@ nonisolated enum MITMBodyReplace {
         guard let out = current.data(using: encoding) else { return body }
         return out
     }
-    
+
     private static let substitutionTimeLimitSeconds = 1
     private static let hardCapSeconds = 30
 
     private static let substitutionInFlight = Atomic<Bool>(false)
-    
+
     private static func boundedReplace(_ text: String, operation: CompiledOperation) async -> String? {
         guard substitutionInFlight.compareExchange(
             expected: false, desired: true, ordering: .sequentiallyConsistent
@@ -59,7 +59,7 @@ nonisolated enum MITMBodyReplace {
             logger.warning("bodyReplace: another substitution is in flight; leaving this \(text.utf8.count) B body unchanged")
             return nil
         }
-        
+
         let byteCount = text.utf8.count
         let search = operation.search
         let staticReplacement = operation.staticReplacement

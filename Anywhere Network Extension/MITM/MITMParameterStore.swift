@@ -1,5 +1,5 @@
 //
-//  MITMParamStore.swift
+//  MITMParameterStore.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 6/29/26.
@@ -8,15 +8,13 @@
 import Foundation
 import Synchronization
 
-nonisolated final class MITMParamStore: Sendable {
-    static let shared = MITMParamStore()
+nonisolated final class MITMParameterStore: Sendable {
+    static let shared = MITMParameterStore()
 
-    /// scope (rule-set id) → (parameter name → resolved value).
     private let table = Mutex<[UUID: [String: String]]>([:])
 
     private init() {}
 
-    /// Replaces the whole table (load rebuilds everything); drops empty maps.
     func replaceAll(_ entries: [(scope: UUID, values: [String: String])]) {
         table.withLock { table in
             table.removeAll(keepingCapacity: true)
@@ -26,15 +24,15 @@ nonisolated final class MITMParamStore: Sendable {
         }
     }
 
-    func get(scope: UUID, key: String) -> String? {
+    func value(forKey key: String, scope: UUID) -> String? {
         table.withLock { $0[scope]?[key] }
     }
 
     func keys(scope: UUID) -> [String] {
-        table.withLock { Array($0[scope]?.keys ?? Dictionary<String, String>().keys) }
+        table.withLock { $0[scope].map { Array($0.keys) } ?? [] }
     }
 
-    func all(scope: UUID) -> [String: String] {
+    func values(scope: UUID) -> [String: String] {
         table.withLock { $0[scope] ?? [:] }
     }
 }

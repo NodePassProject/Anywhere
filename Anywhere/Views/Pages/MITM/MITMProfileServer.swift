@@ -159,7 +159,6 @@ actor MITMProfileServer {
         response.append(payload)
         return response
     }
-
 }
 
 // MARK: - Legacy listener
@@ -171,7 +170,7 @@ nonisolated private final class LegacyMITMProfileListener: Sendable {
 
     private struct State {
         var connections: [ObjectIdentifier: NWConnection] = [:]
-        var cancelled = false
+        var isCancelled = false
     }
 
     private let state = Mutex(State())
@@ -184,7 +183,7 @@ nonisolated private final class LegacyMITMProfileListener: Sendable {
     deinit {
         cancel()
     }
-    
+
     func start() async throws -> NWEndpoint.Port {
         let (portStream, portSignal) = AsyncThrowingStream.makeStream(of: NWEndpoint.Port.self)
         listener.stateUpdateHandler = { [weak listener] state in
@@ -217,7 +216,7 @@ nonisolated private final class LegacyMITMProfileListener: Sendable {
 
     func cancel() {
         let connections: [NWConnection] = state.withLock { state in
-            state.cancelled = true
+            state.isCancelled = true
             let open = Array(state.connections.values)
             state.connections.removeAll()
             return open
@@ -230,7 +229,7 @@ nonisolated private final class LegacyMITMProfileListener: Sendable {
 
     private func adopt(_ connection: NWConnection) {
         let accepted: Bool = state.withLock { state in
-            guard !state.cancelled else { return false }
+            guard !state.isCancelled else { return false }
             state.connections[ObjectIdentifier(connection)] = connection
             return true
         }

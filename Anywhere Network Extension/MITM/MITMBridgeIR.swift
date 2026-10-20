@@ -147,14 +147,16 @@ nonisolated enum MITMBridgeHeaders {
     static func requestPseudoHeadersComplete(_ decoded: [(name: String, value: String)]) -> Bool {
         var hasScheme = false
         var hasPath = false
-        var pathEmpty = false
+        var isPathEmpty = false
         var authority: String?
         var host: String?
         for (name, value) in decoded {
             if name.hasPrefix(":") {
                 switch name.lowercased() {
                 case ":scheme": hasScheme = true
-                case ":path": hasPath = true; pathEmpty = value.isEmpty
+                                case ":path":
+                    hasPath = true
+                    isPathEmpty = value.isEmpty
                 case ":authority": authority = value
                 default: break
                 }
@@ -162,7 +164,7 @@ nonisolated enum MITMBridgeHeaders {
                 host = value
             }
         }
-        guard hasScheme, hasPath, !pathEmpty else { return false }
+        guard hasScheme, hasPath, !isPathEmpty else { return false }
         // :authority / Host: at least one present; if both, byte-equal (RFC 9113 §8.3.1).
         if let authority, let host { return authority == host }
         return authority != nil || host != nil

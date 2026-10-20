@@ -30,13 +30,13 @@ struct MITMView: View {
             List {
                 Section {
                     Toggle(isOn: Binding(
-                        get: { ruleSetStore.enabled },
+                        get: { ruleSetStore.isEnabled },
                         set: { operations.mitmRuleSets.setEnabled($0) }
                     )) {
                         TextWithColorfulIcon(title: "MITM", systemName: "key.horizontal.fill", foregroundStyle: .white, backgroundStyle: .teal.gradient)
                     }
                 }
-                
+
                 Section {
                     NavigationLink {
                         MITMCertificateView()
@@ -49,7 +49,7 @@ struct MITMView: View {
                         }
                     }
                 }
-                
+
                 if !ruleSetStore.ruleSets.isEmpty {
                     Section("Rule Sets") {
                         ForEach(ruleSetStore.ruleSets) { ruleSet in
@@ -200,8 +200,8 @@ struct MITMView: View {
                 importError = String(localized: "Invalid Anywhere MITM Rule Set File.")
                 return
             }
-            let accessing = url.startAccessingSecurityScopedResource()
-            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+            let isAccessing = url.startAccessingSecurityScopedResource()
+            defer { if isAccessing { url.stopAccessingSecurityScopedResource() } }
             let data = try Data(contentsOf: url)
             guard let body = String(data: data, encoding: .utf8) else {
                 importError = String(localized: "Unknown content.")
@@ -237,8 +237,8 @@ struct MITMView: View {
         Task {
             do {
                 let (data, response) = try await URLSession.shared.data(from: url)
-                if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-                    subscribeError = "HTTP \(http.statusCode)"
+                if let httpResponse = response as? HTTPURLResponse, !(200...299).contains(httpResponse.statusCode) {
+                    subscribeError = "HTTP \(httpResponse.statusCode)"
                     return
                 }
                 guard let body = String(data: data, encoding: .utf8) else {
@@ -268,15 +268,15 @@ struct MITMView: View {
             }
         }
     }
-    
+
     private var certificateStatusBadgeIcon: String {
         if !certificateController.hasCA { return "xmark.square.fill" }
-        return certificateController.trusted ? "checkmark.seal.fill" : "exclamationmark.triangle.fill"
+        return certificateController.isTrusted ? "checkmark.seal.fill" : "exclamationmark.triangle.fill"
     }
 
     private var certificateStatusBadgeColor: Color {
         if !certificateController.hasCA { return .red }
-        return certificateController.trusted ? .green : .orange
+        return certificateController.isTrusted ? .green : .orange
     }
 
     private func summary(for ruleSet: MITMRuleSet) -> String {

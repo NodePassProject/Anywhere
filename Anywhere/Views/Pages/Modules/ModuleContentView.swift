@@ -64,7 +64,7 @@ struct ModuleContentView: View {
                     } header: {
                         Text("MITM Rule Sets")
                     } footer: {
-                        if !mitmStore.enabled {
+                        if !mitmStore.isEnabled {
                             Text("MITM rule sets won't take effect until MITM is enabled.")
                         }
                     }

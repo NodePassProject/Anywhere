@@ -14,15 +14,15 @@ nonisolated enum MITMJSONPatch {
     }
 
     enum LeafMode { case add, replace, delete }
-    
+
     struct JSONLiteral: Sendable {
         private let fragment: Data
-        
+
         init(_ value: Any) {
             fragment = (try? JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed]))
                 ?? Data("null".utf8)
         }
-        
+
         func materialize() -> Any {
             (try? JSONSerialization.jsonObject(with: fragment, options: [.mutableContainers, .fragmentsAllowed]))
                 ?? NSNull()
@@ -40,7 +40,7 @@ nonisolated enum MITMJSONPatch {
     }
 
     // MARK: - Compilation
-    
+
     static func compile(_ operation: MITMJSONOperation) -> CompiledOperation? {
         switch operation {
         case .add(let path, let value):
@@ -64,7 +64,7 @@ nonisolated enum MITMJSONPatch {
             return .removeWhereFieldIn(path: segments, field: field, values: parseValues(values).map(JSONLiteral.init))
         }
     }
-    
+
     static func parseValue(_ raw: String) -> Any {
         if let parsed = try? JSONSerialization.jsonObject(
             with: Data(raw.utf8),
@@ -74,7 +74,7 @@ nonisolated enum MITMJSONPatch {
         }
         return raw
     }
-    
+
     static func parseValues(_ raw: String) -> [Any] {
         if let parsed = try? JSONSerialization.jsonObject(
             with: Data(raw.utf8),
@@ -87,59 +87,49 @@ nonisolated enum MITMJSONPatch {
     }
 
     // MARK: - Application
-    
+
     static func applyAll(_ operations: [CompiledOperation], to body: Data) -> Data {
         guard !operations.isEmpty else { return body }
         guard var root = parse(body) else { return body }
-        let before = snapshot(root)
+        var hasChanged = false
         for operation in operations {
-            apply(operation, to: &root)
+            if apply(operation, to: &root) { hasChanged = true }
         }
-        guard !documentsEqual(before, root) else { return body }
-        guard let out = serialize(root) else { return body }
+        guard hasChanged, let out = serialize(root) else { return body }
         return out
     }
-    
-    private static func apply(_ operation: CompiledOperation, to root: inout Any) {
+
+    private static func apply(_ operation: CompiledOperation, to root: inout Any) -> Bool {
         switch operation {
         case .add(let path, let value):
-            root = applyAtPath(root, segments: path, mode: .add, value: value.materialize())
+            return applyAtPath(&root, segments: path, mode: .add, value: value.materialize())
         case .replace(let path, let value):
-            root = applyAtPath(root, segments: path, mode: .replace, value: value.materialize())
+            return applyAtPath(&root, segments: path, mode: .replace, value: value.materialize())
         case .delete(let path):
-            root = applyAtPath(root, segments: path, mode: .delete, value: nil)
+            return applyAtPath(&root, segments: path, mode: .delete, value: nil)
         case .replaceRecursive(let key, let value):
-            replaceKeyRecursive(root, key: key, value: value.materialize())
+            return replaceKeyRecursive(root, key: key, value: value.materialize())
         case .deleteRecursive(let key):
-            deleteKeyRecursive(root, key: key)
+            return deleteKeyRecursive(root, key: key)
         case .removeWhereKeyExists(let path, let key):
-            guard let array = resolveNode(root, segments: path) as? NSMutableArray else { return }
-            let kept = array.filter { ($0 as? NSDictionary)?.object(forKey: key) == nil }
-            array.setArray(kept)
+            return removeWhereKeyExists(root, segments: path, key: key)
         case .removeWhereFieldIn(let path, let field, let values):
-            guard let array = resolveNode(root, segments: path) as? NSMutableArray else { return }
-            let materialized = values.map { $0.materialize() }
-            let kept = array.filter { element in
-                guard let object = element as? NSDictionary,
-                      let fieldValue = object.object(forKey: field) else { return true }
-                return !materialized.contains { valueEquals($0, fieldValue) }
-            }
-            array.setArray(kept)
+            return removeWhereFieldIn(root, segments: path, field: field, values: values.map { $0.materialize() })
         }
     }
 
     // MARK: - Parse / serialize
-    
+
     static func parse(_ data: Data) -> Any? {
         guard !data.isEmpty else { return nil }
         return try? JSONSerialization.jsonObject(with: data, options: [.mutableContainers, .fragmentsAllowed])
     }
-    
+
     static func serialize(_ object: Any) -> Data? {
         guard isJSONEncodable(object) else { return nil }
         return try? JSONSerialization.data(withJSONObject: object, options: [.fragmentsAllowed, .withoutEscapingSlashes])
     }
-    
+
     private static func isJSONEncodable(_ object: Any, depth: Int = 0) -> Bool {
         guard depth < maxRecursionDepth else { return false }
         switch object {
@@ -163,38 +153,37 @@ nonisolated enum MITMJSONPatch {
     }
 
     // MARK: - JSONPath
-    
+
     static func parseJSONPath(_ raw: String) -> [PathSegment]? {
         var segments: [PathSegment] = []
         var characters = Substring(raw)
         if characters.first == "$" { characters = characters.dropFirst() }
-        while let c = characters.first {
-            if c == "." {
+        while let character = characters.first {
+            if character == "." {
                 characters = characters.dropFirst()
                 var name = ""
-                while let d = characters.first, d != ".", d != "[" {
-                    name.append(d)
+                while let next = characters.first, next != ".", next != "[" {
+                    name.append(next)
                     characters = characters.dropFirst()
                 }
                 if name.isEmpty { return nil }
                 segments.append(.key(name))
-            } else if c == "[" {
+            } else if character == "[" {
                 characters = characters.dropFirst()
                 var inner = ""
-                // Scan past a quoted key first: it may contain `]` (`["a]b"]`).
                 if let quote = characters.first, quote == "\"" || quote == "'" {
                     inner.append(quote)
                     characters = characters.dropFirst()
-                    while let d = characters.first, d != quote {
-                        inner.append(d)
+                    while let next = characters.first, next != quote {
+                        inner.append(next)
                         characters = characters.dropFirst()
                     }
                     guard characters.first == quote else { return nil }
                     inner.append(quote)
                     characters = characters.dropFirst()
                 }
-                while let d = characters.first, d != "]" {
-                    inner.append(d)
+                while let next = characters.first, next != "]" {
+                    inner.append(next)
                     characters = characters.dropFirst()
                 }
                 guard characters.first == "]" else { return nil }
@@ -204,7 +193,6 @@ nonisolated enum MITMJSONPatch {
                    (token.first == "\"" && token.last == "\"") || (token.first == "'" && token.last == "'") {
                     segments.append(.key(String(token.dropFirst().dropLast())))
                 } else if !token.isEmpty, token.allSatisfy({ $0.isASCII && $0.isNumber }) {
-                    // Int(_:) fails only on overflow — reject rather than fall through to .key.
                     guard let index = Int(token) else { return nil }
                     segments.append(.index(index))
                 } else if !token.isEmpty {
@@ -214,8 +202,8 @@ nonisolated enum MITMJSONPatch {
                 }
             } else {
                 var name = ""
-                while let d = characters.first, d != ".", d != "[" {
-                    name.append(d)
+                while let next = characters.first, next != ".", next != "[" {
+                    name.append(next)
                     characters = characters.dropFirst()
                 }
                 if name.isEmpty { return nil }
@@ -224,7 +212,7 @@ nonisolated enum MITMJSONPatch {
         }
         return segments
     }
-    
+
     private static func childNode(_ node: Any?, _ segment: PathSegment) -> Any? {
         guard let node else { return nil }
         switch segment {
@@ -235,7 +223,7 @@ nonisolated enum MITMJSONPatch {
             return array[index]
         }
     }
-    
+
     static func resolveNode(_ root: Any, segments: [PathSegment]) -> Any? {
         var node: Any? = root
         for segment in segments {
@@ -243,108 +231,158 @@ nonisolated enum MITMJSONPatch {
         }
         return node
     }
-    
-    static func applyAtPath(_ root: Any, segments: [PathSegment], mode: LeafMode, value: Any?) -> Any {
+
+    static func applyAtPath(_ root: inout Any, segments: [PathSegment], mode: LeafMode, value: Any?) -> Bool {
         if segments.isEmpty {
             switch mode {
-            case .add, .replace: return value.map { deepCopy($0) } ?? root
-            case .delete: return root
+            case .add, .replace:
+                guard let value, !documentsEqual(root, value) else { return false }
+                root = deepCopy(value)
+                return true
+            case .delete:
+                return false
             }
         }
         var node: Any? = root
         for segment in segments.dropLast() {
             node = childNode(node, segment)
         }
-        guard let parent = node, let leaf = segments.last else { return root }
+        guard let parent = node, let leaf = segments.last else { return false }
         switch leaf {
         case .key(let key):
-            guard let dictionary = parent as? NSMutableDictionary else { return root }
+            guard let dictionary = parent as? NSMutableDictionary else { return false }
+            let existing = dictionary.object(forKey: key)
             switch mode {
             case .add:
-                if let value { dictionary.setObject(deepCopy(value), forKey: key as NSString) }
+                guard let value else { return false }
+                if let existing, documentsEqual(existing, value) { return false }
+                dictionary.setObject(deepCopy(value), forKey: key as NSString)
+                return true
             case .replace:
-                if dictionary.object(forKey: key) != nil, let value {
-                    dictionary.setObject(deepCopy(value), forKey: key as NSString)
-                }
+                guard let value, let existing, !documentsEqual(existing, value) else { return false }
+                dictionary.setObject(deepCopy(value), forKey: key as NSString)
+                return true
             case .delete:
+                guard existing != nil else { return false }
                 dictionary.removeObject(forKey: key)
+                return true
             }
         case .index(let index):
-            guard let array = parent as? NSMutableArray else { return root }
+            guard let array = parent as? NSMutableArray else { return false }
             let count = array.count
             switch mode {
             case .add:
-                if let value {
-                    if index >= 0, index < count { array.replaceObject(at: index, with: deepCopy(value)) }
-                    else if index == count { array.add(deepCopy(value)) }
+                guard let value else { return false }
+                if index >= 0, index < count {
+                    guard !documentsEqual(array[index], value) else { return false }
+                    array.replaceObject(at: index, with: deepCopy(value))
+                    return true
                 }
+                guard index == count else { return false }
+                array.add(deepCopy(value))
+                return true
             case .replace:
-                if let value, index >= 0, index < count { array.replaceObject(at: index, with: deepCopy(value)) }
+                guard let value, index >= 0, index < count, !documentsEqual(array[index], value) else { return false }
+                array.replaceObject(at: index, with: deepCopy(value))
+                return true
             case .delete:
-                if index >= 0, index < count { array.removeObject(at: index) }
+                guard index >= 0, index < count else { return false }
+                array.removeObject(at: index)
+                return true
             }
-        }
-        return root
-    }
-    
-    private static let maxRecursionDepth = 600
-    
-    static func replaceKeyRecursive(_ node: Any?, key: String, value: Any, depth: Int = 0) {
-        guard depth < maxRecursionDepth else { return }
-        if let dictionary = node as? NSMutableDictionary {
-            for k in dictionary.allKeys {
-                guard let ks = k as? String, ks != key else { continue }
-                replaceKeyRecursive(dictionary.object(forKey: ks), key: key, value: value, depth: depth + 1)
-            }
-            if dictionary.object(forKey: key) != nil {
-                dictionary.setObject(deepCopy(value), forKey: key as NSString)
-            }
-        } else if let array = node as? NSMutableArray {
-            for element in array { replaceKeyRecursive(element, key: key, value: value, depth: depth + 1) }
         }
     }
 
-    static func deleteKeyRecursive(_ node: Any?, key: String, depth: Int = 0) {
-        guard depth < maxRecursionDepth else { return }
+    private static let maxRecursionDepth = 600
+
+    static func replaceKeyRecursive(_ node: Any?, key: String, value: Any, depth: Int = 0) -> Bool {
+        guard depth < maxRecursionDepth else { return false }
+        var hasChanged = false
         if let dictionary = node as? NSMutableDictionary {
-            dictionary.removeObject(forKey: key)
-            for k in dictionary.allKeys {
-                if let ks = k as? String { deleteKeyRecursive(dictionary.object(forKey: ks), key: key, depth: depth + 1) }
+            for anyKey in dictionary.allKeys {
+                guard let childKey = anyKey as? String, childKey != key else { continue }
+                if replaceKeyRecursive(dictionary.object(forKey: childKey), key: key, value: value, depth: depth + 1) {
+                    hasChanged = true
+                }
+            }
+            if let existing = dictionary.object(forKey: key), !documentsEqual(existing, value) {
+                dictionary.setObject(deepCopy(value), forKey: key as NSString)
+                hasChanged = true
             }
         } else if let array = node as? NSMutableArray {
-            for element in array { deleteKeyRecursive(element, key: key, depth: depth + 1) }
+            for element in array {
+                if replaceKeyRecursive(element, key: key, value: value, depth: depth + 1) { hasChanged = true }
+            }
         }
+        return hasChanged
+    }
+
+    static func deleteKeyRecursive(_ node: Any?, key: String, depth: Int = 0) -> Bool {
+        guard depth < maxRecursionDepth else { return false }
+        var hasChanged = false
+        if let dictionary = node as? NSMutableDictionary {
+            if dictionary.object(forKey: key) != nil {
+                dictionary.removeObject(forKey: key)
+                hasChanged = true
+            }
+            for anyKey in dictionary.allKeys {
+                guard let childKey = anyKey as? String else { continue }
+                if deleteKeyRecursive(dictionary.object(forKey: childKey), key: key, depth: depth + 1) {
+                    hasChanged = true
+                }
+            }
+        } else if let array = node as? NSMutableArray {
+            for element in array {
+                if deleteKeyRecursive(element, key: key, depth: depth + 1) { hasChanged = true }
+            }
+        }
+        return hasChanged
+    }
+
+    static func removeWhereKeyExists(_ root: Any, segments: [PathSegment], key: String) -> Bool {
+        guard let array = resolveNode(root, segments: segments) as? NSMutableArray else { return false }
+        let kept = array.filter { ($0 as? NSDictionary)?.object(forKey: key) == nil }
+        guard kept.count != array.count else { return false }
+        array.setArray(kept)
+        return true
+    }
+
+    static func removeWhereFieldIn(_ root: Any, segments: [PathSegment], field: String, values: [Any]) -> Bool {
+        guard let array = resolveNode(root, segments: segments) as? NSMutableArray else { return false }
+        let kept = array.filter { element in
+            guard let object = element as? NSDictionary,
+                  let fieldValue = object.object(forKey: field) else { return true }
+            return !values.contains { valueEquals($0, fieldValue) }
+        }
+        guard kept.count != array.count else { return false }
+        array.setArray(kept)
+        return true
     }
 
     // MARK: - Helpers
-    
+
     private static func isBooleanNumber(_ value: Any) -> Bool {
-        return CFGetTypeID(value as CFTypeRef) == CFBooleanGetTypeID()
+        CFGetTypeID(value as CFTypeRef) == CFBooleanGetTypeID()
     }
-    
+
     static func valueEquals(_ lhs: Any, _ rhs: Any) -> Bool {
         if isBooleanNumber(lhs) != isBooleanNumber(rhs) { return false }
         return (lhs as AnyObject).isEqual(rhs)
     }
 
-    static func snapshot(_ value: Any) -> Any {
-        return deepCopy(value)
-    }
-    
     static func documentsEqual(_ lhs: Any, _ rhs: Any, depth: Int = 0) -> Bool {
-        // Past the ceiling, report "changed" — safe in both directions.
         guard depth < maxRecursionDepth else { return false }
         switch (lhs, rhs) {
-        case let (l as NSDictionary, r as NSDictionary):
-            guard l.count == r.count else { return false }
-            for key in l.allKeys {
-                guard let lv = l.object(forKey: key), let rv = r.object(forKey: key),
-                      documentsEqual(lv, rv, depth: depth + 1) else { return false }
+        case let (leftDictionary as NSDictionary, rightDictionary as NSDictionary):
+            guard leftDictionary.count == rightDictionary.count else { return false }
+            for key in leftDictionary.allKeys {
+                guard let leftValue = leftDictionary.object(forKey: key), let rightValue = rightDictionary.object(forKey: key),
+                      documentsEqual(leftValue, rightValue, depth: depth + 1) else { return false }
             }
             return true
-        case let (l as NSArray, r as NSArray):
-            guard l.count == r.count else { return false }
-            for i in 0..<l.count where !documentsEqual(l[i], r[i], depth: depth + 1) {
+        case let (leftArray as NSArray, rightArray as NSArray):
+            guard leftArray.count == rightArray.count else { return false }
+            for index in 0..<leftArray.count where !documentsEqual(leftArray[index], rightArray[index], depth: depth + 1) {
                 return false
             }
             return true
@@ -352,7 +390,7 @@ nonisolated enum MITMJSONPatch {
             return valueEquals(lhs, rhs)
         }
     }
-    
+
     private static func deepCopy(_ value: Any, depth: Int = 0) -> Any {
         guard depth < maxRecursionDepth else { return value }
         switch value {

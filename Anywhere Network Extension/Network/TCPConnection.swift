@@ -924,7 +924,7 @@ actor TCPConnection: MITMSessionHost {
         guard let stack else { abort(); return .done }
         let sni = mitmSNI ?? dstHost
 
-        let cache: MITMLeafCertCache?
+        let cache: MITMLeafCertificateCache?
         if mitmPlaintext {
             cache = nil
         } else {
@@ -1103,11 +1103,13 @@ actor TCPConnection: MITMSessionHost {
 
     nonisolated func mitmSessionDidConsumeClientBytes(_ count: Int) {
         guard count > 0 else { return }
-        sessionContext.enqueue {
-            self.assumeIsolated { me in
-                guard me.phase != .closed else { return }
-                me.acknowledgeReceivedBytes(count)
-            }
+        guard sessionContext.executor.isOnQueue else {
+            sessionContext.enqueue { self.mitmSessionDidConsumeClientBytes(count) }
+            return
+        }
+        assumeIsolated { me in
+            guard me.phase != .closed else { return }
+            me.acknowledgeReceivedBytes(count)
         }
     }
 

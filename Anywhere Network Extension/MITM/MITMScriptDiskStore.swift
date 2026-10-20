@@ -16,25 +16,23 @@ nonisolated final class MITMScriptDiskStore: Sendable {
     static let maxBytesPerScope: Int = 1 * 1024 * 1024
     static let maxTotalBytes: Int = 16 * 1024 * 1024
 
+    private static let writeDelay: DispatchTimeInterval = .seconds(1)
+
     private struct State {
         var cache: [UUID: [String: Data]] = [:]
         var loaded: Set<UUID> = []
-        var fileSizes: [UUID: Int] = [:]
-        var commitGenerations: [UUID: UInt64] = [:]
-        var generationCounter: UInt64 = 0
+        var scopeBytes: [UUID: Int] = [:]
         var totalBytes: Int = 0
+        var dirty: Set<UUID> = []
+        var isWriteScheduled = false
         var didScan = false
-
-        mutating func bumpCommitGeneration(for scope: UUID) -> UInt64 {
-            generationCounter += 1
-            commitGenerations[scope] = generationCounter
-            return generationCounter
-        }
     }
 
     private let state = Mutex(State())
 
     private let directory: URL?
+
+    private let writeQueue = DispatchQueue(label: "com.argsment.Anywhere.MITMScriptDiskStore", qos: .utility)
 
     init(appGroup: String = AWCore.Identifier.appGroupSuite) {
         if let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup) {
@@ -46,85 +44,45 @@ nonisolated final class MITMScriptDiskStore: Sendable {
 
     // MARK: - API
 
-    func get(scope: UUID, key: String) -> Data? {
+    func value(forKey key: String, scope: UUID) -> Data? {
         ensureLoaded(scope)
         return state.withLock { $0.cache[scope]?[key] }
     }
 
-    func set(scope: UUID, key: String, value: Data) throws(AnywhereError) {
+    func setValue(_ value: Data, forKey key: String, scope: UUID) throws(AnywhereError) {
         guard ensureLoaded(scope) else { throw AnywhereError.mitm(.scriptStoreWriteFailed) }
-        struct Reservation {
-            let serialized: Data
-            let committedBucket: [String: Data]
-            let generation: UInt64
-        }
-        let reservation: Reservation = try state.withLock { (state) throws(AnywhereError) -> Reservation in
-            var bucket = state.cache[scope] ?? [:]
-            bucket[key] = value
-            guard let serialized = serialize(bucket) else {
-                throw AnywhereError.mitm(.scriptStoreWriteFailed)
-            }
-            if serialized.count > Self.maxBytesPerScope {
+        let didChange = try state.withLock { (state) throws(AnywhereError) -> Bool in
+            let current = state.cache[scope]?[key]
+            if current == value { return false }
+            let keyBytes = key.utf8.count
+            let delta = value.count + keyBytes - (current.map { $0.count + keyBytes } ?? 0)
+            let projected = (state.scopeBytes[scope] ?? 0) + delta
+            if projected > Self.maxBytesPerScope {
                 throw AnywhereError.mitm(.scriptStoreCapacityExceeded)
             }
-            let oldSize = state.fileSizes[scope] ?? 0
-            if state.totalBytes - oldSize + serialized.count > Self.maxTotalBytes {
+            if state.totalBytes + delta > Self.maxTotalBytes {
                 throw AnywhereError.mitm(.scriptStoreCapacityExceeded)
             }
-            return Reservation(
-                serialized: serialized,
-                committedBucket: bucket,
-                generation: state.bumpCommitGeneration(for: scope)
-            )
+            state.cache[scope, default: [:]][key] = value
+            state.scopeBytes[scope] = projected
+            state.totalBytes += delta
+            state.dirty.insert(scope)
+            return true
         }
-        guard writeToDisk(scope: scope, data: reservation.serialized) else {
-            throw AnywhereError.mitm(.scriptStoreWriteFailed)
-        }
-        state.withLock { state in
-            guard state.commitGenerations[scope] == reservation.generation else { return }
-            state.cache[scope] = reservation.committedBucket
-            state.totalBytes = state.totalBytes - (state.fileSizes[scope] ?? 0) + reservation.serialized.count
-            state.fileSizes[scope] = reservation.serialized.count
-        }
+        if didChange { scheduleWrite() }
     }
 
-    func delete(scope: UUID, key: String) {
+    func removeValue(forKey key: String, scope: UUID) {
         guard ensureLoaded(scope) else { return }
-        enum Pending {
-            case nothing
-            case removeFile(generation: UInt64)
-            case write(Data, bucket: [String: Data], generation: UInt64)
+        let didChange = state.withLock { state -> Bool in
+            guard let current = state.cache[scope]?.removeValue(forKey: key) else { return false }
+            let delta = current.count + key.utf8.count
+            state.scopeBytes[scope] = (state.scopeBytes[scope] ?? 0) - delta
+            state.totalBytes -= delta
+            state.dirty.insert(scope)
+            return true
         }
-        let pending: Pending = state.withLock { state in
-            guard var bucket = state.cache[scope], bucket[key] != nil else { return .nothing }
-            bucket.removeValue(forKey: key)
-            if bucket.isEmpty {
-                return .removeFile(generation: state.bumpCommitGeneration(for: scope))
-            }
-            guard let serialized = serialize(bucket) else { return .nothing }
-            return .write(serialized, bucket: bucket, generation: state.bumpCommitGeneration(for: scope))
-        }
-        switch pending {
-        case .nothing:
-            return
-        case .removeFile(let generation):
-            removeFile(scope)
-            state.withLock { state in
-                guard state.commitGenerations[scope] == generation else { return }
-                state.cache[scope] = [:]
-                state.totalBytes -= state.fileSizes[scope] ?? 0
-                state.fileSizes.removeValue(forKey: scope)
-            }
-        case .write(let serialized, let bucket, let generation):
-            guard writeToDisk(scope: scope, data: serialized) else { return }
-            state.withLock { state in
-                guard state.commitGenerations[scope] == generation else { return }
-                state.cache[scope] = bucket
-                let oldSize = state.fileSizes[scope] ?? 0
-                state.totalBytes = state.totalBytes - oldSize + serialized.count
-                state.fileSizes[scope] = serialized.count
-            }
-        }
+        if didChange { scheduleWrite() }
     }
 
     func keys(scope: UUID) -> [String] {
@@ -136,23 +94,58 @@ nonisolated final class MITMScriptDiskStore: Sendable {
     func purgeExcept(activeIDs: Set<UUID>) -> Int {
         ensureScanned()
         let stale: [UUID] = state.withLock { state in
-            let stale = state.fileSizes.keys.filter { !activeIDs.contains($0) }
+            let stale = state.scopeBytes.keys.filter { !activeIDs.contains($0) }
             for scope in stale {
-                state.totalBytes -= state.fileSizes[scope] ?? 0
-                state.fileSizes.removeValue(forKey: scope)
+                state.totalBytes -= state.scopeBytes[scope] ?? 0
+                state.scopeBytes.removeValue(forKey: scope)
                 state.cache.removeValue(forKey: scope)
                 state.loaded.remove(scope)
+                state.dirty.remove(scope)
             }
-            state.commitGenerations = state.commitGenerations.filter { activeIDs.contains($0.key) }
             return stale
         }
-        for scope in stale {
-            removeFile(scope)
+        guard !stale.isEmpty else { return 0 }
+        writeQueue.sync {
+            for scope in stale { removeFile(scope) }
         }
         return stale.count
     }
 
+    func flush() {
+        writeQueue.sync { writeDirtyScopes() }
+    }
+
     // MARK: - Private
+
+    private func scheduleWrite() {
+        let shouldSchedule = state.withLock { state -> Bool in
+            guard !state.isWriteScheduled else { return false }
+            state.isWriteScheduled = true
+            return true
+        }
+        guard shouldSchedule else { return }
+        writeQueue.asyncAfter(deadline: .now() + Self.writeDelay) { [self] in
+            writeDirtyScopes()
+        }
+    }
+
+    private func writeDirtyScopes() {
+        let pending: [(scope: UUID, bucket: [String: Data])] = state.withLock { state in
+            state.isWriteScheduled = false
+            defer { state.dirty.removeAll() }
+            return state.dirty.map { (scope: $0, bucket: state.cache[$0] ?? [:]) }
+        }
+        for (scope, bucket) in pending {
+            if bucket.isEmpty {
+                removeFile(scope)
+                continue
+            }
+            if let data = serialize(bucket), writeToDisk(scope: scope, data: data) { continue }
+            state.withLock { state in
+                if state.loaded.contains(scope) { state.dirty.insert(scope) }
+            }
+        }
+    }
 
     private func ensureScanned() {
         let needsScan = state.withLock { !$0.didScan }
@@ -174,11 +167,11 @@ nonisolated final class MITMScriptDiskStore: Sendable {
         state.withLock { state in
             guard !state.didScan else { return }
             state.didScan = true
-            state.fileSizes.merge(sizes) { current, _ in current }
-            state.totalBytes = state.fileSizes.values.reduce(0, +)
+            state.scopeBytes.merge(sizes) { current, _ in current }
+            state.totalBytes = state.scopeBytes.values.reduce(0, +)
         }
     }
-    
+
     @discardableResult
     private func ensureLoaded(_ scope: UUID) -> Bool {
         ensureScanned()
@@ -187,7 +180,7 @@ nonisolated final class MITMScriptDiskStore: Sendable {
 
         var bucket: [String: Data] = [:]
         if let url = fileURL(scope) {
-            let read = coordinatedRead(url)
+            let read = readFile(url)
             if read.failed { return false }
             if let data = read.data {
                 do {
@@ -202,35 +195,29 @@ nonisolated final class MITMScriptDiskStore: Sendable {
                 }
             }
         }
+        let bucketBytes = bucket.reduce(0) { $0 + $1.key.utf8.count + $1.value.count }
 
         state.withLock { state in
             guard !state.loaded.contains(scope) else { return }
             state.loaded.insert(scope)
             state.cache[scope] = bucket
+            state.totalBytes += bucketBytes - (state.scopeBytes[scope] ?? 0)
+            state.scopeBytes[scope] = bucketBytes
         }
         return true
     }
-    
-    private func coordinatedRead(_ url: URL) -> (data: Data?, failed: Bool) {
-        let coordinator = NSFileCoordinator(filePresenter: nil)
-        var coordError: NSError?
-        var result: Data?
-        var readError: Error?
-        coordinator.coordinate(readingItemAt: url, options: [], error: &coordError) { coordinatedURL in
-            do {
-                result = try Data(contentsOf: coordinatedURL)
-            } catch {
-                readError = error
-            }
-        }
-        if let error = coordError ?? (readError as NSError?), !Self.isFileNotFound(error) {
+
+    private func readFile(_ url: URL) -> (data: Data?, failed: Bool) {
+        do {
+            return (try Data(contentsOf: url), false)
+        } catch {
+            guard !Self.isFileNotFound(error as NSError) else { return (nil, false) }
             logger.report(
                 "[MITM][JS] Anywhere.store(onDisk): read failed for \(url.lastPathComponent)",
                 error: AnywhereError.store(.loadFailed(.scripts, underlying: error))
             )
             return (nil, true)
         }
-        return (result, false)
     }
 
     private static func isFileNotFound(_ error: NSError) -> Bool {
@@ -240,34 +227,19 @@ nonisolated final class MITMScriptDiskStore: Sendable {
 
     private func writeToDisk(scope: UUID, data: Data) -> Bool {
         guard let directory, let url = fileURL(scope) else { return false }
-        let fileManager = FileManager.default
-        if !fileManager.fileExists(atPath: directory.path) {
-            try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-        }
-        let coordinator = NSFileCoordinator(filePresenter: nil)
-        var coordError: NSError?
-        var writeError: Error?
-        coordinator.coordinate(writingItemAt: url, options: .forReplacing, error: &coordError) { coordinatedURL in
-            do {
-                try data.write(to: coordinatedURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
-            } catch {
-                writeError = error
-            }
-        }
-        if let error = coordError ?? writeError {
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+            return true
+        } catch {
             logger.error("[MITM][JS] Anywhere.store(onDisk): write failed for \(scope): \(AnywhereError.describe(error))")
             return false
         }
-        return true
     }
 
     private func removeFile(_ scope: UUID) {
         guard let url = fileURL(scope) else { return }
-        let coordinator = NSFileCoordinator(filePresenter: nil)
-        var coordError: NSError?
-        coordinator.coordinate(writingItemAt: url, options: .forDeleting, error: &coordError) { coordinatedURL in
-            try? FileManager.default.removeItem(at: coordinatedURL)
-        }
+        try? FileManager.default.removeItem(at: url)
     }
 
     private func fileURL(_ scope: UUID) -> URL? {

@@ -26,10 +26,10 @@ actor TunneledHTTP1Exchange {
     private var body = Data()
     private var reservedBytes = 0
     private var bodyMode: BodyMode = .undetermined
-    private var chunked = ChunkedDecoder()
-    
+    private var chunkedDecoder = ChunkedDecoder()
+
     private var idleDeadline = ContinuousClock().now
-    
+
     private static let maxHeadBytes = 64 * 1024
 
     private enum BodyMode {
@@ -54,7 +54,7 @@ actor TunneledHTTP1Exchange {
     }
 
     // MARK: - Lifecycle
-    
+
     func run() async throws -> MITMScriptHTTPClient.Response {
         defer {
             MITMScriptHTTPClient.releaseInFlight(reservedBytes)
@@ -86,13 +86,13 @@ actor TunneledHTTP1Exchange {
             }
         }
     }
-    
+
     private func resetIdle() {
         let interval = request.timeoutInterval
         guard interval > 0 else { return }
         idleDeadline = ContinuousClock().now.advanced(by: .seconds(interval))
     }
-    
+
     private func idleWatchdog() async throws -> MITMScriptHTTPClient.Response {
         let interval = request.timeoutInterval
         while true {
@@ -111,7 +111,7 @@ actor TunneledHTTP1Exchange {
             throw AnywhereError.mitm(.invalidScriptRequest)
         }
         try await connection.send(head)
-        
+
         while !headParsed {
             guard let chunk = try await receiveChunk() else {
                 throw AnywhereError.proxy(.http11, .connectionClosed(detail: "before response head"))
@@ -122,10 +122,10 @@ actor TunneledHTTP1Exchange {
                 throw AnywhereError.proxy(.http11, .protocolViolation(detail: "response head exceeds \(Self.maxHeadBytes) bytes"))
             }
         }
-        
+
         return try await readBody()
     }
-    
+
     private func receiveChunk() async throws -> Data? {
         let data = try await connection.receive()
         guard let data, !data.isEmpty else { return nil }
@@ -161,7 +161,7 @@ actor TunneledHTTP1Exchange {
         case .chunked:
             while true {
                 var decoded = Data()
-                switch chunked.feed(&inbound, into: &decoded) {
+                switch chunkedDecoder.feed(&inbound, into: &decoded) {
                 case .needMore:
                     try appendBody(decoded)
                     guard let chunk = try await receiveChunk() else {
@@ -193,10 +193,10 @@ actor TunneledHTTP1Exchange {
 
     private func serializeRequest() -> Data? {
         guard let url = request.url,
-              let comps = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
-        var target = comps.percentEncodedPath
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
+        var target = components.percentEncodedPath
         if target.isEmpty { target = "/" }
-        if let query = comps.percentEncodedQuery, !query.isEmpty { target += "?" + query }
+        if let query = components.percentEncodedQuery, !query.isEmpty { target += "?" + query }
 
         let method = (request.httpMethod ?? "GET").uppercased()
         guard HTTPHeader.isValidName(method) else { return nil }
@@ -236,18 +236,18 @@ actor TunneledHTTP1Exchange {
     }
 
     // MARK: - Head parsing
-    
+
     private func parseHeadIfReady() throws -> Bool {
         let terminator = Data([0x0D, 0x0A, 0x0D, 0x0A])
         while true {
             guard let range = inbound.range(of: terminator) else { return false }
-            guard let (code, hdrs) = Self.parseHead(inbound.subdata(in: inbound.startIndex..<range.lowerBound)) else {
+            guard let (code, parsedHeaders) = Self.parseHead(inbound.subdata(in: inbound.startIndex..<range.lowerBound)) else {
                 throw AnywhereError.proxy(.http11, .protocolViolation(detail: "malformed response head"))
             }
             inbound = inbound.subdata(in: range.upperBound..<inbound.endIndex)
             if (100..<200).contains(code) { continue }   // interim response: keep reading for the final head
             status = code
-            headers = hdrs
+            headers = parsedHeaders
             headParsed = true
             try determineBodyMode()
             return true
@@ -259,12 +259,12 @@ actor TunneledHTTP1Exchange {
             bodyMode = .undetermined
             return
         }
-        if let te = header("Transfer-Encoding"), te.lowercased().contains("chunked") {
+        if let transferEncoding = header("Transfer-Encoding"), transferEncoding.lowercased().contains("chunked") {
             bodyMode = .chunked
             return
         }
-        if let clString = header("Content-Length"),
-           let contentLength = Int(clString.trimmingCharacters(in: .whitespaces)), contentLength >= 0 {
+        if let contentLengthValue = header("Content-Length"),
+           let contentLength = Int(contentLengthValue.trimmingCharacters(in: .whitespaces)), contentLength >= 0 {
             if contentLength > maxBytes {
                 throw AnywhereError.mitm(.responseTooLarge(limit: maxBytes))
             }
@@ -275,7 +275,7 @@ actor TunneledHTTP1Exchange {
     }
 
     // MARK: - Body accounting
-    
+
     private func appendBody(_ data: Data) throws {
         guard !data.isEmpty else { return }
         if body.count + data.count > maxBytes {
@@ -293,7 +293,7 @@ actor TunneledHTTP1Exchange {
     private func finishSuccess() throws -> MITMScriptHTTPClient.Response {
         var responseBody = body
         var dropHeaders: Set<String> = ["transfer-encoding"]
-        
+
         let plan = MITMBodyCodec.plan(for: header("Content-Encoding"))
         if plan.requiresDecompression,
            let decoded = MITMBodyCodec.decompress(body, plan: plan, host: request.url?.host ?? "") {
@@ -324,7 +324,7 @@ actor TunneledHTTP1Exchange {
     }
 
     private func header(_ name: String) -> String? {
-        for (n, value) in headers where n.caseInsensitiveCompare(name) == .orderedSame { return value }
+        for (fieldName, value) in headers where fieldName.caseInsensitiveCompare(name) == .orderedSame { return value }
         return nil
     }
 
@@ -364,73 +364,73 @@ nonisolated private struct ChunkedDecoder {
     }
 
     private var state: State = .size
-    
+
     private static let maxLineBytes = 8 * 1024
 
     mutating func feed(_ inbound: inout Data, into out: inout Data) -> FeedResult {
-        var idx = inbound.startIndex
+        var index = inbound.startIndex
         let end = inbound.endIndex
 
         while true {
             switch state {
             case .done:
-                inbound = inbound.subdata(in: idx..<end)
+                inbound = inbound.subdata(in: index..<end)
                 return .done
 
             case .size:
-                guard let crlf = Self.indexOfCRLF(inbound, from: idx, end: end) else {
-                    if end - idx > Self.maxLineBytes { return .error("chunk-size line exceeds \(Self.maxLineBytes) bytes") }
-                    inbound = inbound.subdata(in: idx..<end)
+                guard let crlf = Self.indexOfCRLF(inbound, from: index, end: end) else {
+                    if end - index > Self.maxLineBytes { return .error("chunk-size line exceeds \(Self.maxLineBytes) bytes") }
+                    inbound = inbound.subdata(in: index..<end)
                     return .needMore
                 }
-                guard let size = Self.parseChunkSize(inbound[idx..<crlf]) else {
+                guard let size = Self.parseChunkSize(inbound[index..<crlf]) else {
                     return .error("bad chunk size")
                 }
-                idx = crlf + 2
+                index = crlf + 2
                 state = size == 0 ? .trailer : .body(size)
 
             case .body(let remaining):
-                let take = min(remaining, end - idx)
+                let take = min(remaining, end - index)
                 if take > 0 {
-                    out.append(contentsOf: inbound[idx..<(idx + take)])
-                    idx += take
+                    out.append(contentsOf: inbound[index..<(index + take)])
+                    index += take
                 }
                 let left = remaining - take
                 if left > 0 {
                     state = .body(left)
-                    inbound = inbound.subdata(in: idx..<end)
+                    inbound = inbound.subdata(in: index..<end)
                     return .needMore
                 }
                 state = .afterBodyCRLF
 
             case .afterBodyCRLF:
-                if end - idx < 2 {
-                    inbound = inbound.subdata(in: idx..<end)
+                if end - index < 2 {
+                    inbound = inbound.subdata(in: index..<end)
                     return .needMore
                 }
-                guard inbound[idx] == 0x0D, inbound[idx + 1] == 0x0A else {
+                guard inbound[index] == 0x0D, inbound[index + 1] == 0x0A else {
                     return .error("missing CRLF after chunk data")
                 }
-                idx += 2
+                index += 2
                 state = .size
 
             case .trailer:
-                guard let crlf = Self.indexOfCRLF(inbound, from: idx, end: end) else {
-                    if end - idx > Self.maxLineBytes { return .error("trailer line exceeds \(Self.maxLineBytes) bytes") }
-                    inbound = inbound.subdata(in: idx..<end)
+                guard let crlf = Self.indexOfCRLF(inbound, from: index, end: end) else {
+                    if end - index > Self.maxLineBytes { return .error("trailer line exceeds \(Self.maxLineBytes) bytes") }
+                    inbound = inbound.subdata(in: index..<end)
                     return .needMore
                 }
-                if crlf == idx {
-                    idx += 2
+                if crlf == index {
+                    index += 2
                     state = .done
-                    inbound = inbound.subdata(in: idx..<end)
+                    inbound = inbound.subdata(in: index..<end)
                     return .done
                 }
-                idx = crlf + 2
+                index = crlf + 2
             }
         }
     }
-    
+
     private static func indexOfCRLF(_ data: Data, from: Int, end: Int) -> Int? {
         guard from < end else { return nil }
         var i = from

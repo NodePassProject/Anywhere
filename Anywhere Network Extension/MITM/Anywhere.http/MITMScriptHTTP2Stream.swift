@@ -9,13 +9,13 @@ import Foundation
 import Synchronization
 
 nonisolated final class MITMScriptHTTP2Stream: Sendable {
-    
+
     private static let receiveWindow = 4 * 1024 * 1024
 
     // MARK: Inputs
 
     let streamID: UInt32
-    
+
     private struct WeakConnection: Sendable { weak var value: MITMScriptHTTP2Connection? }
     private let connectionBox: WeakConnection
     private var connection: MITMScriptHTTP2Connection? { connectionBox.value }
@@ -23,7 +23,7 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
     private let hostHeader: String
     private let maxBytes: Int
     private let resourceTimeout: TimeInterval
-    
+
     private let responseSignal: AsyncThrowingStream<MITMScriptHTTPClient.Response, Error>.Continuation
 
     // MARK: State
@@ -59,7 +59,7 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
     private let state = Mutex(State())
 
     // MARK: Timer pokes
-    
+
     private let finishPoke = AsyncInbox<Void>(capacity: 1)
     private let idleFinishPoke = AsyncInbox<Void>(capacity: 1)
 
@@ -84,20 +84,25 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
     }
 
     // MARK: - Jobs
-    
+
     func runSend() async {
         guard state.withLock({ $0.phase != .finished }) else { return }
         await sendRequest()
     }
-    
+
     func runDeadline() async {
         let timedOut = await withTaskGroup(of: Bool.self) { group in
             group.addTask {
-                do { try await Task.sleep(seconds: self.resourceTimeout, precision: .relaxed); return true }
-                catch { return false }
+                do {
+                    try await Task.sleep(seconds: self.resourceTimeout, precision: .relaxed)
+                    return true
+                } catch {
+                    return false
+                }
             }
             group.addTask {
-                _ = try? await self.finishPoke.next(); return false
+                _ = try? await self.finishPoke.next()
+                return false
             }
             let first = await group.next() ?? false
             group.cancelAll()
@@ -106,40 +111,48 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
         guard timedOut else { return }
         fail(AnywhereError.transport(.timedOut(.receive, endpoint: nil, detail: "request exceeded \(Int(resourceTimeout))s deadline")))
     }
-    
+
     func runIdleLoop() async {
         let interval = request.timeoutInterval
         guard interval > 0 else { return }
         while true {
             let generation = state.withLock { $0.idleGeneration }
-            let finished = await withTaskGroup(of: Bool.self) { group in
+            let isFinished = await withTaskGroup(of: Bool.self) { group in
                 group.addTask {
-                    do { try await Task.sleep(seconds: interval, precision: .relaxed); return false }
-                    catch { return true }
+                    do {
+                        try await Task.sleep(seconds: interval, precision: .relaxed)
+                        return false
+                    } catch {
+                        return true
+                    }
                 }
                 group.addTask {
-                    _ = try? await self.idleFinishPoke.next(); return true
+                    _ = try? await self.idleFinishPoke.next()
+                    return true
                 }
                 let first = await group.next() ?? true
                 group.cancelAll()
                 return first
             }
-            if finished { return }
-            let expired = state.withLock { $0.phase != .finished && $0.idleGeneration == generation }
-            guard expired else { continue }
+            if isFinished { return }
+            let isExpired = state.withLock { $0.phase != .finished && $0.idleGeneration == generation }
+            guard isExpired else { continue }
             fail(AnywhereError.transport(.timedOut(.receive, endpoint: nil, detail: "request idle for \(Int(interval))s")))
             return
         }
     }
-    
+
     private func rearmIdleTimer() {
         state.withLock { $0.idleGeneration += 1 }
     }
 
     // MARK: - Request
-    
+
     private func sendRequest() async {
-        guard let connection else { fail(AnywhereError.proxy(.http2, .notReady)); return }
+        guard let connection else {
+            fail(AnywhereError.proxy(.http2, .notReady))
+            return
+        }
         guard let headerBlock = buildHeaderBlock() else {
             fail(AnywhereError.mitm(.invalidScriptRequest))
             return
@@ -160,16 +173,16 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
             fail(error)
         }
     }
-    
+
     private func buildHeaderBlock() -> Data? {
         guard let url = request.url,
-              let comps = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
         let method = (request.httpMethod ?? "GET").uppercased()
         guard HTTPHeader.isValidName(method) else { return nil }
 
-        var path = comps.percentEncodedPath
+        var path = components.percentEncodedPath
         if path.isEmpty { path = "/" }
-        if let query = comps.percentEncodedQuery, !query.isEmpty { path += "?" + query }
+        if let query = components.percentEncodedQuery, !query.isEmpty { path += "?" + query }
 
         var fields: [(name: String, value: String)] = [
             (":method", method),
@@ -177,7 +190,7 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
             (":authority", hostHeader),
             (":path", path),
         ]
-        
+
         let dropped: Set<String> = [
             "connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "te",
             "host", "content-length", "accept-encoding",
@@ -200,7 +213,7 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
     func handleHeaders(fields: [(name: String, value: String)], endStream: Bool) {
         rearmIdleTimer()
 
-        enum Outcome { case ignore; case failStatus; case finishOK }
+        enum Outcome { case ignore, failStatus, finishOK }
         let outcome: Outcome = state.withLock { state in
             guard state.phase != .finished else { return .ignore }
 
@@ -262,7 +275,7 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
                 state.reservedBytes += body.count
                 state.body.append(body)
             }
-            
+
             var windowUpdate: HTTP2Frame?
             state.streamReceiveConsumed += fullPayloadCount
             if !endStream, state.streamReceiveConsumed >= Self.receiveWindow / 2 {
@@ -290,7 +303,7 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
     func handleReset(errorCode: UInt32) {
         finish(.failure(AnywhereError.proxy(.http2, .streamReset(code: errorCode))), removeFromConnection: false, sendRST: false)
     }
-    
+
     func failFromSession(_ error: Error) {
         finish(.failure(error), removeFromConnection: false, sendRST: false)
     }
@@ -314,7 +327,7 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
 
         var responseBody = snapshot.body
         var dropHeaders: Set<String> = ["transfer-encoding"]
-        
+
         let plan = MITMBodyCodec.plan(for: HTTPHeader.firstValue(in: snapshot.headers, named: "content-encoding"))
         if plan.requiresDecompression,
            let decoded = MITMBodyCodec.decompress(snapshot.body, plan: plan, host: request.url?.host ?? "") {
@@ -344,12 +357,12 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
     ) {
         let captured: (reservedBytes: Int, endStreamReceived: Bool, headersSent: Bool)? = state.withLock { state in
             guard state.transition(to: .finished) else { return nil }
-            let c = (state.reservedBytes, state.endStreamReceived, state.headersSent)
+            let snapshot = (state.reservedBytes, state.endStreamReceived, state.headersSent)
             state.reservedBytes = 0
-            return c
+            return snapshot
         }
         guard let captured else { return }
-        
+
         finishPoke.finish()
         idleFinishPoke.finish()
         MITMScriptHTTPClient.releaseInFlight(captured.reservedBytes)

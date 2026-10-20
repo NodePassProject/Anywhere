@@ -44,6 +44,8 @@ actor MITMBridgeClientLeg: MITMResponseSink {
 
     private static let receiveWindow = 4 * 1024 * 1024
 
+    private static let creditAnnouncementThreshold = receiveWindow / 2
+
     // MARK: Connection state
 
     enum Phase: PhaseTransitionable {
@@ -74,7 +76,7 @@ actor MITMBridgeClientLeg: MITMResponseSink {
     }
 
     private var prefaceRemaining = Codec.clientPrefaceLength
-    private var rxBuffer = MITMByteBuffer()
+    private var receiveBuffer = MITMByteBuffer()
     private var goAwaySent = false
 
     private var parkedContinuation: CheckedContinuation<Void, Never>?
@@ -92,20 +94,20 @@ actor MITMBridgeClientLeg: MITMResponseSink {
 
     // MARK: Request streams
 
-    private struct BufferedReq {
+    private struct BufferedRequest {
         var rewrittenHeaders: [(name: String, value: String)]
         let codec: MITMBodyCodec.Plan
         var data: Data
         let neverIndexed: Set<String>
-        let scripted: Bool
+        let isScripted: Bool
         let resolvedUpstream: (host: String, port: UInt16?)?
         let originalURL: String?
     }
 
     private enum RequestStream {
         case streaming(remaining: Int?)
-        case buffering(BufferedReq)
-        case synthAnswered
+        case buffering(BufferedRequest)
+        case answeredWithSynthesizedResponse
     }
     private var requestStreams: [UInt32: RequestStream] = [:]
     private var streamMethods: [UInt32: String] = [:]
@@ -113,23 +115,22 @@ actor MITMBridgeClientLeg: MITMResponseSink {
     // MARK: Client-bound (response) state
 
     private struct PaceState {
-        var pending = Data()
+        var pending = MITMByteQueue()
         var streamWindow: Int
         var sawEnd = false
-        var finished = false
+        var isFinished = false
         var pendingTrailers: [(name: String, value: String)]?
     }
     private var paceStates: [UInt32: PaceState] = [:]
 
     private var pendingStreamCredit: [UInt32: Int] = [:]
 
-    private var batchedConnCredit = 0
-    private var batchedStreamCredit: [UInt32: Int] = [:]
+    private var unannouncedConnCredit = 0
+    private var unannouncedStreamCredit: [UInt32: Int] = [:]
 
-    var uploadDrainCoupled = false
+    var isUploadDrainCoupled = false
 
     private var streamDeferredUpload: Set<UInt32> = []
-
 
     init(
         host: String,
@@ -147,13 +148,13 @@ actor MITMBridgeClientLeg: MITMResponseSink {
         transition(to: .torn)
         let continuation = parkedContinuation
         parkedContinuation = nil
-        rxBuffer = MITMByteBuffer()
+        receiveBuffer = MITMByteBuffer()
         requestStreams.removeAll()
         streamMethods.removeAll()
         paceStates.removeAll()
         pendingStreamCredit.removeAll()
-        batchedConnCredit = 0
-        batchedStreamCredit.removeAll()
+        unannouncedConnCredit = 0
+        unannouncedStreamCredit.removeAll()
         streamDeferredUpload.removeAll()
         pending = nil
         continuation?.resume()
@@ -177,14 +178,8 @@ actor MITMBridgeClientLeg: MITMResponseSink {
 
     // MARK: - Client → MITM
 
-    private func onIPStackParked<T>(_ body: @escaping (CheckedContinuation<T, Never>) -> Void) async -> T {
-        await sessionContext.runParked(body)
-    }
-
     func feed(_ data: Data) async {
-        await onIPStackParked { (continuation: CheckedContinuation<Void, Never>) in
-            self.assumeIsolated { $0.feedOnQueue(data, continuation: continuation) }
-        }
+        await withCheckedContinuation { feedOnQueue(data, continuation: $0) }
     }
 
     private func feedOnQueue(_ data: Data, continuation: CheckedContinuation<Void, Never>) {
@@ -193,14 +188,17 @@ actor MITMBridgeClientLeg: MITMResponseSink {
             continuation.resume()
             return
         }
-        if phase == .failed || phase == .torn { continuation.resume(); return }
+        if phase == .failed || phase == .torn {
+            continuation.resume()
+            return
+        }
         var input = data
         if prefaceRemaining > 0, !input.isEmpty {
             let take = min(prefaceRemaining, input.count)
             input.removeFirst(take)
             prefaceRemaining -= take
         }
-        if !input.isEmpty { rxBuffer.append(input) }
+        if !input.isEmpty { receiveBuffer.append(input) }
         ensureServerPrefaceSent()
         parkedContinuation = continuation
         let parked = pump()
@@ -212,27 +210,27 @@ actor MITMBridgeClientLeg: MITMResponseSink {
         transition(to: .prefaceSent)
         var preface = Data()
         Codec.appendFrameHeader(typeCode: Codec.FrameType.settings, flags: 0, streamID: 0, payloadLength: 24, into: &preface)
-        preface.append(contentsOf: [0x00, 0x02, 0x00, 0x00, 0x00, 0x00]) // SETTINGS_ENABLE_PUSH = 0
+        preface.append(contentsOf: [0x00, 0x02, 0x00, 0x00, 0x00, 0x00])
         let maxStreams = UInt32(Self.advertisedMaxConcurrentStreams)
         preface.append(
             contentsOf: [
-                0x00, 0x03, // SETTINGS_MAX_CONCURRENT_STREAMS
+                0x00, 0x03,
                 UInt8((maxStreams >> 24) & 0xFF), UInt8((maxStreams >> 16) & 0xFF),
                 UInt8((maxStreams >> 8) & 0xFF), UInt8(maxStreams & 0xFF)
             ]
         )
-        let w = UInt32(Self.receiveWindow)
+        let window = UInt32(Self.receiveWindow)
         preface.append(
             contentsOf: [
-                0x00, 0x04, // SETTINGS_INITIAL_WINDOW_SIZE
-                UInt8((w >> 24) & 0xFF), UInt8((w >> 16) & 0xFF),
-                UInt8((w >> 8) & 0xFF), UInt8(w & 0xFF)
+                0x00, 0x04,
+                UInt8((window >> 24) & 0xFF), UInt8((window >> 16) & 0xFF),
+                UInt8((window >> 8) & 0xFF), UInt8(window & 0xFF)
             ]
         )
         let maxHeaderList = UInt32(HPACKDecoder.maxDecodedHeaderListSize)
         preface.append(
             contentsOf: [
-                0x00, 0x06, // SETTINGS_MAX_HEADER_LIST_SIZE
+                0x00, 0x06,
                 UInt8((maxHeaderList >> 24) & 0xFF), UInt8((maxHeaderList >> 16) & 0xFF),
                 UInt8((maxHeaderList >> 8) & 0xFF), UInt8(maxHeaderList & 0xFF)
             ]
@@ -243,7 +241,7 @@ actor MITMBridgeClientLeg: MITMResponseSink {
 
     private func pump() -> Bool {
         while true {
-            switch Codec.parseFrame(from: &rxBuffer) {
+            switch Codec.parseFrame(from: &receiveBuffer) {
             case .needMore:
                 return false
             case .error:
@@ -257,28 +255,35 @@ actor MITMBridgeClientLeg: MITMResponseSink {
     }
 
     private func finishPass(parked: Bool) {
-        flushBatchedCredits()
+        announceDueCredits()
         if parked { return }
         let continuation = parkedContinuation
         parkedContinuation = nil
         continuation?.resume()
     }
 
-    private func flushBatchedCredits() {
-        if batchedConnCredit > 0 {
-            delegate?.clientLegWriteToClient(Codec.windowUpdate(streamID: 0, increment: batchedConnCredit))
-            batchedConnCredit = 0
+    private func announceDueCredits() {
+        if unannouncedConnCredit >= Self.creditAnnouncementThreshold {
+            delegate?.clientLegWriteToClient(Codec.windowUpdate(streamID: 0, increment: unannouncedConnCredit))
+            unannouncedConnCredit = 0
         }
-        guard !batchedStreamCredit.isEmpty else { return }
-        for (sid, n) in batchedStreamCredit where n > 0 {
-            delegate?.clientLegWriteToClient(Codec.windowUpdate(streamID: sid, increment: n))
+        var announced: [UInt32] = []
+        for (streamID, credit) in unannouncedStreamCredit where credit >= Self.creditAnnouncementThreshold {
+            delegate?.clientLegWriteToClient(Codec.windowUpdate(streamID: streamID, increment: credit))
+            announced.append(streamID)
         }
-        batchedStreamCredit.removeAll(keepingCapacity: true)
+        for streamID in announced { unannouncedStreamCredit.removeValue(forKey: streamID) }
+    }
+
+    private func announceStreamCreditIfDue(_ streamID: UInt32) {
+        guard let credit = unannouncedStreamCredit[streamID], credit >= Self.creditAnnouncementThreshold else { return }
+        unannouncedStreamCredit.removeValue(forKey: streamID)
+        delegate?.clientLegWriteToClient(Codec.windowUpdate(streamID: streamID, increment: credit))
     }
 
     private func fail(_ message: String, code: UInt32 = Codec.ErrorCode.protocolError) {
         guard transition(to: .failed) else { return }
-        rxBuffer = MITMByteBuffer()
+        receiveBuffer = MITMByteBuffer()
         pending = nil
         sendGoAwayToClient(code: code)
         logger.warning("bridge \(host): \(message); tearing down")
@@ -292,8 +297,8 @@ actor MITMBridgeClientLeg: MITMResponseSink {
     }
 
     private func handleFrame(_ frame: Codec.RawFrame) -> Bool {
-        if let p = pending, frame.typeCode != Codec.FrameType.continuation {
-            fail("frame interleaved with pending HEADERS on stream \(p.streamID)")
+        if let pendingHeaders = pending, frame.typeCode != Codec.FrameType.continuation {
+            fail("frame interleaved with pending HEADERS on stream \(pendingHeaders.streamID)")
             return false
         }
         switch frame.typeCode {
@@ -316,7 +321,10 @@ actor MITMBridgeClientLeg: MITMResponseSink {
     // MARK: SETTINGS / WINDOW_UPDATE / RST
 
     private func handleSettings(_ frame: Codec.RawFrame) {
-        guard frame.streamID == 0 else { fail("SETTINGS on non-zero stream"); return }
+        guard frame.streamID == 0 else {
+            fail("SETTINGS on non-zero stream")
+            return
+        }
         if frame.flags & 0x1 != 0 { return }
         let payload = frame.payload
         var i = payload.startIndex
@@ -340,17 +348,17 @@ actor MITMBridgeClientLeg: MITMResponseSink {
     }
 
     private func handleWindowUpdate(_ frame: Codec.RawFrame) {
-        guard let inc = Codec.windowUpdateIncrement(frame.payload), inc > 0 else { return }
+        guard let increment = Codec.windowUpdateIncrement(frame.payload), increment > 0 else { return }
         if frame.streamID == 0 {
-            flowController.creditConnection(inc)
+            flowController.creditConnection(increment)
             distributeClientConnectionWindow()
         } else if paceStates[frame.streamID] != nil {
             let current = paceStates[frame.streamID]?.streamWindow ?? 0
-            paceStates[frame.streamID]?.streamWindow = min(MITMHTTP2FlowController.maxWindow, current + inc)
+            paceStates[frame.streamID]?.streamWindow = min(MITMHTTP2FlowController.maxWindow, current + increment)
             flushResponse(frame.streamID)
         } else if streamMethods[frame.streamID] != nil {
-            let acc = (pendingStreamCredit[frame.streamID] ?? 0) + inc
-            pendingStreamCredit[frame.streamID] = min(MITMHTTP2FlowController.maxWindow, acc)
+            let accumulated = (pendingStreamCredit[frame.streamID] ?? 0) + increment
+            pendingStreamCredit[frame.streamID] = min(MITMHTTP2FlowController.maxWindow, accumulated)
         }
     }
 
@@ -367,6 +375,7 @@ actor MITMBridgeClientLeg: MITMResponseSink {
         streamMethods.removeValue(forKey: id)
         paceStates.removeValue(forKey: id)
         pendingStreamCredit.removeValue(forKey: id)
+        unannouncedStreamCredit.removeValue(forKey: id)
         streamDeferredUpload.remove(id)
         if wasOpen { delegate?.clientLegAbortRequest(streamID: id) }
     }
@@ -374,13 +383,22 @@ actor MITMBridgeClientLeg: MITMResponseSink {
     // MARK: HEADERS
 
     private func handleHeaders(_ frame: Codec.RawFrame) -> Bool {
-        guard frame.streamID != 0 else { fail("HEADERS on stream 0"); return false }
-        guard frame.streamID % 2 == 1 else { fail("client HEADERS with even stream id"); return false }
+        guard frame.streamID != 0 else {
+            fail("HEADERS on stream 0")
+            return false
+        }
+        guard frame.streamID % 2 == 1 else {
+            fail("client HEADERS with even stream id")
+            return false
+        }
         guard let block = Codec.stripHeadersPadding(payload: frame.payload, flags: frame.flags) else {
             fail("HEADERS with invalid padding")
             return false
         }
-        if block.count > Self.maxHeaderBlockBytes { fail("HEADERS block over cap"); return false }
+        if block.count > Self.maxHeaderBlockBytes {
+            fail("HEADERS block over cap")
+            return false
+        }
         let endStream = frame.flags & 0x1 != 0
         if frame.flags & 0x4 != 0 {
             return finalizeHeaders(streamID: frame.streamID, fragments: block, endStream: endStream)
@@ -390,18 +408,30 @@ actor MITMBridgeClientLeg: MITMResponseSink {
     }
 
     private func handleContinuation(_ frame: Codec.RawFrame) -> Bool {
-        guard var p = pending, p.streamID == frame.streamID else { fail("stray CONTINUATION"); return false }
+        guard var pendingHeaders = pending, pendingHeaders.streamID == frame.streamID else {
+            fail("stray CONTINUATION")
+            return false
+        }
         let isFinal = frame.flags & 0x4 != 0
-        if frame.payload.isEmpty && !isFinal { fail("zero-length CONTINUATION without END_HEADERS"); return false }
-        p.continuationCount += 1
-        if p.continuationCount > Self.maxContinuationFrames { fail("too many CONTINUATION frames"); return false }
-        if p.fragments.count + frame.payload.count > Self.maxHeaderBlockBytes { fail("header block over cap"); return false }
-        p.fragments.append(frame.payload)
+        if frame.payload.isEmpty && !isFinal {
+            fail("zero-length CONTINUATION without END_HEADERS")
+            return false
+        }
+        pendingHeaders.continuationCount += 1
+        if pendingHeaders.continuationCount > Self.maxContinuationFrames {
+            fail("too many CONTINUATION frames")
+            return false
+        }
+        if pendingHeaders.fragments.count + frame.payload.count > Self.maxHeaderBlockBytes {
+            fail("header block over cap")
+            return false
+        }
+        pendingHeaders.fragments.append(frame.payload)
         if isFinal {
             pending = nil
-            return finalizeHeaders(streamID: p.streamID, fragments: p.fragments, endStream: p.endStream)
+            return finalizeHeaders(streamID: pendingHeaders.streamID, fragments: pendingHeaders.fragments, endStream: pendingHeaders.endStream)
         }
-        pending = p
+        pending = pendingHeaders
         return false
     }
 
@@ -423,8 +453,8 @@ actor MITMBridgeClientLeg: MITMResponseSink {
             return false
         }
 
-        if let bad = HTTPHeader.firstInvalidOctet(decoded) {
-            logger.warning("bridge \(host) stream \(streamID): header rejected — \(bad.reason) on \"\(HTTPHeader.escapedForLog(bad.name))\"; RST")
+        if let invalidOctet = HTTPHeader.firstInvalidOctet(decoded) {
+            logger.warning("bridge \(host) stream \(streamID): header rejected — \(invalidOctet.reason) on \"\(HTTPHeader.escapedForLog(invalidOctet.name))\"; RST")
             rstToClient(streamID, errorCode: Codec.ErrorCode.protocolError,
                         abortUpstream: requestStreams[streamID] != nil)
             return false
@@ -457,7 +487,10 @@ actor MITMBridgeClientLeg: MITMResponseSink {
             return endRequestBody(streamID, trailers: trailers)
         }
 
-        guard isNewStream else { fail("non-increasing stream id \(streamID)"); return false }
+        guard isNewStream else {
+            fail("non-increasing stream id \(streamID)")
+            return false
+        }
 
         let method = HTTPHeader.firstValue(in: decoded, named: ":method") ?? "GET"
         let path = HTTPHeader.firstValue(in: decoded, named: ":path")
@@ -508,8 +541,8 @@ actor MITMBridgeClientLeg: MITMResponseSink {
         let requestURL = head.requestURL
         let neverIndexed = head.neverIndexed
 
-        if let synth = rewriter.requestSynthResponse(gates: gates) {
-            answerSynth(streamID: streamID, response: synth)
+        if let synthesized = rewriter.requestSynthesizedResponse(gates: gates) {
+            answerWithSynthesizedResponse(streamID: streamID, response: synthesized)
             return false
         }
 
@@ -537,37 +570,64 @@ actor MITMBridgeClientLeg: MITMResponseSink {
 
         if willBufferBody {
             let codec = MITMBodyCodec.plan(for: HTTPHeader.firstValue(in: rewritten, named: "content-encoding"))
-            requestStreams[streamID] = .buffering(BufferedReq(rewrittenHeaders: rewritten, codec: codec, data: Data(), neverIndexed: neverIndexed, scripted: true, resolvedUpstream: resolvedUpstream, originalURL: requestURL))
+            requestStreams[streamID] = .buffering(
+                BufferedRequest(
+                    rewrittenHeaders: rewritten,
+                    codec: codec,
+                    data: Data(),
+                    neverIndexed: neverIndexed,
+                    isScripted: true,
+                    resolvedUpstream: resolvedUpstream,
+                    originalURL: requestURL
+                )
+            )
             if endStream { return finishBufferedRequest(streamID) }
             return false
         }
 
-        let bodylessMethod = ["GET", "HEAD", "DELETE", "OPTIONS", "TRACE"].contains(method.uppercased())
+        let isBodylessMethod = ["GET", "HEAD", "DELETE", "OPTIONS", "TRACE"].contains(method.uppercased())
         let framing: MITMBridgeBodyFraming
         if endStream {
             framing = .none
         } else if let raw = HTTPHeader.firstValue(in: rewritten, named: "content-length"),
-                  let n = Int(raw.trimmingCharacters(in: .whitespaces)), n >= 0 {
-            framing = n == 0 ? .none : .contentLength(n)
-        } else if bodylessMethod {
+                  let length = Int(raw.trimmingCharacters(in: .whitespaces)), length >= 0 {
+            framing = length == 0 ? .none : .contentLength(length)
+        } else if isBodylessMethod {
             let codec = MITMBodyCodec.plan(for: HTTPHeader.firstValue(in: rewritten, named: "content-encoding"))
-            requestStreams[streamID] = .buffering(BufferedReq(rewrittenHeaders: rewritten, codec: codec, data: Data(), neverIndexed: neverIndexed, scripted: false, resolvedUpstream: resolvedUpstream, originalURL: requestURL))
+            requestStreams[streamID] = .buffering(
+                BufferedRequest(
+                    rewrittenHeaders: rewritten,
+                    codec: codec,
+                    data: Data(),
+                    neverIndexed: neverIndexed,
+                    isScripted: false,
+                    resolvedUpstream: resolvedUpstream,
+                    originalURL: requestURL
+                )
+            )
             return false
         } else {
             framing = .chunked
         }
-        guard let head = makeRequestHead(streamID: streamID, rewritten: rewritten, framing: framing, neverIndexed: neverIndexed, resolvedUpstream: resolvedUpstream, originalURL: requestURL) else {
+        guard let head = makeRequestHead(
+            streamID: streamID,
+            rewritten: rewritten,
+            framing: framing,
+            neverIndexed: neverIndexed,
+            resolvedUpstream: resolvedUpstream,
+            originalURL: requestURL
+        ) else {
             rstToClient(streamID, errorCode: Codec.ErrorCode.protocolError, abortUpstream: false)
             return false
         }
         let remaining: Int?
         switch framing {
         case .none: remaining = 0
-        case .contentLength(let n): remaining = n
+        case .contentLength(let length): remaining = length
         case .chunked: remaining = nil
         }
         requestStreams[streamID] = .streaming(remaining: remaining)
-        if uploadDrainCoupled, !endStream { streamDeferredUpload.insert(streamID) }
+        if isUploadDrainCoupled, !endStream { streamDeferredUpload.insert(streamID) }
         delegate?.clientLegSendRequestHead(head, url: gateURL, endStream: endStream)
         if endStream { requestStreams.removeValue(forKey: streamID) }
         return false
@@ -579,15 +639,16 @@ actor MITMBridgeClientLeg: MITMResponseSink {
             let gates = await rewriter.resolveRequestHeadGates(originalPath: head.originalPath)
             guard let self else { return }
             self.sessionContext.enqueue {
-                self.assumeIsolated { me in
-                    guard me.phase != .torn, me.phase != .failed else {
-                        let continuation = me.parkedContinuation; me.parkedContinuation = nil
+                self.assumeIsolated { leg in
+                    guard leg.phase != .torn, leg.phase != .failed else {
+                        let continuation = leg.parkedContinuation
+                        leg.parkedContinuation = nil
                         continuation?.resume()
                         return
                     }
-                    _ = me.applyRequestHead(head, gates: gates)
-                    let parked = me.pump()
-                    me.finishPass(parked: parked)
+                    _ = leg.applyRequestHead(head, gates: gates)
+                    let parked = leg.pump()
+                    leg.finishPass(parked: parked)
                 }
             }
         }
@@ -629,7 +690,7 @@ actor MITMBridgeClientLeg: MITMResponseSink {
 
     private func shouldBuffer(headers: [(name: String, value: String)]) -> Bool {
         let codec = MITMBodyCodec.plan(for: HTTPHeader.firstValue(in: headers, named: "content-encoding"))
-        guard codec.supported else { return false }
+        guard codec.isSupported else { return false }
         if let raw = HTTPHeader.firstValue(in: headers, named: "content-length"),
            let length = Int(raw.trimmingCharacters(in: .whitespaces)) {
             return length <= MITMBodyCodec.maxBufferedBodyBytes
@@ -640,7 +701,10 @@ actor MITMBridgeClientLeg: MITMResponseSink {
     // MARK: DATA
 
     private func handleData(_ frame: Codec.RawFrame) -> Bool {
-        guard frame.streamID != 0 else { fail("DATA on stream 0"); return false }
+        guard frame.streamID != 0 else {
+            fail("DATA on stream 0")
+            return false
+        }
         let onWireLength = frame.payload.count
         guard let body = Codec.stripDataPadding(payload: frame.payload, flags: frame.flags) else {
             fail("DATA with invalid padding")
@@ -648,25 +712,26 @@ actor MITMBridgeClientLeg: MITMResponseSink {
         }
         let endStream = frame.flags & 0x1 != 0
         let id = frame.streamID
+        defer { if endStream { unannouncedStreamCredit.removeValue(forKey: id) } }
 
         switch requestStreams[id] {
         case .streaming(let remaining):
             if streamDeferredUpload.contains(id) {
-                batchedConnCredit += onWireLength
+                unannouncedConnCredit += onWireLength
                 let padding = onWireLength - body.count
-                if padding > 0 { batchedStreamCredit[id, default: 0] += padding }
+                if padding > 0 { unannouncedStreamCredit[id, default: 0] += padding }
             } else {
                 creditClientUpload(streamID: id, length: onWireLength)
             }
             if let remaining {
                 guard body.count <= remaining else {
-                    logger.warning("bridge \(host) stream \(id): request body exceeds Content-Length; resetting (RFC 9113 §8.1.2.6)")
+                    logger.warning("bridge \(host) stream \(id): request body exceeds Content-Length; resetting")
                     rstToClient(id, errorCode: Codec.ErrorCode.protocolError, abortUpstream: true)
                     return false
                 }
                 let left = remaining - body.count
                 guard !(endStream && left != 0) else {
-                    logger.warning("bridge \(host) stream \(id): request body shorter than Content-Length; resetting (RFC 9113 §8.1.2.6)")
+                    logger.warning("bridge \(host) stream \(id): request body shorter than Content-Length; resetting")
                     rstToClient(id, errorCode: Codec.ErrorCode.protocolError, abortUpstream: true)
                     return false
                 }
@@ -676,17 +741,11 @@ actor MITMBridgeClientLeg: MITMResponseSink {
             if endStream { finishRequestUpload(id) }
             return false
 
-        case .buffering(var buffer):
+        case .buffering:
             creditClientUpload(streamID: id, length: onWireLength)
-            buffer.data.append(body)
-            if !endStream, buffer.data.count > MITMBodyCodec.maxBufferedBodyBytes {
-                return abandonBufferedToChunked(streamID: id, buf: buffer)
-            }
-            requestStreams[id] = .buffering(buffer)
-            if endStream { return finishBufferedRequest(id) }
-            return false
+            return appendBufferedRequest(streamID: id, body: body, endStream: endStream)
 
-        case .synthAnswered:
+        case .answeredWithSynthesizedResponse:
             creditClientUpload(streamID: id, length: onWireLength)
             return false
 
@@ -695,12 +754,24 @@ actor MITMBridgeClientLeg: MITMResponseSink {
                 fail("DATA on idle stream \(id)")
                 return false
             }
-            if onWireLength > 0 { batchedConnCredit += onWireLength }
+            if onWireLength > 0 { unannouncedConnCredit += onWireLength }
             return false
         }
     }
 
+    private func appendBufferedRequest(streamID: UInt32, body: Data, endStream: Bool) -> Bool {
+        guard case .buffering(var buffer)? = requestStreams.removeValue(forKey: streamID) else { return false }
+        buffer.data.append(body)
+        if !endStream, buffer.data.count > MITMBodyCodec.maxBufferedBodyBytes {
+            return abandonBufferedToChunked(streamID: streamID, buffer: buffer)
+        }
+        requestStreams[streamID] = .buffering(buffer)
+        if endStream { return finishBufferedRequest(streamID) }
+        return false
+    }
+
     private func endRequestBody(_ streamID: UInt32, trailers: [(name: String, value: String)] = []) -> Bool {
+        unannouncedStreamCredit.removeValue(forKey: streamID)
         switch requestStreams[streamID] {
         case .streaming(let remaining):
             if let remaining, remaining != 0 {
@@ -722,37 +793,52 @@ actor MITMBridgeClientLeg: MITMResponseSink {
         }
     }
 
-    private func abandonBufferedToChunked(streamID: UInt32, buf: BufferedReq) -> Bool {
+    private func abandonBufferedToChunked(streamID: UInt32, buffer: BufferedRequest) -> Bool {
         logger.warning("bridge \(host) stream \(streamID): request body over buffer cap; streaming remainder chunked")
-        guard let head = makeRequestHead(streamID: streamID, rewritten: buf.rewrittenHeaders, framing: .chunked, neverIndexed: buf.neverIndexed, resolvedUpstream: buf.resolvedUpstream, originalURL: buf.originalURL) else {
+        guard let head = makeRequestHead(
+            streamID: streamID,
+            rewritten: buffer.rewrittenHeaders,
+            framing: .chunked,
+            neverIndexed: buffer.neverIndexed,
+            resolvedUpstream: buffer.resolvedUpstream,
+            originalURL: buffer.originalURL
+        ) else {
             rstToClient(streamID, errorCode: Codec.ErrorCode.protocolError, abortUpstream: true)
             return false
         }
-        let url = HTTPHeader.firstValue(in: buf.rewrittenHeaders, named: ":path").map { "https://\(host)\($0)" }
+        let url = HTTPHeader.firstValue(in: buffer.rewrittenHeaders, named: ":path").map { "https://\(host)\($0)" }
         requestStreams[streamID] = .streaming(remaining: nil)
         delegate?.clientLegSendRequestHead(head, url: url, endStream: false)
-        if !buf.data.isEmpty { delegate?.clientLegSendRequestData(streamID: streamID, buf.data, endStream: false) }
+        if !buffer.data.isEmpty { delegate?.clientLegSendRequestData(streamID: streamID, buffer.data, endStream: false) }
         return false
     }
 
     private func creditClientUpload(streamID: UInt32, length: Int) {
         guard length > 0 else { return }
-        batchedStreamCredit[streamID, default: 0] += length
-        batchedConnCredit += length
+        unannouncedStreamCredit[streamID, default: 0] += length
+        unannouncedConnCredit += length
     }
 
-    func creditUploadDrained(_ clientStreamID: UInt32, _ n: Int) {
-        guard n > 0, streamDeferredUpload.contains(clientStreamID) else { return }
-        delegate?.clientLegWriteToClient(Codec.windowUpdate(streamID: clientStreamID, increment: n))
+    func creditUploadDrained(_ clientStreamID: UInt32, _ byteCount: Int) {
+        guard byteCount > 0, streamDeferredUpload.contains(clientStreamID) else { return }
+        unannouncedStreamCredit[clientStreamID, default: 0] += byteCount
+        announceStreamCreditIfDue(clientStreamID)
     }
 
     // MARK: Buffered request script application
 
     private func finishBufferedRequest(_ streamID: UInt32) -> Bool {
         guard case .buffering(let buffer)? = requestStreams[streamID] else { return false }
-        guard buffer.scripted else {
+        guard buffer.isScripted else {
             requestStreams.removeValue(forKey: streamID)
-            emitBufferedRequest(streamID: streamID, headers: buffer.rewrittenHeaders, body: buffer.data, neverIndexed: buffer.neverIndexed, resolvedUpstream: buffer.resolvedUpstream, originalURL: buffer.originalURL)
+            emitBufferedRequest(
+                streamID: streamID,
+                headers: buffer.rewrittenHeaders,
+                body: buffer.data,
+                neverIndexed: buffer.neverIndexed,
+                resolvedUpstream: buffer.resolvedUpstream,
+                originalURL: buffer.originalURL
+            )
             return false
         }
         return runRequestScripts(streamID)
@@ -765,7 +851,14 @@ actor MITMBridgeClientLeg: MITMResponseSink {
         let plaintext: Data
         if buffer.codec.requiresDecompression {
             guard let decoded = MITMBodyCodec.decompress(buffer.data, plan: buffer.codec, host: host) else {
-                emitBufferedRequest(streamID: streamID, headers: buffer.rewrittenHeaders, body: buffer.data, neverIndexed: buffer.neverIndexed, resolvedUpstream: buffer.resolvedUpstream, originalURL: buffer.originalURL)
+                emitBufferedRequest(
+                    streamID: streamID,
+                    headers: buffer.rewrittenHeaders,
+                    body: buffer.data,
+                    neverIndexed: buffer.neverIndexed,
+                    resolvedUpstream: buffer.resolvedUpstream,
+                    originalURL: buffer.originalURL
+                )
                 return false
             }
             plaintext = decoded
@@ -780,7 +873,7 @@ actor MITMBridgeClientLeg: MITMResponseSink {
             phase: .httpRequest,
             method: HTTPHeader.firstValue(in: scriptedHeaders, named: ":method"),
             url: url,
-            originalUrl: buffer.originalURL,
+            originalURL: buffer.originalURL,
             status: nil,
             headers: scriptedHeaders.filter { !$0.name.hasPrefix(":") },
             body: plaintext,
@@ -791,14 +884,21 @@ actor MITMBridgeClientLeg: MITMResponseSink {
             let outcome = await rewriter.applyScripts(message, phase: .httpRequest)
             guard let self else { return }
             self.sessionContext.enqueue {
-                self.assumeIsolated { me in
-                    guard me.phase != .torn else { return }
-                    guard me.streamMethods[streamID] != nil else { return }
+                self.assumeIsolated { leg in
+                    guard leg.phase != .torn else { return }
+                    guard leg.streamMethods[streamID] != nil else { return }
                     switch outcome {
                     case .message(let updated):
-                        me.emitBufferedRequest(streamID: streamID, headers: scriptedHeaders, body: updated.body, neverIndexed: buffer.neverIndexed, resolvedUpstream: buffer.resolvedUpstream, originalURL: buffer.originalURL)
+                        leg.emitBufferedRequest(
+                            streamID: streamID,
+                            headers: scriptedHeaders,
+                            body: updated.body,
+                            neverIndexed: buffer.neverIndexed,
+                            resolvedUpstream: buffer.resolvedUpstream,
+                            originalURL: buffer.originalURL
+                        )
                     case .synthesizedResponse(let response):
-                        me.answerSynth(streamID: streamID, response: response)
+                        leg.answerWithSynthesizedResponse(streamID: streamID, response: response)
                     }
                 }
             }
@@ -806,8 +906,22 @@ actor MITMBridgeClientLeg: MITMResponseSink {
         return false
     }
 
-    private func emitBufferedRequest(streamID: UInt32, headers: [(name: String, value: String)], body: Data, neverIndexed: Set<String>, resolvedUpstream: (host: String, port: UInt16?)?, originalURL: String?) {
-        guard let head = makeRequestHead(streamID: streamID, rewritten: headers, framing: .contentLength(body.count), neverIndexed: neverIndexed, resolvedUpstream: resolvedUpstream, originalURL: originalURL) else {
+    private func emitBufferedRequest(
+        streamID: UInt32,
+        headers: [(name: String, value: String)],
+        body: Data,
+        neverIndexed: Set<String>,
+        resolvedUpstream: (host: String, port: UInt16?)?,
+        originalURL: String?
+    ) {
+        guard let head = makeRequestHead(
+            streamID: streamID,
+            rewritten: headers,
+            framing: .contentLength(body.count),
+            neverIndexed: neverIndexed,
+            resolvedUpstream: resolvedUpstream,
+            originalURL: originalURL
+        ) else {
             rstToClient(streamID, errorCode: Codec.ErrorCode.protocolError, abortUpstream: true)
             return
         }
@@ -818,8 +932,8 @@ actor MITMBridgeClientLeg: MITMResponseSink {
 
     // MARK: Local (synth) responses
 
-    private func answerSynth(streamID: UInt32, response: MITMScriptEngine.SynthesizedResponse) {
-        requestStreams[streamID] = .synthAnswered // swallow further request DATA
+    private func answerWithSynthesizedResponse(streamID: UInt32, response: MITMScriptEngine.SynthesizedResponse) {
+        requestStreams[streamID] = .answeredWithSynthesizedResponse
         let sanitized = response.sanitizedHeaders(lowercaseNames: true) { name in
             logger.warning("[MITM][JS] bridge \(host): Anywhere.respond dropping invalid header: \(name)")
         }
@@ -908,11 +1022,10 @@ actor MITMBridgeClientLeg: MITMResponseSink {
 
     private func deliverResponseTrailersOnQueue(streamID: UInt32, _ trailers: [(name: String, value: String)]) {
         guard phase != .torn, isLiveResponseStream(streamID) else { return }
-        var paceState = paceStates[streamID] ?? makePaceState(streamID)
-        paceState.sawEnd = true
+        if paceStates[streamID] == nil { paceStates[streamID] = makePaceState(streamID) }
+        paceStates[streamID]?.sawEnd = true
         let normalized = MITMBridgeHeaders.responseHeadersToH2(trailers)
-        if !normalized.isEmpty { paceState.pendingTrailers = normalized }
-        paceStates[streamID] = paceState
+        if !normalized.isEmpty { paceStates[streamID]?.pendingTrailers = normalized }
         flushResponse(streamID)
     }
 
@@ -935,10 +1048,9 @@ actor MITMBridgeClientLeg: MITMResponseSink {
     // MARK: Client-bound body pacing
 
     private func appendClientBody(streamID: UInt32, data: Data, endStream: Bool) {
-        var paceState = paceStates[streamID] ?? makePaceState(streamID)
-        paceState.pending.append(data)
-        if endStream { paceState.sawEnd = true }
-        paceStates[streamID] = paceState
+        if paceStates[streamID] == nil { paceStates[streamID] = makePaceState(streamID) }
+        paceStates[streamID]?.pending.append(data)
+        if endStream { paceStates[streamID]?.sawEnd = true }
         flushResponse(streamID)
         if let backlog = paceStates[streamID]?.pending.count, backlog > Self.maxClientBufferedBytes {
             logger.warning("bridge \(host) stream \(streamID): client-bound backlog \(backlog) B over cap; resetting stream")
@@ -955,23 +1067,22 @@ actor MITMBridgeClientLeg: MITMResponseSink {
 
     @discardableResult
     private func flushResponse(_ streamID: UInt32, cap: Int = .max) -> Bool {
-        guard var paceState = paceStates[streamID] else { return false }
+        guard var paceState = paceStates.removeValue(forKey: streamID) else { return false }
         var progressed = false
         let available = flowController.takeConnection(
             upTo: min(paceState.streamWindow, paceState.pending.count, cap)
         )
         if available > 0 {
-            let chunk = paceState.pending.prefix(available)
             let bodyDrained = paceState.sawEnd && available == paceState.pending.count
             let endOnData = bodyDrained && paceState.pendingTrailers == nil
+            let chunk = paceState.pending.popFirst(available)
             delegate?.clientLegWriteToClient(Codec.frameData(streamID: streamID, payload: chunk, endStream: endOnData))
             paceState.streamWindow -= available
-            paceState.pending.removeFirst(available)
-            if endOnData { paceState.finished = true }
+            if endOnData { paceState.isFinished = true }
             delegate?.clientLegResponseDrained(streamID: streamID, byteCount: available)
             progressed = true
         }
-        if paceState.sawEnd, paceState.pending.isEmpty, !paceState.finished {
+        if paceState.sawEnd, paceState.pending.isEmpty, !paceState.isFinished {
             if let trailers = paceState.pendingTrailers {
                 let block = HPACKEncoder.encodeHeaderBlock(trailers)
                 delegate?.clientLegWriteToClient(Codec.emitHeaders(streamID: streamID, block: block, endStream: true))
@@ -979,21 +1090,21 @@ actor MITMBridgeClientLeg: MITMResponseSink {
             } else {
                 delegate?.clientLegWriteToClient(Codec.frameData(streamID: streamID, payload: Data(), endStream: true))
             }
-            paceState.finished = true
+            paceState.isFinished = true
             progressed = true
         }
-        paceStates[streamID] = paceState
-        if paceState.finished {
-            paceStates.removeValue(forKey: streamID)
+        if paceState.isFinished {
             finishClientStream(streamID, notifyUpstream: true)
+        } else {
+            paceStates[streamID] = paceState
         }
         return progressed
     }
 
     private func distributeClientConnectionWindow() {
-        let ready = paceStates.keys.filter { (paceStates[$0]?.pending.count ?? 0) > 0 }.sorted()
-        var remaining = ready.count
-        for id in ready {
+        let readyStreamIDs = paceStates.keys.filter { (paceStates[$0]?.pending.count ?? 0) > 0 }.sorted()
+        var remaining = readyStreamIDs.count
+        for id in readyStreamIDs {
             guard flowController.connectionWindow > 0 else { break }
             let share = max(Codec.maxFramePayloadSize, flowController.connectionWindow / max(1, remaining))
             flushResponse(id, cap: share)
@@ -1005,10 +1116,11 @@ actor MITMBridgeClientLeg: MITMResponseSink {
         streamMethods.removeValue(forKey: streamID)
         paceStates.removeValue(forKey: streamID)
         pendingStreamCredit.removeValue(forKey: streamID)
-        if uploadDrainCoupled, isRequestUploading(streamID) {
+        if isUploadDrainCoupled, isRequestUploading(streamID) {
             return
         }
         requestStreams.removeValue(forKey: streamID)
+        unannouncedStreamCredit.removeValue(forKey: streamID)
         streamDeferredUpload.remove(streamID)
         if notifyUpstream { delegate?.clientLegResponseComplete(streamID: streamID) }
     }
@@ -1031,6 +1143,7 @@ actor MITMBridgeClientLeg: MITMResponseSink {
         streamMethods.removeValue(forKey: streamID)
         paceStates.removeValue(forKey: streamID)
         pendingStreamCredit.removeValue(forKey: streamID)
+        unannouncedStreamCredit.removeValue(forKey: streamID)
         requestStreams.removeValue(forKey: streamID)
         streamDeferredUpload.remove(streamID)
         if abortUpstream { delegate?.clientLegAbortRequest(streamID: streamID) }

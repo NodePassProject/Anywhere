@@ -8,36 +8,28 @@
 import Foundation
 import Synchronization
 
-/// Backs `Anywhere.store`; namespaced per rule set, stale scopes reclaimed by purgeExcept on reload.
 nonisolated final class MITMScriptStore: Sendable {
-
     static let shared = MITMScriptStore()
 
-    /// Sized to leave the NE's ~50 MiB budget intact even with many active rule sets.
     static let maxBytesPerScope: Int = 1 * 1024 * 1024
-
-    /// Process-wide ceiling so many rule sets can't pin tens of MiB between reloads.
     static let maxTotalBytes: Int = 16 * 1024 * 1024
 
     private struct State {
         var buckets: [UUID: [String: Data]] = [:]
-        /// Incremental sum of all scopes' bytes for O(1) aggregate-cap checks in `set`.
         var totalBytes: Int = 0
-        /// Per-scope byte totals (key.utf8.count + value.count per entry), kept incrementally.
         var bucketSizes: [UUID: Int] = [:]
     }
     private let state = Mutex(State())
 
     private init() {}
 
-    func get(scope: UUID, key: String, onDisk: Bool = false) -> Data? {
-        if onDisk { return MITMScriptDiskStore.shared.get(scope: scope, key: key) }
+    func value(forKey key: String, scope: UUID, onDisk: Bool = false) -> Data? {
+        if onDisk { return MITMScriptDiskStore.shared.value(forKey: key, scope: scope) }
         return state.withLock { $0.buckets[scope]?[key] }
     }
 
-    /// Upserts `key` within `scope`; throws without modifying state if the write would exceed either cap.
-    func set(scope: UUID, key: String, value: Data, onDisk: Bool = false) throws(AnywhereError) {
-        if onDisk { return try MITMScriptDiskStore.shared.set(scope: scope, key: key, value: value) }
+    func setValue(_ value: Data, forKey key: String, scope: UUID, onDisk: Bool = false) throws(AnywhereError) {
+        if onDisk { return try MITMScriptDiskStore.shared.setValue(value, forKey: key, scope: scope) }
         try state.withLock { (state) throws(AnywhereError) in
             // Mutate via subscript to stay in-place; aliasing COW storage copies the whole bucket per write.
             let keyBytes = key.utf8.count
@@ -58,8 +50,8 @@ nonisolated final class MITMScriptStore: Sendable {
         }
     }
 
-    func delete(scope: UUID, key: String, onDisk: Bool = false) {
-        if onDisk { return MITMScriptDiskStore.shared.delete(scope: scope, key: key) }
+    func removeValue(forKey key: String, scope: UUID, onDisk: Bool = false) {
+        if onDisk { return MITMScriptDiskStore.shared.removeValue(forKey: key, scope: scope) }
         state.withLock { state in
             // Mutate via subscript to stay in-place (no COW copy).
             guard let existing = state.buckets[scope]?[key] else { return }

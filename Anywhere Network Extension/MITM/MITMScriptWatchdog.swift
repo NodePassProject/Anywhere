@@ -49,6 +49,7 @@ nonisolated enum MITMScriptWatchdog {
         }
         guard let label else { return }
         let shown = label.count > 200 ? String(label.prefix(200)) + "…" : label
+        MITMScriptDiskStore.shared.flush()
         fatalError("A JavaScript script span ran \(hardCapSeconds)s without returning. Offending script: \(shown)")
     }
 }
