@@ -15,12 +15,28 @@ nonisolated enum NowhereMorph {
     static let tcpPreludeSize = 64
     static let byteLimit: UInt64 = (1 << 38) - 64
     private static let handshakeDeadline: Duration = .seconds(30)
+    private static let maximumPreludeCounter: UInt64 = (1 << 48) - 1
+    private static let tcpClientToServerLabel = "tcp c2s"
+    private static let tcpServerToClientLabel = "tcp s2c"
+    private static let udpClientToServerLabel = "udp c2s"
+    private static let udpServerToClientLabel = "udp s2c"
+    private static let tcpPreludeAuthLabel = "tcp prelude auth"
+    private static let tcpPreludeMaskLabel = "tcp prelude mask"
+
+    private struct PreludeState {
+        var identity: Result<Data, Error>?
+        var counter: UInt64 = 0
+    }
+
+    private static let preludeState = Mutex(PreludeState())
 
     struct Keys: Hashable, Sendable {
         let tcpClientToServer: Data
         let tcpServerToClient: Data
         let udpClientToServer: Data
         let udpServerToClient: Data
+        let tcpPreludeAuth: Data
+        let tcpPreludeMask: Data
     }
 
     static func deriveKeys(sharedKey: String) -> Keys {
@@ -34,11 +50,59 @@ nonisolated enum NowhereMorph {
             return Data(HMAC<SHA256>.authenticationCode(for: input, using: SymmetricKey(data: root)))
         }
         return Keys(
-            tcpClientToServer: derive("tcp c2s"),
-            tcpServerToClient: derive("tcp s2c"),
-            udpClientToServer: derive("udp c2s"),
-            udpServerToClient: derive("udp s2c")
+            tcpClientToServer: derive(tcpClientToServerLabel),
+            tcpServerToClient: derive(tcpServerToClientLabel),
+            udpClientToServer: derive(udpClientToServerLabel),
+            udpServerToClient: derive(udpServerToClientLabel),
+            tcpPreludeAuth: derive(tcpPreludeAuthLabel),
+            tcpPreludeMask: derive(tcpPreludeMaskLabel)
         )
+    }
+
+    static func authenticatePrelude(_ prelude: inout Data, nonce: Data, keys: Keys) throws {
+        let (identity, counter) = try preludeState.withLock { state in
+            if state.identity == nil {
+                state.identity = Result {
+                    try NowhereMorphNonceGenerator.secureRandomBytes(count: 8)
+                }
+            }
+            let identity = try state.identity!.get()
+            guard state.counter < maximumPreludeCounter else {
+                throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Morph prelude counter exhausted"))
+            }
+            state.counter += 1
+            return (identity, state.counter)
+        }
+        var input = nonce
+        input.append(contentsOf: prelude.prefix(32))
+        var highBits = [UInt8](repeating: 0, count: 4)
+        for index in 0..<32 {
+            highBits[index / 8] |= (prelude[prelude.startIndex + 32 + index] >> 7) << (7 - index % 8)
+        }
+        input.append(contentsOf: highBits)
+        input.append(identity)
+        for byte in (0..<6).reversed() {
+            input.append(UInt8(truncatingIfNeeded: counter >> (byte * 8)))
+        }
+        let tag = HMAC<SHA256>.authenticationCode(for: input, using: SymmetricKey(data: keys.tcpPreludeAuth))
+        let mask = HMAC<SHA256>.authenticationCode(for: input.prefix(48), using: SymmetricKey(data: keys.tcpPreludeMask))
+        var payload = Data(input.suffix(14))
+        payload.append(contentsOf: tag.prefix(14))
+        let masked = zip(payload, mask).map { $0 ^ $1 }
+        prelude.withUnsafeMutableBytes { (bytes: UnsafeMutableRawBufferPointer) in
+            var accumulator: UInt16 = 0
+            var bits = 0
+            var index = 32
+            for byte in masked {
+                accumulator = (accumulator << 8) | UInt16(byte)
+                bits += 8
+                while bits >= 7 {
+                    bits -= 7
+                    bytes[index] = (bytes[index] & 0x80) | UInt8((accumulator >> bits) & 0x7f)
+                    index += 1
+                }
+            }
+        }
     }
 
     static func connectTLS(
@@ -333,6 +397,8 @@ nonisolated final class NowhereMorphTCPTransport: ByteTransport, Sendable {
                 count: NowhereMorph.nonceSize
             )
             let transport = try NowhereMorphTCPTransport(inner: inner, keys: keys, nonce: nonce)
+            try Task.checkCancellation()
+            try NowhereMorph.authenticatePrelude(&prelude, nonce: nonce, keys: keys)
             try await inner.send(prelude)
             try await inner.send(nonce)
             return transport
