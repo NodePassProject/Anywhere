@@ -10,6 +10,5 @@
 
 #include "blake2.h"
 #include "blake3.h"
-#include "yaml.h"
 
 #endif /* BridgingHeader_h */

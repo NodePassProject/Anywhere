@@ -11,6 +11,8 @@
 		3853793F30753251000675B7 /* AnywhereQUIC in Frameworks */ = {isa = PBXBuildFile; productRef = 3853793E30753251000675B7 /* AnywhereQUIC */; };
 		3853794130753258000675B7 /* AnywhereQUIC in Frameworks */ = {isa = PBXBuildFile; productRef = 3853794030753258000675B7 /* AnywhereQUIC */; };
 		385379433075325D000675B7 /* AnywhereQUIC in Frameworks */ = {isa = PBXBuildFile; productRef = 385379423075325D000675B7 /* AnywhereQUIC */; };
+		38B2C4A5307A1F0100D4E6F1 /* YAML in Frameworks */ = {isa = PBXBuildFile; productRef = 38B2C4A3307A1F0100D4E6F1 /* YAML */; };
+		38B2C4A6307A1F0100D4E6F1 /* YAML in Frameworks */ = {isa = PBXBuildFile; productRef = 38B2C4A4307A1F0100D4E6F1 /* YAML */; };
 		7870E4302FF89000006C0F14 /* Anywhere Watch App.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = 7870E41A2FF88ED5006C0F14 /* Anywhere Watch App.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		CB1C107A2F23B82F00B74CD8 /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CB1C10792F23B82F00B74CD8 /* NetworkExtension.framework */; };
 		CB1C10822F23B82F00B74CD8 /* Anywhere Network Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = CB1C10772F23B82F00B74CD8 /* Anywhere Network Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -510,6 +512,7 @@
 			files = (
 				CBFA0DE000000000000000C1 /* AnywhereRules in Frameworks */,
 				3853794130753258000675B7 /* AnywhereQUIC in Frameworks */,
+				38B2C4A5307A1F0100D4E6F1 /* YAML in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -529,6 +532,7 @@
 			files = (
 				CBFA0DE000000000000000C2 /* AnywhereRules in Frameworks */,
 				385379433075325D000675B7 /* AnywhereQUIC in Frameworks */,
+				38B2C4A6307A1F0100D4E6F1 /* YAML in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -655,6 +659,7 @@
 			packageProductDependencies = (
 				CBFA0DE000000000000000B1 /* AnywhereRules */,
 				3853794030753258000675B7 /* AnywhereQUIC */,
+				38B2C4A3307A1F0100D4E6F1 /* YAML */,
 			);
 			productName = Anywhere;
 			productReference = CB1C10652F23B81500B74CD8 /* Anywhere.app */;
@@ -706,6 +711,7 @@
 			packageProductDependencies = (
 				CBFA0DE000000000000000B2 /* AnywhereRules */,
 				385379423075325D000675B7 /* AnywhereQUIC */,
+				38B2C4A4307A1F0100D4E6F1 /* YAML */,
 			);
 			productName = Anywhere;
 			productReference = CB2B549C2F6C3E2700F24AC2 /* Anywhere TV.app */;
@@ -784,6 +790,7 @@
 				CBFA0DE000000000000000A1 /* XCRemoteSwiftPackageReference "AnywhereRules" */,
 				38B2C4A0307A1F0100D4E6F1 /* XCLocalSwiftPackageReference "Packages/AnywhereIP" */,
 				38B2C4A1307A1F0100D4E6F1 /* XCLocalSwiftPackageReference "Packages/AnywhereQUIC" */,
+				38B2C4A2307A1F0100D4E6F1 /* XCLocalSwiftPackageReference "Packages/YAML" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = CB1C10662F23B81500B74CD8 /* Products */;
@@ -998,7 +1005,6 @@
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
-					"HAVE_CONFIG_H=1",
 					"BLAKE3_NO_SSE2=1",
 					"BLAKE3_NO_SSE41=1",
 					"BLAKE3_NO_AVX2=1",
@@ -1010,7 +1016,6 @@
 					"$(inherited)",
 					"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2",
 					"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3",
-					"$(SRCROOT)/Shared/Utilities/YAML/libyaml/include",
 				);
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 1.0;
@@ -1040,7 +1045,6 @@
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
-					"HAVE_CONFIG_H=1",
 					"BLAKE3_NO_SSE2=1",
 					"BLAKE3_NO_SSE41=1",
 					"BLAKE3_NO_AVX2=1",
@@ -1052,7 +1056,6 @@
 					"$(inherited)",
 					"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2",
 					"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3",
-					"$(SRCROOT)/Shared/Utilities/YAML/libyaml/include",
 				);
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 1.0;
@@ -1215,7 +1218,6 @@
 				ENABLE_PREVIEWS = YES;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
-					"HAVE_CONFIG_H=1",
 					"BLAKE3_NO_SSE2=1",
 					"BLAKE3_NO_SSE41=1",
 					"BLAKE3_NO_AVX2=1",
@@ -1226,7 +1228,6 @@
 				HEADER_SEARCH_PATHS = (
 					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2\"",
 					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3\"",
-					"\"$(SRCROOT)/Shared/Utilities/YAML/libyaml/include\"",
 				);
 				INFOPLIST_FILE = Anywhere/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
@@ -1271,7 +1272,6 @@
 				ENABLE_PREVIEWS = YES;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
-					"HAVE_CONFIG_H=1",
 					"BLAKE3_NO_SSE2=1",
 					"BLAKE3_NO_SSE41=1",
 					"BLAKE3_NO_AVX2=1",
@@ -1282,7 +1282,6 @@
 				HEADER_SEARCH_PATHS = (
 					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2\"",
 					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3\"",
-					"\"$(SRCROOT)/Shared/Utilities/YAML/libyaml/include\"",
 				);
 				INFOPLIST_FILE = Anywhere/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
@@ -1324,7 +1323,6 @@
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
-					"HAVE_CONFIG_H=1",
 					"BLAKE3_NO_SSE2=1",
 					"BLAKE3_NO_SSE41=1",
 					"BLAKE3_NO_AVX2=1",
@@ -1373,7 +1371,6 @@
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
-					"HAVE_CONFIG_H=1",
 					"BLAKE3_NO_SSE2=1",
 					"BLAKE3_NO_SSE41=1",
 					"BLAKE3_NO_AVX2=1",
@@ -1423,7 +1420,6 @@
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
-					"HAVE_CONFIG_H=1",
 					"BLAKE3_NO_SSE2=1",
 					"BLAKE3_NO_SSE41=1",
 					"BLAKE3_NO_AVX2=1",
@@ -1434,7 +1430,6 @@
 				HEADER_SEARCH_PATHS = (
 					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2\"",
 					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3\"",
-					"\"$(SRCROOT)/Shared/Utilities/YAML/libyaml/include\"",
 				);
 				INFOPLIST_FILE = "Anywhere TV/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
@@ -1473,7 +1468,6 @@
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
-					"HAVE_CONFIG_H=1",
 					"BLAKE3_NO_SSE2=1",
 					"BLAKE3_NO_SSE41=1",
 					"BLAKE3_NO_AVX2=1",
@@ -1484,7 +1478,6 @@
 				HEADER_SEARCH_PATHS = (
 					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2\"",
 					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3\"",
-					"\"$(SRCROOT)/Shared/Utilities/YAML/libyaml/include\"",
 				);
 				INFOPLIST_FILE = "Anywhere TV/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
@@ -1653,6 +1646,10 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = Packages/AnywhereQUIC;
 		};
+		38B2C4A2307A1F0100D4E6F1 /* XCLocalSwiftPackageReference "Packages/YAML" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/YAML;
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCRemoteSwiftPackageReference section */
@@ -1682,6 +1679,14 @@
 		385379423075325D000675B7 /* AnywhereQUIC */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = AnywhereQUIC;
+		};
+		38B2C4A3307A1F0100D4E6F1 /* YAML */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = YAML;
+		};
+		38B2C4A4307A1F0100D4E6F1 /* YAML */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = YAML;
 		};
 		CBFA0DE000000000000000B1 /* AnywhereRules */ = {
 			isa = XCSwiftPackageProductDependency;
