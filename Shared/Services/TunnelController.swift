@@ -119,8 +119,13 @@ final class TunnelController {
             return
         }
 
-        let resolvedIP = await DNSResolver.proxies.resolveHost(configuration.serverAddress, forceFresh: refreshingIP)
-        let resolved = configuration.withResolvedIP(resolvedIP ?? configuration.resolvedIP)
+        let resolved: ProxyConfiguration
+        if configuration.chain?.isEmpty == false {
+            resolved = configuration
+        } else {
+            let resolvedIP = await DNSResolver.proxies.resolveHost(configuration.serverAddress, forceFresh: refreshingIP)
+            resolved = configuration.withResolvedIP(resolvedIP ?? configuration.resolvedIP)
+        }
         do {
             try ActiveConfiguration.store(resolved)
         } catch {

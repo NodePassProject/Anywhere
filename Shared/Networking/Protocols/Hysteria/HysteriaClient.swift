@@ -14,7 +14,7 @@ nonisolated final class HysteriaClient: Sendable {
         let port: UInt16
         let sni: String
         let password: String
-        let chainSignature: String
+        let chain: [ProxyConfiguration]
     }
 
     private struct RegistryState {
@@ -30,7 +30,7 @@ nonisolated final class HysteriaClient: Sendable {
             port: configuration.proxyPort,
             sni: configuration.sni,
             password: configuration.password,
-            chainSignature: ""
+            chain: []
         )
         return registry.withLock { state in
             if let existing = state.entries[key] { return existing }
@@ -59,7 +59,7 @@ nonisolated final class HysteriaClient: Sendable {
 
     static func acquireChained(
         configuration: HysteriaRuntimeConfiguration,
-        chainSignature: String,
+        chain: [ProxyConfiguration],
         builder: @escaping @Sendable () async throws -> (QUICDatagramTransport, [ProxyClient])
     ) async throws -> HysteriaClient {
         let key = Key(
@@ -67,7 +67,7 @@ nonisolated final class HysteriaClient: Sendable {
             port: configuration.proxyPort,
             sni: configuration.sni,
             password: configuration.password,
-            chainSignature: chainSignature
+            chain: chain
         )
 
         enum Decision { case existing(HysteriaClient); case join(Task<HysteriaClient, Error>) }
@@ -200,7 +200,11 @@ nonisolated final class HysteriaClient: Sendable {
                 removeFromRegistry()
                 return .transportSpent(abandoned: abandoned)
             case .idle, .live:
-                let newSession = HysteriaSession(configuration: configuration, transport: transport)
+                let newSession = HysteriaSession(
+                    configuration: configuration,
+                    transport: transport,
+                    closesWhenDrained: poolKey == nil
+                )
                 state.transition(to: .live(newSession))
                 return .fresh(newSession)
             }

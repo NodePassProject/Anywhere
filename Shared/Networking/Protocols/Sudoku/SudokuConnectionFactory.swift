@@ -393,31 +393,25 @@ nonisolated final class SudokuConnectionFactory: Sendable {
         useTLS: Bool,
         serverName: String?
     ) async throws -> ProxyConnection {
-        if let tunnel = stateLock.withLock({ (state: inout State) -> ProxyConnection? in
+        let tunnel: ProxyConnection?
+        if let initialTunnel = stateLock.withLock({ (state: inout State) -> ProxyConnection? in
             let current = state.initialTunnel
             state.initialTunnel = nil
             return current
         }) {
-            return tunnel
-        }
-
-        if !dialChain.isEmpty {
-            return try await buildChainTunnel(chain: dialChain, targetHost: host, targetPort: port)
+            tunnel = initialTunnel
+        } else if !dialChain.isEmpty {
+            tunnel = try await buildChainTunnel(chain: dialChain, targetHost: host, targetPort: port)
+        } else {
+            tunnel = nil
         }
 
         if useTLS {
-            let tls = TLSClient(configuration: TLSConfiguration(serverName: serverName ?? host, alpn: ["http/1.1"]))
-            guard retainTLSClient(tls) else {
-                throw AnywhereError.proxy(.sudoku, .connectionClosed(detail: nil))
-            }
-            do {
-                let connection = try await tls.connect(host: directDialHost, port: port)
-                releaseTLSClient(tls)
-                return TLSProxyConnection(tlsConnection: connection)
-            } catch {
-                releaseTLSClient(tls)
-                throw error
-            }
+            return try await openTLSConnection(serverName: serverName ?? host, port: port, overTunnel: tunnel)
+        }
+
+        if let tunnel {
+            return tunnel
         }
 
         let transport = TCPTransport(host: directDialHost, port: port, resolution: .proxies)
@@ -432,6 +426,32 @@ nonisolated final class SudokuConnectionFactory: Sendable {
         }
         releaseTransport(transport)
         return DirectProxyConnection(transport: transport)
+    }
+
+    private func openTLSConnection(
+        serverName: String,
+        port: UInt16,
+        overTunnel tunnel: ProxyConnection?
+    ) async throws -> ProxyConnection {
+        let tls = TLSClient(configuration: TLSConfiguration(serverName: serverName, alpn: ["http/1.1"]))
+        guard retainTLSClient(tls) else {
+            tunnel?.cancel()
+            throw AnywhereError.proxy(.sudoku, .connectionClosed(detail: nil))
+        }
+        do {
+            let connection: TLSRecordConnection
+            if let tunnel {
+                connection = try await tls.connect(overTunnel: tunnel)
+            } else {
+                connection = try await tls.connect(host: directDialHost, port: port)
+            }
+            releaseTLSClient(tls)
+            return TLSProxyConnection(tlsConnection: connection)
+        } catch {
+            releaseTLSClient(tls)
+            tunnel?.cancel()
+            throw error
+        }
     }
 
     private func buildChainTunnel(

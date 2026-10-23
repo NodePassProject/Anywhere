@@ -62,8 +62,6 @@ extension ProxyClient {
         network: ProxyNetwork,
         destination: String
     ) async throws -> ProxyConnection {
-        let chainSignature = chain.map { $0.id.uuidString }.joined(separator: ":")
-        
         let cascadeNetworks: [ProxyNetwork]
         switch Self.computeChainHopNetworks(
             chain: chain,
@@ -82,7 +80,7 @@ extension ProxyClient {
 
         let client = try await HysteriaClient.acquireChained(
             configuration: hysteriaRuntimeConfiguration,
-            chainSignature: chainSignature,
+            chain: chain,
             builder: {
                 let holders = Mutex<[ProxyClient]>([])
                 do {

@@ -22,6 +22,7 @@ nonisolated final class RFCMultiplexerRegistry: Sendable {
         let insecureSkipVerify: Bool
         let echEnabled: Bool
         let echConfig: String
+        let chain: [ProxyConfiguration]
     }
 
     private struct State {
@@ -50,7 +51,8 @@ nonisolated final class RFCMultiplexerRegistry: Sendable {
             fingerprint: tls.fingerprint.rawValue,
             insecureSkipVerify: tls.insecureSkipVerify,
             echEnabled: tls.echEnabled,
-            echConfig: tls.echConfig ?? ""
+            echConfig: tls.echConfig ?? "",
+            chain: configuration.chain ?? []
         )
         
         let pool = state.withLock { state -> RFCMultiplexerPool? in

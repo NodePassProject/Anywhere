@@ -148,7 +148,7 @@ nonisolated final class ProxyClient: Sendable {
             return try await connectWithOutbound(request)
         }
         
-        if configuration.isQUICTransport {
+        if configuration.dialsOwnChain {
             return try await connectWithOutbound(request)
         }
 
@@ -258,6 +258,35 @@ nonisolated final class ProxyClient: Sendable {
             useResolvedAddressForDirectDial: useResolvedAddressForDirectDial,
             track: track
         )
+    }
+
+    var undialedChain: [ProxyConfiguration] {
+        guard tunnel == nil else { return [] }
+        return configuration.chain ?? []
+    }
+
+    static func withChainTunnel<T>(
+        through chain: [ProxyConfiguration],
+        to destination: (host: String, port: UInt16),
+        delivering network: ProxyNetwork = .tcp,
+        useResolvedAddressForDirectDial: Bool,
+        _ body: (ProxyConnection?) async throws -> T
+    ) async throws -> T {
+        guard !chain.isEmpty else { return try await body(nil) }
+        let hopNetworks = try computeChainHopNetworks(chain: chain, lastDeliver: network).get()
+        let tunnel = try await buildDetachedChainTunnel(
+            chain: chain,
+            hopNetworks: hopNetworks,
+            finalDestination: destination,
+            useResolvedAddressForDirectDial: useResolvedAddressForDirectDial,
+            track: { _ in }
+        )
+        do {
+            return try await body(tunnel)
+        } catch {
+            tunnel.cancel()
+            throw error
+        }
     }
 
     private static func dialChain(

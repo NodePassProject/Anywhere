@@ -92,6 +92,16 @@ extension ProxyClient {
     }
     
     private func dialRFC(securityLayer: GenericSecurityLayer) async throws -> RFCDial {
+        try await Self.withChainTunnel(
+            through: undialedChain,
+            to: (configuration.serverAddress, configuration.serverPort),
+            useResolvedAddressForDirectDial: useResolvedAddressForDirectDial
+        ) { chainTunnel in
+            try await dialRFC(securityLayer: securityLayer, tunnel: chainTunnel ?? self.tunnel)
+        }
+    }
+
+    private func dialRFC(securityLayer: GenericSecurityLayer, tunnel: ProxyConnection?) async throws -> RFCDial {
         switch securityLayer {
         case .tls(let tlsConfig):
             let negotiating = TLSConfiguration(
@@ -106,7 +116,7 @@ extension ProxyClient {
             )
             let tlsClient = TLSClient(configuration: negotiating)
             let record: TLSRecordConnection
-            if let tunnel = self.tunnel {
+            if let tunnel {
                 record = try await tlsClient.connect(overTunnel: tunnel)
             } else {
                 record = try await tlsClient.connect(host: directDialHost, port: configuration.serverPort)
@@ -120,7 +130,7 @@ extension ProxyClient {
 
         case .none:
             let transport: any ByteTransport
-            if let tunnel = self.tunnel {
+            if let tunnel {
                 transport = TunneledTransport(tunnel: tunnel)
             } else {
                 let tcp = TCPTransport(

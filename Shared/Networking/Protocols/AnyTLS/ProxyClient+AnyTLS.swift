@@ -17,18 +17,27 @@ extension ProxyClient {
         }
 
         let directHost = directDialHost
+        let serverHost = configuration.serverAddress
         let directPort = configuration.serverPort
         let tunnel = self.tunnel
+        let chain = undialedChain
+        let useResolvedAddress = useResolvedAddressForDirectDial
 
         let dialOut: AnyTLSMultiplexerPool.DialOut = {
-            let tlsClient = TLSClient(configuration: tlsConfig)
-            let tlsConnection: TLSRecordConnection
-            if let tunnel {
-                tlsConnection = try await tlsClient.connect(overTunnel: tunnel)
-            } else {
-                tlsConnection = try await tlsClient.connect(host: directHost, port: directPort)
+            try await ProxyClient.withChainTunnel(
+                through: chain,
+                to: (serverHost, directPort),
+                useResolvedAddressForDirectDial: useResolvedAddress
+            ) { chainTunnel in
+                let tlsClient = TLSClient(configuration: tlsConfig)
+                let tlsConnection: TLSRecordConnection
+                if let tunnel = chainTunnel ?? tunnel {
+                    tlsConnection = try await tlsClient.connect(overTunnel: tunnel)
+                } else {
+                    tlsConnection = try await tlsClient.connect(host: directHost, port: directPort)
+                }
+                return TLSProxyConnection(tlsConnection: tlsConnection)
             }
-            return TLSProxyConnection(tlsConnection: tlsConnection)
         }
         
         let stream: AnyTLSStream

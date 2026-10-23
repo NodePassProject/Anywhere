@@ -49,36 +49,22 @@ nonisolated enum LatencyTester {
     }
 
     // MARK: - Private
-    
+
     private static func resolvedConfiguration(_ configuration: ProxyConfiguration) async -> ProxyConfiguration {
-        var resolvedChain: [ProxyConfiguration]?
-        if let chain = configuration.chain {
-            var hops: [ProxyConfiguration] = []
-            hops.reserveCapacity(chain.count)
-            for hop in chain {
-                hops.append(await resolvedConfiguration(hop))
-            }
-            resolvedChain = hops
+        guard let chain = configuration.chain, let entry = chain.first else {
+            return configuration.withResolvedIP(
+                await DNSResolver.proxies.resolveHost(configuration.serverAddress, forceFresh: true)
+            )
         }
-        return ProxyConfiguration(
-            id: configuration.id,
-            name: configuration.name,
-            serverAddress: configuration.serverAddress,
-            serverPort: configuration.serverPort,
-            resolvedIP: await DNSResolver.proxies.resolveHost(configuration.serverAddress, forceFresh: true),
-            subscriptionId: configuration.subscriptionId,
-            outbound: configuration.outbound,
-            chain: resolvedChain
+        let resolvedEntry = entry.withResolvedIP(
+            await DNSResolver.proxies.resolveHost(entry.serverAddress, forceFresh: true)
         )
+        return configuration.withChain([resolvedEntry] + chain.dropFirst())
     }
 
     private static func performTest(_ configuration: ProxyConfiguration) async throws -> Int {
-        _ = await DNSResolver.proxies.resolveAll(configuration.serverAddress)
-        if let chain = configuration.chain {
-            for proxy in chain {
-                _ = await DNSResolver.proxies.resolveAll(proxy.serverAddress)
-            }
-        }
+        let entry = configuration.chain?.first ?? configuration
+        _ = await DNSResolver.proxies.resolveAll(entry.serverAddress)
 
         let client = ProxyClient(configuration: configuration, useResolvedAddressForDirectDial: true)
 

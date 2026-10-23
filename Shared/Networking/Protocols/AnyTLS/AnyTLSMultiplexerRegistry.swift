@@ -17,6 +17,7 @@ nonisolated final class AnyTLSMultiplexerRegistry: Sendable {
         let host: String
         let port: UInt16
         let password: String
+        let chain: [ProxyConfiguration]
     }
 
     private struct State {
@@ -36,7 +37,12 @@ nonisolated final class AnyTLSMultiplexerRegistry: Sendable {
         dialOut: @escaping AnyTLSMultiplexerPool.DialOut
     ) -> AnyTLSMultiplexerPool? {
         guard let anytls = configuration.anytls else { return nil }
-        let key = Key(host: configuration.serverAddress, port: configuration.serverPort, password: anytls.password)
+        let key = Key(
+            host: configuration.serverAddress,
+            port: configuration.serverPort,
+            password: anytls.password,
+            chain: configuration.chain ?? []
+        )
         let pool = state.withLock { state -> AnyTLSMultiplexerPool? in
             if let existing = state.pools[key] {
                 return existing

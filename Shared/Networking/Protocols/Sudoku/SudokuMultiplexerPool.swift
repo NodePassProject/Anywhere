@@ -20,6 +20,7 @@ nonisolated final class SudokuMultiplexerRegistry: Sendable {
         let serverPort: UInt16
         let directDialHost: String
         let outbound: Outbound
+        let chain: [ProxyConfiguration]
     }
 
     private struct State {
@@ -42,7 +43,8 @@ nonisolated final class SudokuMultiplexerRegistry: Sendable {
             serverAddress: configuration.serverAddress,
             serverPort: configuration.serverPort,
             directDialHost: directDialHost,
-            outbound: configuration.outbound
+            outbound: configuration.outbound,
+            chain: configuration.chain ?? []
         )
         let pool = state.withLock { state -> SudokuMultiplexerPool? in
             if let existing = state.pools[key] {

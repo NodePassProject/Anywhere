@@ -30,6 +30,7 @@ nonisolated final class HysteriaSession: Sendable {
 
     private let quic: QUICConnection
     private let configuration: HysteriaRuntimeConfiguration
+    private let closesWhenDrained: Bool
 
     private struct State: PhaseHolding {
         var phase: Phase = .idle
@@ -46,6 +47,7 @@ nonisolated final class HysteriaSession: Sendable {
 
         var idleClose: DeadlineToken?
         var idleGeneration: UInt64 = 0
+        var carriedConnection = false
         var authDeadline: DeadlineToken?
 
         var udpSupported = false
@@ -85,8 +87,13 @@ nonisolated final class HysteriaSession: Sendable {
 
     // MARK: - Init
 
-    init(configuration: HysteriaRuntimeConfiguration, transport: QUICDatagramTransport? = nil) {
+    init(
+        configuration: HysteriaRuntimeConfiguration,
+        transport: QUICDatagramTransport? = nil,
+        closesWhenDrained: Bool = false
+    ) {
         self.configuration = configuration
+        self.closesWhenDrained = closesWhenDrained
         let obfuscator: QUICPacketObfuscator?
         switch configuration.obfuscation {
         case .salamander(let password):
@@ -460,28 +467,31 @@ nonisolated final class HysteriaSession: Sendable {
     }
 
     private func updateIdleCloseTimer() {
-        let stale: DeadlineToken? = state.withLock { session in
+        let (stale, closeNow): (DeadlineToken?, Bool) = state.withLock { session in
             guard session.phase == .ready else {
                 let stale = session.idleClose
                 session.idleClose = nil
-                return stale
+                return (stale, false)
             }
             let idle = session.tcpStreams.isEmpty && session.udpSessions.isEmpty
             if idle {
-                guard session.idleClose == nil else { return nil }
+                if closesWhenDrained, session.carriedConnection { return (nil, true) }
+                guard session.idleClose == nil else { return (nil, false) }
                 session.idleGeneration &+= 1
                 let generation = session.idleGeneration
                 session.idleClose = TickScheduler.shared.schedule(
                     in: .seconds(Self.idleCloseDelay),
                     precision: .relaxed
                 ) { [weak self] in self?.idleCloseFired(generation: generation) }
-                return nil
+                return (nil, false)
             }
+            session.carriedConnection = true
             let stale = session.idleClose
             session.idleClose = nil
-            return stale
+            return (stale, false)
         }
         stale?.cancel()
+        if closeNow { closeIfStillIdle() }
     }
 
     private func idleCloseFired(generation: UInt64) {

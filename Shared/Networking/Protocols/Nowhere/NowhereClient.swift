@@ -221,7 +221,11 @@ nonisolated final class NowhereClient: Sendable {
                 return .transportSpent
             }
 
-            let newSession = try NowhereSession(configuration: configuration, transport: transport)
+            let newSession = try NowhereSession(
+                configuration: configuration,
+                transport: transport,
+                closesWhenDrained: poolKey == nil
+            )
             state.session = newSession
             if transport != nil { state.transportConsumed = true }
             return .fresh(newSession)

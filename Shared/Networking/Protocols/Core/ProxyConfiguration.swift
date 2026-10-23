@@ -261,6 +261,19 @@ nonisolated struct ProxyConfiguration: Identifiable, Hashable, Codable, Sendable
         }
     }
 
+    var dialsOwnChain: Bool {
+        switch outbound {
+        case .anytls, .rfc, .sudoku, .hysteria:
+            true
+        case .nowhere:
+            isQUICTransport
+        case .vless:
+            if case .xhttp = xrayTransportLayer { true } else { false }
+        case .trojan, .shadowsocks, .socks5:
+            false
+        }
+    }
+
     func upstreamNetwork(for downstream: ProxyNetwork) -> ProxyNetwork? {
         if isXHTTPOverHTTP3 { return .udp }
         if outboundProtocol == .nowhere {

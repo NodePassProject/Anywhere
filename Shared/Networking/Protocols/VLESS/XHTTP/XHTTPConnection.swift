@@ -589,13 +589,13 @@ nonisolated final class XHTTPXMUXMultiplexerManager: Sendable {
     private let pool = Mutex(PoolState())
 
     private let registry: XHTTPXMUXMultiplexerRegistry?
-    fileprivate let registryKey: String?
+    fileprivate let registryKey: XHTTPXMUXMultiplexerRegistry.Key?
 
     fileprivate init(
         config: XHTTPXMUXMultiplexerConfiguration,
         newConnection: @escaping @Sendable () async -> XHTTPXMUXMultiplexerPoolable?,
         registry: XHTTPXMUXMultiplexerRegistry? = nil,
-        registryKey: String? = nil
+        registryKey: XHTTPXMUXMultiplexerRegistry.Key? = nil
     ) {
         self.config = config
         self.concurrency = config.maxConcurrency.random()
@@ -781,15 +781,23 @@ nonisolated final class XHTTPXMUXMultiplexerManager: Sendable {
 
 nonisolated final class XHTTPXMUXMultiplexerRegistry: Sendable {
     nonisolated static let shared = XHTTPXMUXMultiplexerRegistry()
-    private let managers = Mutex<[String: XHTTPXMUXMultiplexerManager]>([:])
+
+    fileprivate struct Key: Hashable {
+        let endpoint: String
+        let chain: [ProxyConfiguration]
+    }
+
+    private let managers = Mutex<[Key: XHTTPXMUXMultiplexerManager]>([:])
 
     private init() {}
 
     func manager(
-        key: String,
+        key endpoint: String,
+        chain: [ProxyConfiguration] = [],
         config: XHTTPXMUXMultiplexerConfiguration,
         makeFactory: () -> (@Sendable () async -> XHTTPXMUXMultiplexerPoolable?)
     ) -> XHTTPXMUXMultiplexerManager {
+        let key = Key(endpoint: endpoint, chain: chain)
         let factory = makeFactory()
         return managers.withLock { managers in
             if let existing = managers[key] { return existing }

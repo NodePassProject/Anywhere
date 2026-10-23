@@ -119,11 +119,13 @@ nonisolated final class NowhereSession: Sendable {
 
         var idleClose: DeadlineToken?
         var idleGeneration: UInt64 = 0
+        var carriedFlow = false
 
         var onClose: (@Sendable () -> Void)?
     }
     private let state = Mutex(State())
     private let udpBudgetUsed = Atomic<Int>(0)
+    private let closesWhenDrained: Bool
 
     static let maxUDPFlows = 256
     private static let maxReassemblySlots = 64
@@ -148,8 +150,13 @@ nonisolated final class NowhereSession: Sendable {
         if fireNow { hook() }
     }
 
-    init(configuration: NowhereRuntimeConfiguration, transport: QUICDatagramTransport? = nil) throws {
+    init(
+        configuration: NowhereRuntimeConfiguration,
+        transport: QUICDatagramTransport? = nil,
+        closesWhenDrained: Bool = false
+    ) throws {
         self.configuration = configuration
+        self.closesWhenDrained = closesWhenDrained
         let morphObfuscator: NowhereMorphPacketObfuscator?
         if configuration.morph {
             guard let keys = configuration.morphKeys else {
@@ -743,29 +750,31 @@ nonisolated final class NowhereSession: Sendable {
     // MARK: - Idle close
 
     private func updateIdleCloseTimer() {
-        let stale: DeadlineToken? = state.withLock { session in
+        let (stale, closeNow): (DeadlineToken?, Bool) = state.withLock { session in
             guard session.phase == .ready else {
                 let stale = session.idleClose
                 session.idleClose = nil
-                return stale
+                return (stale, false)
             }
             let idle = session.tcpStreams.isEmpty && session.udpRoutes.isEmpty
             if idle {
-                guard session.idleClose == nil else { return nil }
+                if closesWhenDrained, session.carriedFlow { return (nil, true) }
+                guard session.idleClose == nil else { return (nil, false) }
                 session.idleGeneration &+= 1
                 let generation = session.idleGeneration
                 session.idleClose = TickScheduler.shared.schedule(
                     in: .seconds(Self.idleCloseDelay),
                     precision: .relaxed
                 ) { [weak self] in self?.idleCloseFired(generation: generation) }
-                return nil
+                return (nil, false)
             }
+            session.carriedFlow = true
             let stale = session.idleClose
             session.idleClose = nil
-            return stale
+            return (stale, false)
         }
         stale?.cancel()
-        if state.withLock({ $0.draining && $0.tcpStreams.isEmpty && $0.udpRoutes.isEmpty }) {
+        if closeNow || state.withLock({ $0.draining && $0.tcpStreams.isEmpty && $0.udpRoutes.isEmpty }) {
             closeIfStillIdle()
         }
     }

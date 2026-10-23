@@ -75,7 +75,7 @@ struct RoutingExportOperation {
         }
 
         var resolvedIPsByAddress: [String: String] = [:]
-        for configuration in resolvedTargets.values {
+        for configuration in resolvedTargets.values where configuration.chain?.isEmpty ?? true {
             let address = configuration.serverAddress
             guard resolvedIPsByAddress[address] == nil else { continue }
             if let ip = await DNSResolver.proxies.resolveHost(address) {
@@ -108,13 +108,15 @@ struct RoutingExportOperation {
                     guard !ruleSet.rules.isEmpty else { continue }
                     let explicitId = moduleAssignments[ruleSet.id.uuidString]
                     guard let resolved = resolve(explicitId) else { continue }
-                    entries.append(.init(
-                        tier: explicitId == nil ? .neutral : .user,
-                        action: resolved.action,
-                        configId: resolved.configId,
-                        name: module.qualifiedName(for: ruleSet.name),
-                        rules: ruleSet.rules
-                    ))
+                    entries.append(
+                        .init(
+                            tier: explicitId == nil ? .neutral : .user,
+                            action: resolved.action,
+                            configId: resolved.configId,
+                            name: module.qualifiedName(for: ruleSet.name),
+                            rules: ruleSet.rules
+                        )
+                    )
                 }
             }
 

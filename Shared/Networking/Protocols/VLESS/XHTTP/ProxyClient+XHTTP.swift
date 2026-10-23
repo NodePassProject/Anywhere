@@ -203,7 +203,7 @@ nonisolated extension ProxyClient {
             downloadLeg = try await dialXHTTPLeg(
                 endpoint: self.downloadXHTTPEndpoint(downloadSettings),
                 httpVersion: downloadHTTPVersion,
-                route: .direct,
+                route: additionalXHTTPRoute(),
                 xhttp: downloadSettings.xhttp,
                 mode: mode,
                 sessionId: sessionId,
@@ -237,6 +237,14 @@ nonisolated extension ProxyClient {
         case direct
         case overTunnel(ProxyConnection)
         case buildChain([ProxyConfiguration])
+
+        var poolChain: [ProxyConfiguration]? {
+            switch self {
+            case .direct: []
+            case .buildChain(let chain): chain
+            case .overTunnel: nil
+            }
+        }
     }
 
     private enum XHTTPDialedTransport {
@@ -264,14 +272,20 @@ nonisolated extension ProxyClient {
         )
     }
 
+    private var xhttpDialChain: [ProxyConfiguration]? {
+        if let chain = configuration.chain, !chain.isEmpty { return chain }
+        return parentChain.isEmpty ? nil : parentChain
+    }
+
+    private func additionalXHTTPRoute() -> XHTTPLegRoute {
+        xhttpDialChain.map { .buildChain($0) } ?? .direct
+    }
+
     private func consumeMainXHTTPRoute() -> XHTTPLegRoute {
         if let takenTunnel = takeChainTunnel() {
             return .overTunnel(takenTunnel)
         }
-        if let chain = configuration.chain, !chain.isEmpty {
-            return .buildChain(chain)
-        }
-        return .direct
+        return additionalXHTTPRoute()
     }
 
     private func dialXHTTPLeg(
@@ -284,16 +298,16 @@ nonisolated extension ProxyClient {
         role: XHTTPChannelRole,
         uploadFactory: (@Sendable () async throws -> any ByteTransport)?
     ) async throws -> XHTTPConnection {
-        if httpVersion == .http3, case .direct = route {
+        if httpVersion == .http3, let chain = route.poolChain {
             return try await acquirePooledH3(
-                endpoint: endpoint, xmux: xhttp.effectiveXMUX, xhttp: xhttp,
+                endpoint: endpoint, chain: chain, xmux: xhttp.effectiveXMUX, xhttp: xhttp,
                 mode: mode, sessionId: sessionId, role: role
             )
         }
 
-        if httpVersion == .http2, case .direct = route {
+        if httpVersion == .http2, let chain = route.poolChain {
             return try await acquirePooledH2(
-                endpoint: endpoint, xmux: xhttp.effectiveXMUX, xhttp: xhttp,
+                endpoint: endpoint, chain: chain, xmux: xhttp.effectiveXMUX, xhttp: xhttp,
                 mode: mode, sessionId: sessionId, role: role
             )
         }
@@ -317,19 +331,31 @@ nonisolated extension ProxyClient {
 
     private func acquirePooledH3(
         endpoint: XHTTPEndpoint,
+        chain: [ProxyConfiguration],
         xmux: XHTTPXMUXMultiplexerConfiguration,
         xhttp: XHTTPConfiguration,
         mode: XHTTPMode,
         sessionId: String,
         role: XHTTPChannelRole
     ) async throws -> XHTTPConnection {
-        let host = endpoint.directHost
+        let host = chain.isEmpty ? endpoint.directHost : endpoint.chainHost
         let port = endpoint.port
         let serverName = endpoint.serverName
+        let useResolvedAddress = useResolvedAddressForDirectDial
         let key = "h3|\(host)|\(port)|\(serverName)"
-        let manager = XHTTPXMUXMultiplexerRegistry.shared.manager(key: key, config: xmux) {
+        let manager = XHTTPXMUXMultiplexerRegistry.shared.manager(key: key, chain: chain, config: xmux) {
             { () async -> XHTTPXMUXMultiplexerPoolable? in
-                HTTP3Multiplexer(host: host, port: port, serverName: serverName)
+                try? await ProxyClient.withChainTunnel(
+                    through: chain,
+                    to: (host, port),
+                    delivering: .udp,
+                    useResolvedAddressForDirectDial: useResolvedAddress
+                ) { tunnel in
+                    HTTP3Multiplexer(
+                        host: host, port: port, serverName: serverName,
+                        transport: tunnel.map { ProxyConnectionDatagramTransport(connection: $0) }
+                    )
+                }
             }
         }
         guard let lease = await manager.acquire(), let session = lease.connection as? HTTP3Multiplexer else {
@@ -345,20 +371,25 @@ nonisolated extension ProxyClient {
 
     private func acquirePooledH2(
         endpoint: XHTTPEndpoint,
+        chain: [ProxyConfiguration],
         xmux: XHTTPXMUXMultiplexerConfiguration,
         xhttp: XHTTPConfiguration,
         mode: XHTTPMode,
         sessionId: String,
         role: XHTTPChannelRole
     ) async throws -> XHTTPConnection {
-        let host = endpoint.directHost
+        let host = chain.isEmpty ? endpoint.directHost : endpoint.chainHost
         let port = endpoint.port
         let security = endpoint.security
         let serverName = endpoint.serverName
+        let useResolvedAddress = useResolvedAddressForDirectDial
         let key = "h2|\(host)|\(port)|\(serverName)|\(Self.xmuxSecurityKey(security))"
-        let manager = XHTTPXMUXMultiplexerRegistry.shared.manager(key: key, config: xmux) {
+        let manager = XHTTPXMUXMultiplexerRegistry.shared.manager(key: key, chain: chain, config: xmux) {
             { () async -> XHTTPXMUXMultiplexerPoolable? in
-                try? await ProxyClient.dialSharedH2(host: host, port: port, security: security)
+                try? await ProxyClient.dialSharedH2(
+                    host: host, port: port, security: security,
+                    chain: chain, useResolvedAddressForDirectDial: useResolvedAddress
+                )
             }
         }
         guard let lease = await manager.acquire(), let shared = lease.connection as? XHTTPH2Multiplexer else {
@@ -384,7 +415,9 @@ nonisolated extension ProxyClient {
     private static func dialSharedH2(
         host: String,
         port: UInt16,
-        security: XraySecurityLayer
+        security: XraySecurityLayer,
+        chain: [ProxyConfiguration],
+        useResolvedAddressForDirectDial: Bool
     ) async throws -> XHTTPH2Multiplexer {
         func bringUp(_ transport: any ByteTransport, retaining object: (any Sendable)?) async throws -> XHTTPH2Multiplexer {
             let shared = XHTTPH2Multiplexer(transport: transport)
@@ -414,23 +447,42 @@ nonisolated extension ProxyClient {
             }
             return shared
         }
-        switch security {
-        case .none:
-            let transport = TCPTransport(host: host, port: port, resolution: .proxies)
-            try await transport.connect()
-            return try await bringUp(transport, retaining: transport)
-        case .tls(let tlsConfig):
-            let h2TLS = TLSConfiguration(
-                serverName: tlsConfig.serverName, alpn: ["h2", "http/1.1"],
-                echEnabled: tlsConfig.echEnabled, echConfig: tlsConfig.echConfig, fingerprint: tlsConfig.fingerprint
-            )
-            let client = TLSClient(configuration: h2TLS)
-            let connection = try await client.connect(host: host, port: port)
-            return try await bringUp(TLSByteTransport(connection), retaining: client)
-        case .reality(let realityConfig):
-            let client = RealityClient(configuration: realityConfig)
-            let connection = try await client.connect(host: host, port: port)
-            return try await bringUp(TLSByteTransport(connection), retaining: client)
+        return try await withChainTunnel(
+            through: chain,
+            to: (host, port),
+            useResolvedAddressForDirectDial: useResolvedAddressForDirectDial
+        ) { tunnel in
+            switch security {
+            case .none:
+                if let tunnel {
+                    return try await bringUp(TunneledTransport(tunnel: tunnel), retaining: nil)
+                }
+                let transport = TCPTransport(host: host, port: port, resolution: .proxies)
+                try await transport.connect()
+                return try await bringUp(transport, retaining: transport)
+            case .tls(let tlsConfig):
+                let h2TLS = TLSConfiguration(
+                    serverName: tlsConfig.serverName, alpn: ["h2", "http/1.1"],
+                    echEnabled: tlsConfig.echEnabled, echConfig: tlsConfig.echConfig, fingerprint: tlsConfig.fingerprint
+                )
+                let client = TLSClient(configuration: h2TLS)
+                let connection: TLSRecordConnection
+                if let tunnel {
+                    connection = try await client.connect(overTunnel: tunnel)
+                } else {
+                    connection = try await client.connect(host: host, port: port)
+                }
+                return try await bringUp(TLSByteTransport(connection), retaining: client)
+            case .reality(let realityConfig):
+                let client = RealityClient(configuration: realityConfig)
+                let connection: TLSRecordConnection
+                if let tunnel {
+                    connection = try await client.connect(overTunnel: tunnel)
+                } else {
+                    connection = try await client.connect(host: host, port: port)
+                }
+                return try await bringUp(TLSByteTransport(connection), retaining: client)
+            }
         }
     }
 
@@ -460,8 +512,11 @@ nonisolated extension ProxyClient {
                 overTunnel: tunnel
             )
         case .buildChain(let chain):
-            let hopNetworks = [ProxyNetwork](repeating: .tcp, count: chain.count)
-            let tunnel = try await self.buildChainTunnel(chain: chain, index: 0, currentTunnel: nil, hopNetworks: hopNetworks)
+            let hopNetworks = try Self.computeChainHopNetworks(chain: chain, lastDeliver: .tcp).get()
+            let tunnel = try await self.buildChainTunnel(
+                chain: chain, index: 0, currentTunnel: nil, hopNetworks: hopNetworks,
+                finalDestination: (endpoint.chainHost, endpoint.port)
+            )
             return try await dialXHTTPByteStream(
                 host: endpoint.chainHost,
                 port: endpoint.port,
@@ -523,7 +578,10 @@ nonisolated extension ProxyClient {
             return makeSession(endpoint.chainHost, ProxyConnectionDatagramTransport(connection: tunnel))
         case .buildChain(let chain):
             let hopNetworks = try Self.computeChainHopNetworks(chain: chain, lastDeliver: .udp).get()
-            let tunnel = try await self.buildChainTunnel(chain: chain, index: 0, currentTunnel: nil, hopNetworks: hopNetworks)
+            let tunnel = try await self.buildChainTunnel(
+                chain: chain, index: 0, currentTunnel: nil, hopNetworks: hopNetworks,
+                finalDestination: (endpoint.chainHost, endpoint.port)
+            )
             return makeSession(endpoint.chainHost, ProxyConnectionDatagramTransport(connection: tunnel))
         }
     }
@@ -534,19 +592,23 @@ nonisolated extension ProxyClient {
         mode: XHTTPMode,
         xmux: XHTTPXMUXMultiplexerConfiguration
     ) -> (@Sendable () async throws -> any ByteTransport) {
-        let hasChain = (configuration.chain?.isEmpty == false)
-        if mode == .packetUp, !hasChain {
+        if mode == .packetUp {
+            let chain = xhttpDialChain ?? []
             let endpoint = mainXHTTPEndpoint()
-            let host = endpoint.directHost
+            let host = chain.isEmpty ? endpoint.directHost : endpoint.chainHost
             let port = endpoint.port
             let sec = endpoint.security
             let serverName = endpoint.serverName
+            let useResolvedAddress = useResolvedAddressForDirectDial
             var uploadXMUX = xmux
             uploadXMUX.maxConcurrency = XHTTPXMUXMultiplexerRange(from: 1, to: 1)
             let key = "h1up|\(host)|\(port)|\(serverName)|\(Self.xmuxSecurityKey(sec))"
-            let manager = XHTTPXMUXMultiplexerRegistry.shared.manager(key: key, config: uploadXMUX) {
+            let manager = XHTTPXMUXMultiplexerRegistry.shared.manager(key: key, chain: chain, config: uploadXMUX) {
                 { () async -> XHTTPXMUXMultiplexerPoolable? in
-                    await ProxyClient.dialH1UploadConnection(host: host, port: port, security: sec)
+                    await ProxyClient.dialH1UploadConnection(
+                        host: host, port: port, security: sec,
+                        chain: chain, useResolvedAddressForDirectDial: useResolvedAddress
+                    )
                 }
             }
             return {
@@ -564,12 +626,7 @@ nonisolated extension ProxyClient {
             guard let self else {
                 throw AnywhereError.transport(.terminated)
             }
-            let route: XHTTPLegRoute
-            if let chain = self.configuration.chain, !chain.isEmpty {
-                route = .buildChain(chain)
-            } else {
-                route = .direct
-            }
+            let route = self.additionalXHTTPRoute()
             let transport = try await ConnectionMetrics.$currentAttempt.withValue(nil) {
                 try await self.dialXHTTPTransport(endpoint: self.mainXHTTPEndpoint(), httpVersion: httpVersion, route: route)
             }
@@ -585,35 +642,56 @@ nonisolated extension ProxyClient {
     private static func dialH1UploadConnection(
         host: String,
         port: UInt16,
-        security: XraySecurityLayer
+        security: XraySecurityLayer,
+        chain: [ProxyConfiguration],
+        useResolvedAddressForDirectDial: Bool
     ) async -> XHTTPH1Multiplexer? {
         func wrap(_ transport: any ByteTransport, retaining object: (any Sendable)?) -> XHTTPH1Multiplexer {
             let connection = XHTTPH1Multiplexer(transport: transport)
             if let object { connection.retain(object) }
             return connection
         }
-        switch security {
-        case .none:
-            let transport = TCPTransport(host: host, port: port, resolution: .proxies)
-            do {
-                try await transport.connect()
-            } catch {
-                transport.cancel()
-                return nil
+        return try? await withChainTunnel(
+            through: chain,
+            to: (host, port),
+            useResolvedAddressForDirectDial: useResolvedAddressForDirectDial
+        ) { tunnel -> XHTTPH1Multiplexer in
+            switch security {
+            case .none:
+                if let tunnel {
+                    return wrap(TunneledTransport(tunnel: tunnel), retaining: nil)
+                }
+                let transport = TCPTransport(host: host, port: port, resolution: .proxies)
+                do {
+                    try await transport.connect()
+                } catch {
+                    transport.cancel()
+                    throw error
+                }
+                return wrap(transport, retaining: transport)
+            case .tls(let tlsConfig):
+                let h1TLS = TLSConfiguration(
+                    serverName: tlsConfig.serverName, alpn: ["http/1.1"],
+                    echEnabled: tlsConfig.echEnabled, echConfig: tlsConfig.echConfig, fingerprint: tlsConfig.fingerprint
+                )
+                let client = TLSClient(configuration: h1TLS)
+                let connection: TLSRecordConnection
+                if let tunnel {
+                    connection = try await client.connect(overTunnel: tunnel)
+                } else {
+                    connection = try await client.connect(host: host, port: port)
+                }
+                return wrap(TLSByteTransport(connection), retaining: client)
+            case .reality(let realityConfig):
+                let client = RealityClient(configuration: realityConfig)
+                let connection: TLSRecordConnection
+                if let tunnel {
+                    connection = try await client.connect(overTunnel: tunnel)
+                } else {
+                    connection = try await client.connect(host: host, port: port)
+                }
+                return wrap(TLSByteTransport(connection), retaining: client)
             }
-            return wrap(transport, retaining: transport)
-        case .tls(let tlsConfig):
-            let h1TLS = TLSConfiguration(
-                serverName: tlsConfig.serverName, alpn: ["http/1.1"],
-                echEnabled: tlsConfig.echEnabled, echConfig: tlsConfig.echConfig, fingerprint: tlsConfig.fingerprint
-            )
-            let client = TLSClient(configuration: h1TLS)
-            guard let connection = try? await client.connect(host: host, port: port) else { return nil }
-            return wrap(TLSByteTransport(connection), retaining: client)
-        case .reality(let realityConfig):
-            let client = RealityClient(configuration: realityConfig)
-            guard let connection = try? await client.connect(host: host, port: port) else { return nil }
-            return wrap(TLSByteTransport(connection), retaining: client)
         }
     }
 }
