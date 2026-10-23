@@ -185,8 +185,15 @@ actor MITMSession: MITMHTTP1StreamDelegate {
         }
     }
 
-    private var deadUpstreams: [(key: UpstreamKey, reason: String)] = []
+    private struct DeadUpstream {
+        let key: UpstreamKey
+        let reason: String
+        let expiresAt: TimeInterval
+    }
+
+    private var deadUpstreams: [DeadUpstream] = []
     private static let maxDeadUpstreams = 64
+    private static let deadUpstreamTTL: TimeInterval = 5
 
     private enum PendingRequestEvent {
         case head(MITMRequestHead, url: String?, endStream: Bool)
@@ -504,7 +511,7 @@ actor MITMSession: MITMHTTP1StreamDelegate {
             tlsServer.feed(data)
         } else {
             if pendingClientBytes.count + data.count > Self.maxPendingClientBytes {
-                logger.warning("\(dstHost): pre-handshake buffer would exceed \(Self.maxPendingClientBytes) B; tearing down session")
+                logger.warning("[MITM] \(dstHost): pre-handshake buffer would exceed \(Self.maxPendingClientBytes) B; tearing down session")
                 cancel(error: nil)
                 return
             }
@@ -681,7 +688,7 @@ actor MITMSession: MITMHTTP1StreamDelegate {
                 return
             }
             guard record.negotiatedALPN.isEmpty || record.negotiatedALPN == "http/1.1" else {
-                logger.warning("\(dstHost): unexpected upstream ALPN \"\(record.negotiatedALPN)\" for an http/1.1 leg; tearing down")
+                logger.warning("[MITM] \(dstHost): unexpected upstream ALPN \"\(record.negotiatedALPN)\" for an http/1.1 leg; tearing down")
                 cancel(error: nil)
                 return
             }
@@ -749,7 +756,7 @@ actor MITMSession: MITMHTTP1StreamDelegate {
         guard writer(for: leg).assumeIsolated({ $0.write(data, isReply: isReply) }) else {
             guard !replyFloodReported else { return }
             replyFloodReported = true
-            logger.warning("\(dstHost): \(MITMLegWriter.maxQueuedReplies) control replies queued on one leg without draining; tearing down")
+            logger.warning("[MITM] \(dstHost): \(MITMLegWriter.maxQueuedReplies) control replies queued on one leg without draining; tearing down")
             post(.cancel(reason: nil))
             return
         }
@@ -855,7 +862,7 @@ actor MITMSession: MITMHTTP1StreamDelegate {
             if canReconnectOuterLeg() {
                 reconnectOuterLeg(with: transformed, inner: inner)
             } else {
-                logger.warning("\(dstHost): request resolved a different upstream while the leg was busy; tearing down so the client retries")
+                logger.warning("[MITM] \(dstHost): request resolved a different upstream while the leg was busy; tearing down so the client retries")
                 cancel(error: nil)
             }
             return
@@ -865,13 +872,13 @@ actor MITMSession: MITMHTTP1StreamDelegate {
     private func bufferUpstreamAndDial(_ transformed: Data, inner: any MITMByteLeg) {
         pendingUpstreamBytes.append(transformed)
         if pendingUpstreamBytes.count > Self.maxPendingUpstreamBytes {
-            logger.warning("\(dstHost): pre-dial upstream buffer exceeded \(Self.maxPendingUpstreamBytes) B; tearing down session")
+            logger.warning("[MITM] \(dstHost): pre-dial upstream buffer exceeded \(Self.maxPendingUpstreamBytes) B; tearing down session")
             cancel(error: nil)
             return
         }
         if isDialing {
             guard resolvedUpstreamMatchesDialed() else {
-                logger.warning("\(dstHost): pipelined request resolved an upstream different from the dialed one; tearing down so the client retries")
+                logger.warning("[MITM] \(dstHost): pipelined request resolved an upstream different from the dialed one; tearing down so the client retries")
                 cancel(error: nil)
                 return
             }
@@ -946,7 +953,7 @@ actor MITMSession: MITMHTTP1StreamDelegate {
     }
 
     private func reconnectOuterLeg(with transformed: Data, inner: any MITMByteLeg) {
-        logger.info("\(dstHost): later request resolved a new upstream; reconnecting the idle outer leg instead of tearing down")
+        logger.info("[MITM] \(dstHost): later request resolved a new upstream; reconnecting the idle outer leg instead of tearing down")
         let oldOuter = outerRecord
         outerRecord = nil
         if let oldOuter {
@@ -1186,7 +1193,7 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
         assumeIsolated { $0.handleClientLegFatalError(message) }
     }
     private func handleClientLegFatalError(_ message: String) {
-        logger.warning("\(dstHost): client leg fatal: \(message); tearing down")
+        logger.warning("[MITM] \(dstHost): client leg fatal: \(message); tearing down")
         cancel(error: nil)
     }
 
@@ -1248,7 +1255,7 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
         case .h2:
             h2Upstream?.assumeIsolated { $0.sendRequestTrailers(streamID: streamID, trailers) }
         case .h1:
-            logger.warning("\(dstHost): dropping h2 request trailers toward h1 upstream stream \(streamID)")
+            logger.warning("[MITM] \(dstHost): dropping h2 request trailers toward h1 upstream stream \(streamID)")
             appendH1RequestData(streamID: streamID, Data(), endStream: true)
         case .undetermined:
             guard pendingRequestStreamIDs.contains(streamID) else { return }
@@ -1285,22 +1292,28 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
     }
 
     private func markUpstreamDead(_ key: UpstreamKey, reason: String) {
+        pruneExpiredDeadUpstreams()
         guard !deadUpstreams.contains(where: { $0.key == key }) else { return }
         if deadUpstreams.count >= Self.maxDeadUpstreams { deadUpstreams.removeFirst() }
-        deadUpstreams.append((key: key, reason: reason))
-        logger.warning("[MITM] \(dstHost): pinning \(key.host):\(key.port) as unreachable for this session (\(reason))")
+        deadUpstreams.append(DeadUpstream(key: key, reason: reason, expiresAt: MonotonicClock.now + Self.deadUpstreamTTL))
+        logger.warning("[MITM] \(dstHost): pinning \(key.host):\(key.port) as unreachable for \(Int(Self.deadUpstreamTTL)) s (\(reason))")
     }
 
     private func deadUpstreamReason(for key: UpstreamKey) -> String? {
-        deadUpstreams.first(where: { $0.key == key })?.reason
+        pruneExpiredDeadUpstreams()
+        return deadUpstreams.first(where: { $0.key == key })?.reason
     }
 
-    /// Short-circuits a request whose destination already failed on this session. Returns true
-    /// when the stream was answered 502 and the caller must not dial.
+    private func pruneExpiredDeadUpstreams() {
+        guard !deadUpstreams.isEmpty else { return }
+        let now = MonotonicClock.now
+        deadUpstreams.removeAll { $0.expiresAt <= now }
+    }
+
     private func failStreamIfUpstreamDead(_ head: MITMRequestHead) -> Bool {
         let key = upstreamKey(for: head)
         guard let reason = deadUpstreamReason(for: key) else { return false }
-        logger.warning("[MITM] \(dstHost): \(key.host):\(key.port) already failed on this session (\(reason)); answering stream \(head.clientStreamID) 502 without re-dialing")
+        logger.warning("[MITM] \(dstHost): \(key.host):\(key.port) failed in the last \(Int(Self.deadUpstreamTTL)) s (\(reason)); answering stream \(head.clientStreamID) 502 without re-dialing")
         bridgeClient?.assumeIsolated { $0.failStream(streamID: head.clientStreamID, status: 502, message: "Bad Gateway") }
         return true
     }
@@ -1346,7 +1359,9 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
         guard phase != .torn else { return }
         let reason = AnywhereError.describe(error)
         logger.warning("[MITM] \(dstHost): first upstream connect failed: \(reason); answering pending streams 502, keeping the connection")
-        if let target = firstUpstreamDialTarget { markUpstreamDead(target, reason: reason) }
+        if !AnywhereError.isTermination(error), let target = firstUpstreamDialTarget {
+            markUpstreamDead(target, reason: reason)
+        }
         firstUpstreamDialTarget = nil
         sharedUpstreamRecord = nil
         sharedUpstreamTLSClient?.cancel()
@@ -1523,7 +1538,7 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
 
     private func bindH1Upstream() {
         upstreamProtocol = .h1
-        logger.info("\(dstHost): bridging h2 client to http/1.1 upstream")
+        logger.info("[MITM] \(dstHost): bridging h2 client to http/1.1 upstream")
         let events = pendingRequestEvents
         clearPendingRequests()
         for event in events {
@@ -1546,7 +1561,7 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
         let streamID = head.clientStreamID
         if failStreamIfUpstreamDead(head) { return }
         guard bridgeStreams.count < Self.maxConcurrentBridgeStreams else {
-            logger.warning("\(dstHost): bridge concurrent-stream cap reached; refusing stream \(streamID)")
+            logger.warning("[MITM] \(dstHost): bridge concurrent-stream cap reached; refusing stream \(streamID)")
             bridgeClient?.assumeIsolated { $0.rejectStream(streamID, errorCode: MITMHTTP2FrameCodec.ErrorCode.refusedStream) }
             return
         }
@@ -1617,8 +1632,10 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
         } catch {
             guard phase != .torn else { return }
             let reason = AnywhereError.describe(error)
-            logger.warning("\(dstHost): h1 upstream dial failed for stream \(streamID): \(reason)")
-            markUpstreamDead(UpstreamKey(host: host, port: port), reason: reason)
+            logger.warning("[MITM] \(dstHost): h1 upstream dial failed for stream \(streamID): \(reason)")
+            if !AnywhereError.isTermination(error) {
+                markUpstreamDead(UpstreamKey(host: host, port: port), reason: reason)
+            }
             bridgeAbortStream(streamID)
             await bridgeClient?.failStream(streamID: streamID, status: 502, message: "Bad Gateway")
         }
@@ -1641,14 +1658,14 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
         bridgeStream.unsentUpstreamBytes += out.count
         sessionUnsentUpstreamBytes += out.count
         if bridgeStream.unsentUpstreamBytes > Self.maxBridgeUpstreamBufferedBytes {
-            logger.warning("\(dstHost): bridge stream \(streamID) upstream-bound backlog \(bridgeStream.unsentUpstreamBytes) B over cap; resetting stream")
+            logger.warning("[MITM] \(dstHost): bridge stream \(streamID) upstream-bound backlog \(bridgeStream.unsentUpstreamBytes) B over cap; resetting stream")
             bridgeClient?.assumeIsolated { $0.acceptResponseAborted(streamID: streamID) }
             bridgeAbortStream(streamID)
             return
         }
         if sessionUnsentUpstreamBytes > Self.maxSessionUpstreamBufferedBytes,
            let victim = bridgeStreams.max(by: { $0.value.unsentUpstreamBytes < $1.value.unsentUpstreamBytes })?.key {
-            logger.warning("\(dstHost): session upstream-bound backlog \(sessionUnsentUpstreamBytes) B over cap; resetting largest stream \(victim)")
+            logger.warning("[MITM] \(dstHost): session upstream-bound backlog \(sessionUnsentUpstreamBytes) B over cap; resetting largest stream \(victim)")
             bridgeClient?.assumeIsolated { $0.acceptResponseAborted(streamID: victim) }
             bridgeAbortStream(victim)
             if victim == streamID { return }
@@ -1740,13 +1757,19 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
                 return
             }
             guard phase != .torn else { return }
+            guard bridgeStreams[streamID] === bridgeStream else {
+                connection.cancel()
+                return
+            }
             if Self.isCertificateVerificationFailure(error) {
-                logger.warning("\(dstHost): bridge upstream certificate validation failed for stream \(streamID) (\(AnywhereError.describe(error))); closing rather than masking as a 502")
+                logger.warning("[MITM] \(dstHost): bridge upstream certificate validation failed for stream \(streamID) (\(AnywhereError.describe(error))); closing rather than masking as a 502")
                 cancel(error: nil)
             } else {
                 let reason = AnywhereError.describe(error)
-                logger.warning("\(dstHost): bridge upstream TLS failed for stream \(streamID): \(reason)")
-                if let target = bridgeStream.dialTarget { markUpstreamDead(target, reason: reason) }
+                logger.warning("[MITM] \(dstHost): bridge upstream TLS failed for stream \(streamID): \(reason)")
+                if !AnywhereError.isTermination(error), let target = bridgeStream.dialTarget {
+                    markUpstreamDead(target, reason: reason)
+                }
                 bridgeAbortStream(streamID)
                 await bridgeClient?.failStream(streamID: streamID, status: 502, message: "Bad Gateway")
             }
@@ -1754,9 +1777,9 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
     }
 
     private func failBridgeStreamOnTimeout(_ streamID: UInt32) {
-        guard phase != .torn else { return }
-        logger.warning("\(dstHost): bridge upstream TLS timed out for stream \(streamID); answering 502")
-        if let target = bridgeStreams[streamID]?.dialTarget {
+        guard phase != .torn, let bridgeStream = bridgeStreams[streamID] else { return }
+        logger.warning("[MITM] \(dstHost): bridge upstream TLS timed out for stream \(streamID); answering 502")
+        if let target = bridgeStream.dialTarget {
             markUpstreamDead(target, reason: "upstream TLS handshake timed out")
         }
         bridgeAbortStream(streamID)
@@ -1785,7 +1808,7 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
                 step = .stop
             } else if let bridgeStream = bridgeStreams[streamID], let client = bridgeClient {
                 if let error {
-                    logger.report("\(dstHost): bridge upstream read error for stream \(streamID)", error: error)
+                    logger.report("[MITM] \(dstHost): bridge upstream read error for stream \(streamID)", error: error)
                     await client.acceptResponseAborted(streamID: streamID)
                     bridgeAbortStream(streamID)
                     step = .stop
