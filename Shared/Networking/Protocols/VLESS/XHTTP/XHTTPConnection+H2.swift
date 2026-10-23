@@ -232,6 +232,7 @@ nonisolated extension XHTTPConnection {
         for field in uplinkData {
             switch field {
             case .header(let name, let value):
+                block.append(0x00)
                 block.append(contentsOf: Self.hpackEncodeString(name.lowercased()))
                 block.append(contentsOf: Self.hpackEncodeString(value))
             case .cookie(let pair):
