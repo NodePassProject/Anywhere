@@ -41,6 +41,18 @@ nonisolated struct MITMByteBuffer {
         return storage.subdata(in: (base + range.lowerBound)..<(base + range.upperBound))
     }
 
+    func appendPrefix(_ count: Int, to data: inout Data) {
+        let take = Swift.min(count, self.count)
+        guard take > 0 else { return }
+        let absoluteStart = storage.startIndex + offset
+        data.append(storage[absoluteStart..<(absoluteStart + take)])
+    }
+
+    func withUnsafeBytes<R>(in range: Range<Int>, _ body: (UnsafeRawBufferPointer) throws -> R) rethrows -> R {
+        let base = storage.startIndex + offset
+        return try storage[(base + range.lowerBound)..<(base + range.upperBound)].withUnsafeBytes(body)
+    }
+
     func range(of pattern: Data, from start: Int = 0) -> Range<Int>? {
         let base = storage.startIndex + offset
         let clamped = Swift.max(0, Swift.min(start, count))
@@ -107,19 +119,11 @@ nonisolated struct MITMByteQueue {
         count += data.count
     }
 
-    mutating func popFirst(_ maxCount: Int) -> Data {
-        let take = min(max(maxCount, 0), count)
-        guard take > 0 else { return Data() }
-        count -= take
-        let first = chunks[head]
-        let firstStart = first.startIndex + headOffset
-        let firstAvailable = first.endIndex - firstStart
-        if take <= firstAvailable {
-            if take == firstAvailable { advanceHead() } else { headOffset += take }
-            return first[firstStart..<(firstStart + take)]
-        }
-        var out = Data(capacity: take)
-        var needed = take
+    mutating func popChunks(_ maxCount: Int) -> [Data] {
+        var needed = min(max(maxCount, 0), count)
+        guard needed > 0 else { return [] }
+        count -= needed
+        var out: [Data] = []
         while needed > 0 {
             let chunk = chunks[head]
             let start = chunk.startIndex + headOffset
@@ -129,7 +133,7 @@ nonisolated struct MITMByteQueue {
                 headOffset += needed
                 needed = 0
             } else {
-                out.append(chunk[start..<chunk.endIndex])
+                out.append(headOffset == 0 ? chunk : chunk[start..<chunk.endIndex])
                 needed -= available
                 advanceHead()
             }

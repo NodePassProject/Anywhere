@@ -278,7 +278,7 @@ struct MITMRuleEditorView: View {
                 validationError = String(localized: "Search is required.")
                 return
             }
-            guard (try? Regex(searchText)) != nil else {
+            guard (try? NSRegularExpression(pattern: searchText, options: [])) != nil else {
                 validationError = String(localized: "Search is not a valid regular expression.")
                 return
             }

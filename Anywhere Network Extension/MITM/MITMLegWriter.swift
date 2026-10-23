@@ -16,6 +16,8 @@ actor MITMLegWriter {
 
     private static let maxBatchBytes = 256 * 1024
 
+    private static let maxUnsentBytes: UInt64 = 128 * 1024
+
     private enum Mark {
         case reply
         case resume(CheckedContinuation<Void, Error>)
@@ -33,6 +35,7 @@ actor MITMLegWriter {
     private let onFailure: (@Sendable (Error) -> Void)?
 
     private var phase: Phase = .open
+    private var failure: Error?
     private var queue = MITMByteQueue()
     private var queuedBytes: UInt64 = 0
     private var sentBytes: UInt64 = 0
@@ -77,10 +80,20 @@ actor MITMLegWriter {
         enqueue(data, mark: .call(completion))
     }
 
-    func writeAndWait(_ data: Data) async throws {
-        guard phase == .open else { throw AnywhereError.transport(.terminated) }
+    func writeWithBackpressure(_ data: Data) async throws {
+        guard phase == .open else { throw failure ?? AnywhereError.transport(.terminated) }
         guard !data.isEmpty else { return }
-        try await withCheckedThrowingContinuation { enqueue(data, mark: .resume($0)) }
+        enqueue(data, mark: nil)
+        guard queuedBytes - sentBytes > Self.maxUnsentBytes else { return }
+        let through = max(queuedBytes - Self.maxUnsentBytes, marks.last?.through ?? 0)
+        try await withCheckedThrowingContinuation { marks.append((through: through, mark: .resume($0))) }
+    }
+
+    func drain() async throws {
+        guard phase == .open else { throw failure ?? AnywhereError.transport(.terminated) }
+        guard queuedBytes > sentBytes else { return }
+        let through = queuedBytes
+        try await withCheckedThrowingContinuation { marks.append((through: through, mark: .resume($0))) }
     }
 
     func close(gracePeriod: Duration, then completion: @escaping @Sendable () -> Void) {
@@ -123,19 +136,19 @@ actor MITMLegWriter {
         while let batch = await nextBatch() {
             isSending = true
             do {
-                try await leg.send(batch.startIndex == 0 ? batch : Data(batch))
+                try await leg.send(contentsOf: batch)
             } catch {
                 isSending = false
                 fail(error)
                 return
             }
             isSending = false
-            sentBytes += UInt64(batch.count)
+            sentBytes += UInt64(batch.reduce(0) { $0 + $1.count })
             settle(through: sentBytes, error: nil)
         }
     }
 
-    private func nextBatch() async -> Data? {
+    private func nextBatch() async -> [Data]? {
         while true {
             switch phase {
             case .closed:
@@ -144,7 +157,7 @@ actor MITMLegWriter {
                 finishClose()
                 return nil
             case .open, .closing:
-                if !queue.isEmpty { return queue.popFirst(Self.maxBatchBytes) }
+                if !queue.isEmpty { return queue.popChunks(Self.maxBatchBytes) }
                 await withCheckedContinuation { wake = $0 }
             }
         }
@@ -152,6 +165,7 @@ actor MITMLegWriter {
 
     private func fail(_ error: Error) {
         guard phase != .closed else { return }
+        failure = error
         queue = MITMByteQueue()
         settle(through: .max, error: error)
         finishClose()

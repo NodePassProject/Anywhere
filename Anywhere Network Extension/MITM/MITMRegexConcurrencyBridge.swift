@@ -73,27 +73,24 @@ nonisolated final class MITMRegexConcurrencyBridge: Sendable {
     }
 
     func applyingSubstitution(
-        _ regex: Regex<AnyRegexOutput>,
+        _ regex: NSRegularExpression,
         to text: String,
-        staticReplacement: String?,
-        expand: @escaping @Sendable (AnyRegexOutput) -> String,
+        template: String,
         deadlineMillis: Int,
         hardCapSeconds: Int,
         hardCapMessage: @escaping @Sendable () -> String,
         onResolved: (@Sendable () -> Void)? = nil
-    ) async -> Outcome<String> {
+    ) async -> Outcome<String?> {
         let run = await runSteps(
             1,
             deadlineMillis: deadlineMillis,
             hardCapSeconds: hardCapSeconds,
             hardCapMessage: { _ in hardCapMessage() }
-        ) { _ -> String in
-            let out: String
-            if let staticReplacement {
-                out = text.replacing(regex, with: staticReplacement)
-            } else {
-                out = text.replacing(regex) { match in expand(match.output) }
-            }
+        ) { _ -> String? in
+            let range = NSRange(text.startIndex..., in: text)
+            let out = regex.firstMatch(in: text, options: [], range: range) == nil
+                ? nil
+                : regex.stringByReplacingMatches(in: text, options: [], range: range, withTemplate: template)
             onResolved?()
             return out
         }

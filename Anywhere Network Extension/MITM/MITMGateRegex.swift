@@ -24,6 +24,9 @@ nonisolated final class MITMGateRegex: Sendable {
     private let isLiteral: Bool
     private let literalPattern: String
 
+    private let alwaysMatches: Bool
+    private let requiredLiterals: [String]
+
     private static let regexMetacharacters: Set<Character> = [
         "\\", "^", "$", ".", "|", "?", "*", "+", "(", ")", "[", "]", "{", "}"
     ]
@@ -52,10 +55,13 @@ nonisolated final class MITMGateRegex: Sendable {
         let literal = !pattern.isEmpty
             && !pattern.contains { Self.regexMetacharacters.contains($0) }
         self.isLiteral = literal
+        self.alwaysMatches = pattern == ".*" || pattern == "^.*"
         if literal {
             self.literalPattern = Self.lowercasingHostRegion(pattern)
+            self.requiredLiterals = []
         } else {
             self.literalPattern = pattern
+            self.requiredLiterals = MITMRegexLiterals.required(in: pattern) ?? []
             Self.warnIfHostRegionHasUppercase(pattern)
         }
     }
@@ -81,6 +87,10 @@ nonisolated final class MITMGateRegex: Sendable {
         if isLiteral {
             guard let range = normalizedURL.range(of: literalPattern, options: .literal) else { return .noMatch }
             return .match(wantsCaptures ? [String(normalizedURL[range])] : nil)
+        }
+        if alwaysMatches, !wantsCaptures { return .match(nil) }
+        if requiredLiterals.contains(where: { normalizedURL.range(of: $0, options: .literal) == nil }) {
+            return .noMatch
         }
         return state.withLock { state in
             if state.isQuarantined { return .noMatch }

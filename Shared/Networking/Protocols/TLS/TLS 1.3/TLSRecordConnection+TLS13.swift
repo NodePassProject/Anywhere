@@ -15,29 +15,26 @@ nonisolated extension TLSRecordConnection {
     // MARK: - TLS 1.3 Record Crypto
 
     func encryptTLS13Record(plaintext: Data, contentType: UInt8 = TLSContentType.applicationData) throws -> Data {
+        var innerPlaintext = Data(capacity: plaintext.count + 1)
+        innerPlaintext.append(plaintext)
+        innerPlaintext.append(contentType)
+        var record = Data(capacity: 5 + innerPlaintext.count + 16)
+        try appendTLS13Record(innerPlaintext: innerPlaintext, to: &record)
+        return record
+    }
+
+    func appendTLS13Record(innerPlaintext: Data, to records: inout Data) throws {
         let egress = nextEgressState()
 
-        let innerLen = plaintext.count + 1
-        let encryptedLen = innerLen + 16
+        let encryptedLen = innerPlaintext.count + 16
 
         var nonce = egress.iv
         xorSeqIntoNonce(&nonce, seqNum: egress.seqNum)
 
-        var innerPlaintext = Data(count: innerLen)
-        innerPlaintext.withUnsafeMutableBytes { buffer in
-            plaintext.copyBytes(to: buffer)
-            buffer[plaintext.count] = contentType
-        }
-
         let aad = Data([TLSContentType.applicationData, 0x03, 0x03, UInt8(encryptedLen >> 8), UInt8(encryptedLen & 0xFF)])
 
-        let (sealedCt, sealedTag) = try sealAEAD(plaintext: innerPlaintext, nonce: nonce, aad: aad, key: egress.symmetricKey)
-
-        var record = Data(capacity: 5 + encryptedLen)
-        record.append(aad)
-        record.append(sealedCt)
-        record.append(sealedTag)
-        return record
+        records.append(aad)
+        try appendSealedAEAD(plaintext: innerPlaintext, nonce: nonce, aad: aad, key: egress.symmetricKey, to: &records)
     }
     
     func decryptTLS13Record(ciphertext: Data, header: Data, ingress: DirectionState, receive state: inout ReceiveState) throws -> Data {

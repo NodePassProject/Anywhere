@@ -108,6 +108,7 @@ nonisolated final class TLSRecordConnection: Sendable {
     }
 
     private static let maxRecordPlaintext = 16384
+    private static let maxRecordOverhead = 96
 
     // MARK: - Receive State
     
@@ -232,9 +233,13 @@ nonisolated final class TLSRecordConnection: Sendable {
     // MARK: - Async Surface
     
     func send(_ data: Data) async throws {
+        try await send(contentsOf: [data])
+    }
+
+    func send(contentsOf parts: [Data]) async throws {
         try await chainedSend { [self] in
             guard let connection else { throw AnywhereError.tls(.record(.connectionUnavailable)) }
-            let record = try buildTLSRecords(for: data)
+            let record = try buildTLSRecords(for: parts)
             try await connection.send(record)
         }
     }
@@ -272,7 +277,13 @@ nonisolated final class TLSRecordConnection: Sendable {
             }
             switch try await connection.receive() {
             case .bytes(let data):
-                receiveState.withLock { $0.buffer.append(data) }
+                receiveState.withLock { state in
+                    if state.buffer.isEmpty {
+                        state.buffer = data
+                    } else {
+                        state.buffer.append(data)
+                    }
+                }
                 continue
             case .end:
                 return nil
@@ -454,27 +465,65 @@ nonisolated final class TLSRecordConnection: Sendable {
 
     // MARK: - TLS Record Crypto
 
-    private func buildTLSRecords(for data: Data) throws -> Data {
-        if data.count <= Self.maxRecordPlaintext {
-            return try encryptSingleRecord(plaintext: data, contentType: TLSContentType.applicationData)
-        }
-
-        let chunkCount = (data.count + Self.maxRecordPlaintext - 1) / Self.maxRecordPlaintext
-        var records = Data(capacity: data.count + chunkCount * 64)
-        var offset = data.startIndex
-        while offset < data.endIndex {
-            let end = min(offset + Self.maxRecordPlaintext, data.endIndex)
-            records.append(try encryptSingleRecord(plaintext: Data(data[offset..<end]), contentType: TLSContentType.applicationData))
-            offset = end
-        }
+    private func buildTLSRecords(for parts: [Data]) throws -> Data {
+        var remaining = parts.reduce(0) { $0 + $1.count }
+        let recordCount = max(1, (remaining + Self.maxRecordPlaintext - 1) / Self.maxRecordPlaintext)
+        var records = Data(capacity: remaining + recordCount * Self.maxRecordOverhead)
+        var cursor = PlaintextCursor(parts)
+        repeat {
+            let length = min(remaining, Self.maxRecordPlaintext)
+            if tlsVersion >= 0x0304 {
+                var innerPlaintext = Data(capacity: length + 1)
+                cursor.append(length, to: &innerPlaintext)
+                innerPlaintext.append(TLSContentType.applicationData)
+                try appendTLS13Record(innerPlaintext: innerPlaintext, to: &records)
+            } else {
+                try appendTLS12Record(plaintext: cursor.take(length), contentType: TLSContentType.applicationData, to: &records)
+            }
+            remaining -= length
+        } while remaining > 0
         return records
     }
 
-    private func encryptSingleRecord(plaintext: Data, contentType: UInt8) throws -> Data {
-        if tlsVersion >= 0x0304 {
-            return try encryptTLS13Record(plaintext: plaintext, contentType: contentType)
-        } else {
-            return try encryptTLS12Record(plaintext: plaintext, contentType: contentType)
+    private struct PlaintextCursor {
+        private let parts: [Data]
+        private var index = 0
+        private var offset: Int
+
+        init(_ parts: [Data]) {
+            self.parts = parts
+            self.offset = parts.first?.startIndex ?? 0
+        }
+
+        mutating func take(_ count: Int) -> Data {
+            skipExhaustedParts()
+            if index < parts.count, parts[index].endIndex - offset >= count {
+                let slice = parts[index][offset..<(offset + count)]
+                offset += count
+                return slice
+            }
+            var gathered = Data(capacity: count)
+            append(count, to: &gathered)
+            return gathered
+        }
+
+        mutating func append(_ count: Int, to data: inout Data) {
+            var needed = count
+            while needed > 0 {
+                skipExhaustedParts()
+                let part = parts[index]
+                let length = min(needed, part.endIndex - offset)
+                data.append(part[offset..<(offset + length)])
+                offset += length
+                needed -= length
+            }
+        }
+
+        private mutating func skipExhaustedParts() {
+            while index < parts.count, offset >= parts[index].endIndex {
+                index += 1
+                if index < parts.count { offset = parts[index].startIndex }
+            }
         }
     }
 
@@ -488,15 +537,17 @@ nonisolated final class TLSRecordConnection: Sendable {
 
     // MARK: - AEAD Helpers
 
-    func sealAEAD(plaintext: Data, nonce: Data, aad: Data, key: SymmetricKey) throws -> (ciphertext: Data, tag: Data) {
+    func appendSealedAEAD(plaintext: Data, nonce: Data, aad: Data, key: SymmetricKey, to record: inout Data) throws {
         if TLSCipherSuite.isChaCha20(cipherSuite) {
             let nonceObj = try ChaChaPoly.Nonce(data: nonce)
             let sealedBox = try ChaChaPoly.seal(plaintext, using: key, nonce: nonceObj, authenticating: aad)
-            return (Data(sealedBox.ciphertext), Data(sealedBox.tag))
+            record.append(sealedBox.ciphertext)
+            record.append(sealedBox.tag)
         } else {
             let nonceObj = try AES.GCM.Nonce(data: nonce)
             let sealedBox = try AES.GCM.seal(plaintext, using: key, nonce: nonceObj, authenticating: aad)
-            return (Data(sealedBox.ciphertext), Data(sealedBox.tag))
+            record.append(sealedBox.ciphertext)
+            record.append(sealedBox.tag)
         }
     }
 

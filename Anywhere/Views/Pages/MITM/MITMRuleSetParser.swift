@@ -188,7 +188,7 @@ enum MITMRuleSetParser {
             let urlPattern = arguments[0]
             let search = arguments[1]
             guard !urlPattern.isEmpty, isValidRegex(urlPattern),
-                  !search.isEmpty, isValidSearchRegex(search) else { return nil }
+                  !search.isEmpty, isValidRegex(search) else { return nil }
             return MITMRule(phase: phase, urlPattern: urlPattern, operation: .bodyReplace(search: search, replacement: arguments[2]))
 
         case 5:
@@ -374,10 +374,6 @@ enum MITMRuleSetParser {
 
     private static func isValidRegex(_ pattern: String) -> Bool {
         (try? NSRegularExpression(pattern: pattern, options: [])) != nil
-    }
-
-    private static func isValidSearchRegex(_ search: String) -> Bool {
-        (try? Regex(search)) != nil
     }
 
     private static func isValidScriptBase64(_ base64: String) -> Bool {

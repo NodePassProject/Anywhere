@@ -69,15 +69,21 @@ actor MITMSession: MITMHTTP1StreamDelegate {
         }
 
         func receive() async throws -> TransportChunk {
-            if let next = try await inbox.next() {
-                acknowledge(state.withLock { state -> Int in
-                    let consumed = min(next.count, state.unconsumedBytes)
+            guard let batch = try await inbox.nextBatch(), let first = batch.first else { return .end }
+            var next = first
+            if batch.count > 1 {
+                next = Data(capacity: batch.reduce(0) { $0 + $1.count })
+                for chunk in batch { next.append(chunk) }
+            }
+            let received = next.count
+            acknowledge(
+                state.withLock { state -> Int in
+                    let consumed = min(received, state.unconsumedBytes)
                     state.unconsumedBytes -= consumed
                     return consumed
-                })
-                return .bytes(next)
-            }
-            return .end
+                }
+            )
+            return .bytes(next)
         }
 
         func cancel() {
@@ -749,9 +755,14 @@ actor MITMSession: MITMHTTP1StreamDelegate {
         }
     }
 
-    private func writeAndWait(_ data: Data, to leg: any MITMByteLeg) async throws {
+    private func writeWithBackpressure(_ data: Data, to leg: any MITMByteLeg) async throws {
         guard phase != .torn else { throw AnywhereError.transport(.notConnected) }
-        try await writer(for: leg).writeAndWait(data)
+        try await writer(for: leg).writeWithBackpressure(data)
+    }
+
+    private func drainWrites(to leg: any MITMByteLeg) async throws {
+        guard phase != .torn else { throw AnywhereError.transport(.notConnected) }
+        try await writer(for: leg).drain()
     }
 
     private func writeThenCancel(_ data: Data, to leg: any MITMByteLeg) {
@@ -799,6 +810,8 @@ actor MITMSession: MITMHTTP1StreamDelegate {
                 return
             }
             guard let data else {
+                if let outer = outerRecord { try? await drainWrites(to: outer) }
+                guard phase != .torn else { return }
                 cancel(error: nil)
                 return
             }
@@ -821,7 +834,7 @@ actor MITMSession: MITMHTTP1StreamDelegate {
 
             if resolvedUpstreamMatchesDialed() {
                 do {
-                    try await writeAndWait(transformed, to: outer)
+                    try await writeWithBackpressure(transformed, to: outer)
                 } catch {
                     guard phase != .torn else { return }
                     cancel(error: error)
@@ -829,6 +842,15 @@ actor MITMSession: MITMHTTP1StreamDelegate {
                 }
                 continue
             }
+
+            do {
+                try await drainWrites(to: outer)
+            } catch {
+                guard phase != .torn else { return }
+                cancel(error: error)
+                return
+            }
+            guard phase != .torn else { return }
 
             if canReconnectOuterLeg() {
                 reconnectOuterLeg(with: transformed, inner: inner)
@@ -1056,17 +1078,13 @@ actor MITMSession: MITMHTTP1StreamDelegate {
             guard let data, !data.isEmpty else {
                 let flushed = await responseStream.finish()
                 guard phase != .torn else { return }
-                if flushed.isEmpty {
-                    cancel(error: nil)
-                } else {
-                    writeThenCancel(flushed, to: inner)
-                }
+                writeThenCancel(flushed, to: inner)
                 return
             }
             let transformed = await outbound.feed(data)
             if transformed.isEmpty { continue }
             do {
-                try await writeAndWait(transformed, to: inner)
+                try await writeWithBackpressure(transformed, to: inner)
             } catch {
                 guard phase != .torn else { return }
                 cancel(error: error)
@@ -1608,15 +1626,16 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
 
     private func appendH1RequestData(streamID: UInt32, _ data: Data, endStream: Bool) {
         guard let bridgeStream = bridgeStreams[streamID] else { return }
-        var out = Data()
+        let out: Data
         switch bridgeStream.framing {
         case .chunked:
-            if !data.isEmpty { out.append(MITMHTTP1Serializer.chunk(data)) }
-            if endStream { out.append(MITMHTTP1Serializer.chunkTerminator) }
+            var chunked = data.isEmpty ? Data() : MITMHTTP1Serializer.chunk(data)
+            if endStream { chunked.append(MITMHTTP1Serializer.chunkTerminator) }
+            out = chunked
         case .contentLength:
-            if !data.isEmpty { out.append(data) }
+            out = data
         case .none:
-            break
+            out = Data()
         }
         guard !out.isEmpty else { return }
         bridgeStream.unsentUpstreamBytes += out.count

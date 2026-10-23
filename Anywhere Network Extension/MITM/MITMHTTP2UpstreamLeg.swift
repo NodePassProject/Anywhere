@@ -432,10 +432,14 @@ actor MITMHTTP2UpstreamLeg {
             upTo: min(entry.streamWindow, entry.remaining.count, cap)
         )
         if available > 0 {
-            let chunk = entry.remaining.popFirst(available)
+            let chunks = entry.remaining.popChunks(available)
             let bodyDone = entry.endStream && entry.remaining.isEmpty
-            delegate?.upstreamLegWriteToOrigin(Codec.frameData(streamID: upstreamStreamID, payload: chunk,
-                                             endStream: bodyDone && entry.pendingTrailers == nil))
+            let frames = Codec.dataFrames(
+                streamID: upstreamStreamID,
+                payload: chunks,
+                endStream: bodyDone && entry.pendingTrailers == nil
+            )
+            for part in frames { delegate?.upstreamLegWriteToOrigin(part) }
             entry.streamWindow -= available
             delegate?.upstreamLegRequestDrained(clientID: clientID, count: available)
             if bodyDone {
@@ -1032,7 +1036,17 @@ actor MITMHTTP2UpstreamLeg {
                 self.assumeIsolated { leg in
                     guard leg.phase != .torn else { return }
                     let regular = scriptedHeaders.filter { !$0.name.hasPrefix(":") }
+                    let original = buffer.headers.filter { !$0.name.hasPrefix(":") }
                     switch outcome {
+                    case .message(let updated) where updated.body == plaintext:
+                        leg.deliverFinalResponse(
+                            streamID: streamID,
+                            status: buffer.status,
+                            headers: original,
+                            body: buffer.data,
+                            trailers: trailers,
+                            neverIndexed: buffer.neverIndexed
+                        )
                     case .message(let updated):
                         var body = updated.body
                         if body.count > plaintext.count, body.count - plaintext.count > Self.maxBufferedRewriteGrowthBytes {
@@ -1051,8 +1065,8 @@ actor MITMHTTP2UpstreamLeg {
                         leg.deliverFinalResponse(
                             streamID: streamID,
                             status: buffer.status,
-                            headers: regular,
-                            body: plaintext,
+                            headers: original,
+                            body: buffer.data,
                             trailers: trailers,
                             neverIndexed: buffer.neverIndexed
                         )

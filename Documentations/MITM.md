@@ -356,12 +356,11 @@ fields are `url-pattern`, a `search` regex, and a `replacement`:
 1, 4, .*, (\d{4})-(\d{2})-(\d{2}), $3/$2/$1
 ```
 
-`search` is a Swift `Regex` matched against the **whole decompressed body**, and
-every match is replaced. `replacement` supports the same capture references as
-`rewrite` (`$0`, `$1`–`$9`, `${10}`, `$$`); an **empty** replacement deletes
-matches. A rule whose `search` is empty or won't compile is dropped. Quote a
-field containing a comma or leading `"`, doubling inner quotes — so the literal
-`"price":` is written `"""price"":"`.
+`search` is an `NSRegularExpression` matched against the **whole decompressed body**,
+and every match is replaced. `replacement` supports the same capture references
+as `rewrite`; an **empty** replacement deletes matches. A rule whose `search` is
+empty or won't compile is dropped. Quote a field containing a comma or leading `"`,
+doubling inner quotes — so the literal `"price":` is written `"""price"":"`.
 
 The body is decoded as UTF-8, with a Latin-1 fallback that accepts **any** byte
 sequence — there is no charset detection. A non-UTF-8 body (UTF-16, GBK, …) is
@@ -1044,7 +1043,9 @@ function process(ctx) {
 
 - **Content-Encoding.** For `script` rules the body is decompressed before the
   script runs and re-emitted as identity with `Content-Encoding` dropped and a
-  fresh `Content-Length`. `stream-script` rules see raw, still-compressed frames.
+  fresh `Content-Length`. If the body rules leave the decompressed body
+  byte-for-byte unchanged, the original compressed bytes and `Content-Encoding`
+  are forwarded instead. `stream-script` rules see raw, still-compressed frames.
   A concatenated multi-member `gzip` body — or one truncated or corrupt past its
   first member — is left compressed and forwarded unrewritten.
 - **Transfer-Encoding content-codings.** A body whose `Transfer-Encoding` carries

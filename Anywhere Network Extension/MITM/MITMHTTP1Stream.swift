@@ -215,6 +215,8 @@ actor MITMHTTP1Stream {
 
     private var headScanned: Int = 0
 
+    private var verbatimHead: (startLine: String, headers: [Header], bytes: Data)?
+
     private var pendingClientBytes = Data()
 
     private var pendingSynthesizedAfterCurrentResponse = Data()
@@ -250,9 +252,11 @@ actor MITMHTTP1Stream {
             continuation.resume(returning: data)
             return
         }
-        receiveBuffer.append(data)
         parkedContinuation = continuation
         var output = Data()
+        let unread = forwardLengthDirectly(data, into: &output)
+        guard phase != .torn else { return }
+        if !unread.isEmpty { receiveBuffer.append(unread) }
         while drive(into: &output) { }
         finishDrivePass(output)
     }
@@ -281,6 +285,7 @@ actor MITMHTTP1Stream {
         receiveBuffer = MITMByteBuffer()
         bodyAccumulator = Data()
         chunkAccumulator = Data()
+        verbatimHead = nil
         pendingGateTables = PendingGateTables()
         forcePassthroughPending = false
         pendingClientBytes.removeAll(keepingCapacity: false)
@@ -306,7 +311,7 @@ actor MITMHTTP1Stream {
         forcePassthroughPending = false
         var resumed = pendingPreParkOutput
         pendingPreParkOutput = Data()
-        resumed.append(receiveBuffer.prefix(receiveBuffer.count))
+        receiveBuffer.appendPrefix(receiveBuffer.count, to: &resumed)
         receiveBuffer.removeAll(keepingCapacity: false)
         headScanned = 0
         mode = .passthrough
@@ -390,7 +395,7 @@ actor MITMHTTP1Stream {
         switch mode {
         case .passthrough:
             if bridgeResetIfNeeded() { return false }
-            output.append(receiveBuffer.prefix(receiveBuffer.count))
+            receiveBuffer.appendPrefix(receiveBuffer.count, to: &output)
             receiveBuffer.removeAll(keepingCapacity: false)
             return false
 
@@ -476,6 +481,7 @@ actor MITMHTTP1Stream {
         switch parseHead(headData) {
         case .ok(let parsedHead):
             parsed = parsedHead
+            verbatimHead = parsedHead.verbatim.map { (startLine: parsedHead.startLine, headers: parsedHead.headers, bytes: $0) }
         case .forward:
             receiveBuffer.removeFirst(headEnd)
             mode = .passthrough
@@ -890,19 +896,38 @@ actor MITMHTTP1Stream {
     private func forwardLength(remaining: Int, into output: inout Data) -> Bool {
         guard !receiveBuffer.isEmpty else { return false }
         let take = min(remaining, receiveBuffer.count)
-        let slice = Data(receiveBuffer.prefix(take))
-        receiveBuffer.removeFirst(take)
         let left = remaining - take
-        if !emitBridgeBody(slice, endStream: left == 0) {
-            output.append(slice)
+        if responseIRSink != nil {
+            let slice = receiveBuffer.prefix(take)
+            receiveBuffer.removeFirst(take)
+            _ = emitBridgeBody(slice, endStream: left == 0)
+        } else {
+            receiveBuffer.appendPrefix(take, to: &output)
+            receiveBuffer.removeFirst(take)
         }
+        finishForwardedLength(left: left, into: &output)
+        return true
+    }
+
+    private func forwardLengthDirectly(_ data: Data, into output: inout Data) -> Data {
+        guard receiveBuffer.isEmpty, !data.isEmpty, case .forwardingLength(let remaining) = mode else { return data }
+        let take = min(remaining, data.count)
+        let left = remaining - take
+        let body = data.prefix(take)
+        if !emitBridgeBody(body, endStream: left == 0) {
+            if output.isEmpty { output = body } else { output.append(body) }
+        }
+        finishForwardedLength(left: left, into: &output)
+        return take == data.count ? Data() : data.suffix(from: data.startIndex + take)
+    }
+
+    private func finishForwardedLength(left: Int, into output: inout Data) {
         if left == 0 {
             flushSynthesizedAfterResponse(into: &output)
             mode = .awaitingHead
         } else {
             mode = .forwardingLength(remaining: left)
         }
-        return true
     }
 
     private func forwardChunked(reader: inout ChunkedReader, into output: inout Data) -> Bool {
@@ -950,7 +975,7 @@ actor MITMHTTP1Stream {
         guard !receiveBuffer.isEmpty else { return false }
         let needed = expected - bodyAccumulator.count
         let take = min(needed, receiveBuffer.count)
-        bodyAccumulator.append(receiveBuffer.prefix(take))
+        receiveBuffer.appendPrefix(take, to: &bodyAccumulator)
         receiveBuffer.removeFirst(take)
         if bodyAccumulator.count == expected {
             let parked = applyScriptsAndEmit(
@@ -1004,7 +1029,7 @@ actor MITMHTTP1Stream {
         into output: inout Data
     ) -> Bool {
         guard !receiveBuffer.isEmpty else { return false }
-        bodyAccumulator.append(receiveBuffer.prefix(receiveBuffer.count))
+        receiveBuffer.appendPrefix(receiveBuffer.count, to: &bodyAccumulator)
         receiveBuffer.removeAll(keepingCapacity: false)
         if bodyAccumulator.count > MITMBodyCodec.maxBufferedBodyBytes {
             logger.warning("HTTP/1 \(host): read-until-close body exceeded cap \(MITMBodyCodec.maxBufferedBodyBytes) B; bypassing Script and forwarding verbatim")
@@ -1039,10 +1064,10 @@ actor MITMHTTP1Stream {
                     mode = .streamingChunked(streaming: streaming, inner: .sizeLine)
                     return false
                 }
-                let line = receiveBuffer.subdata(in: 0..<lineEnd)
+                let parsedSize = receiveBuffer.withUnsafeBytes(in: 0..<lineEnd, Self.parseHexSize)
                 receiveBuffer.removeFirst(lineEnd + 2)
                 streaming.lineScanCursor = 0
-                guard let size = Self.parseHexSize(line) else {
+                guard let size = parsedSize else {
                     logger.warning("HTTP/1 \(host): malformed chunk-size line; closing the connection")
                     receiveBuffer.removeAll(keepingCapacity: false)
                     mode = .draining
@@ -1073,7 +1098,7 @@ actor MITMHTTP1Stream {
                     return false
                 }
                 let take = min(remaining, receiveBuffer.count)
-                chunkAccumulator.append(receiveBuffer.prefix(take))
+                receiveBuffer.appendPrefix(take, to: &chunkAccumulator)
                 receiveBuffer.removeFirst(take)
                 let left = remaining - take
                 if left != 0, chunkAccumulator.count > MITMBodyCodec.maxBufferedBodyBytes {
@@ -1143,12 +1168,10 @@ actor MITMHTTP1Stream {
                     mode = .streamingChunked(streaming: streaming, inner: .trailerOrEnd)
                     return false
                 }
-                let line = receiveBuffer.subdata(in: 0..<lineEnd)
+                receiveBuffer.appendPrefix(lineEnd + 2, to: &output)
                 receiveBuffer.removeFirst(lineEnd + 2)
                 streaming.lineScanCursor = 0
-                output.append(line)
-                output.append(contentsOf: [0x0D, 0x0A])
-                if line.isEmpty {
+                if lineEnd == 0 {
                     flushSynthesizedAfterResponse(into: &output)
                     mode = .awaitingHead
                     return true
@@ -1266,12 +1289,24 @@ actor MITMHTTP1Stream {
         return HTTPHeader.parseStatusCode(parts[1])
     }
 
-    fileprivate static func parseHexSize(_ data: Data) -> Int? {
-        guard let raw = String(data: data, encoding: .isoLatin1) else { return nil }
-        let head = raw.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? raw
-        let trimmed = head.trimmingCharacters(in: Self.fieldValueOWS)
-        guard !trimmed.isEmpty, trimmed.allSatisfy({ $0.isHexDigit && $0.isASCII }),
-              let size = Int(trimmed, radix: 16), size >= 0 else { return nil }
+    fileprivate static func parseHexSize(_ line: UnsafeRawBufferPointer) -> Int? {
+        var end = line.firstIndex(of: 0x3B) ?? line.count
+        var start = 0
+        while start < end, line[start] == 0x20 || line[start] == 0x09 { start += 1 }
+        while end > start, line[end - 1] == 0x20 || line[end - 1] == 0x09 { end -= 1 }
+        guard start < end else { return nil }
+        var size = 0
+        for byte in line[start..<end] {
+            let digit: Int
+            switch byte {
+            case 0x30...0x39: digit = Int(byte - 0x30)
+            case 0x41...0x46: digit = Int(byte - 0x37)
+            case 0x61...0x66: digit = Int(byte - 0x57)
+            default: return nil
+            }
+            guard size <= Int.max >> 4 else { return nil }
+            size = size << 4 | digit
+        }
         return size
     }
 
@@ -1343,13 +1378,16 @@ actor MITMHTTP1Stream {
             body: body,
             originatingRequest: pending.originatingRequest
         )
+        let encodedOriginal = pending.codec.requiresDecompression ? (raw: rawBody, decoded: body) : nil
         mode = .awaitingScript
         let rules = self.rules
         pendingHop = Task { [weak self] in
             let outcome = await MITMScriptTransform.apply(message, rules: rules)
             guard let self else { return }
             self.sessionContext.enqueue {
-                self.assumeIsolated { $0.resumeBufferedBody(outcome: outcome, pending: pending, resumeMode: resumeMode) }
+                self.assumeIsolated {
+                    $0.resumeBufferedBody(outcome: outcome, pending: pending, encodedOriginal: encodedOriginal, resumeMode: resumeMode)
+                }
             }
         }
         return true
@@ -1358,6 +1396,7 @@ actor MITMHTTP1Stream {
     private func resumeBufferedBody(
         outcome: MITMScriptTransform.Outcome,
         pending: PendingHead,
+        encodedOriginal: (raw: Data, decoded: Data)?,
         resumeMode: ResumeMode
     ) {
         guard phase != .torn else { return }
@@ -1367,18 +1406,28 @@ actor MITMHTTP1Stream {
         switch outcome {
         case .message(let result):
             let finalStartLine = rebuildStartLine(from: result, fallback: pending.startLine)
-            var finalHeaders = strippedFramingHeaders(result.headers, dropContentEncoding: pending.codec.requiresDecompression)
-            finalHeaders.append((name: "Content-Length", value: String(result.body.count)))
+            let keptRaw = encodedOriginal.flatMap { original -> Data? in
+                let unchanged = result.body == original.decoded
+                    && combinedHeaderValue(result.headers, name: "content-encoding")
+                        == combinedHeaderValue(pending.headers, name: "content-encoding")
+                return unchanged ? original.raw : nil
+            }
+            let body = keptRaw ?? result.body
+            var finalHeaders = strippedFramingHeaders(
+                result.headers,
+                dropContentEncoding: pending.codec.requiresDecompression && keptRaw == nil
+            )
+            finalHeaders.append((name: "Content-Length", value: String(body.count)))
             if direction == .httpRequest {
                 logRequest(startLine: finalStartLine)
             }
             if responseIRSink != nil {
-                emitResponseHead(startLine: finalStartLine, headers: finalHeaders, bodyFollows: !result.body.isEmpty, into: &resumed)
-                if !result.body.isEmpty { _ = emitBridgeBody(result.body, endStream: true) }
+                emitResponseHead(startLine: finalStartLine, headers: finalHeaders, bodyFollows: !body.isEmpty, into: &resumed)
+                if !body.isEmpty { _ = emitBridgeBody(body, endStream: true) }
             } else {
                 resumed.append(serializeHead(startLine: finalStartLine, headers: finalHeaders))
-                if !result.body.isEmpty {
-                    resumed.append(result.body)
+                if !body.isEmpty {
+                    resumed.append(body)
                 }
             }
         case .synthesizedResponse(let response):
@@ -1540,6 +1589,7 @@ actor MITMHTTP1Stream {
     private struct ParsedHead {
         let startLine: String
         let headers: [Header]
+        let verbatim: Data?
     }
 
     private enum ParsedHeadResult {
@@ -1548,37 +1598,79 @@ actor MITMHTTP1Stream {
         case smuggling
     }
 
+    private enum FieldLine {
+        case span(Range<Int>)
+        case folded([UInt8])
+
+        func bytes(in head: UnsafeRawBufferPointer) -> [UInt8] {
+            switch self {
+            case .span(let range): return Array(head[range])
+            case .folded(let joined): return joined
+            }
+        }
+    }
+
     private static let fieldValueOWS = CharacterSet(charactersIn: " \t")
 
     private func parseHead(_ data: Data) -> ParsedHeadResult {
-        guard let raw = String(data: data, encoding: .isoLatin1) else { return .forward }
-        let lines = raw.components(separatedBy: "\r\n")
-        guard let startLine = lines.first, !startLine.isEmpty else { return .forward }
+        data.withUnsafeBytes { parseHead($0, verbatim: data) }
+    }
+
+    private func parseHead(_ bytes: UnsafeRawBufferPointer, verbatim: Data) -> ParsedHeadResult {
+        var lines: [Range<Int>] = []
+        var lineStart = 0
+        var index = 0
+        while index + 1 < bytes.count {
+            if bytes[index] == 0x0D, bytes[index + 1] == 0x0A {
+                lines.append(lineStart..<index)
+                index += 2
+                lineStart = index
+            } else {
+                index += 1
+            }
+        }
+        lines.append(lineStart..<bytes.count)
+        guard let firstLine = lines.first, !firstLine.isEmpty else { return .forward }
+        let startLine = Self.latin1String(UnsafeRawBufferPointer(rebasing: bytes[firstLine]))
         guard isHTTPStartLine(startLine) else {
             return parsesStartLine(startLine) ? .forward : .smuggling
         }
         if Self.containsCRorLF(startLine) { return .smuggling }
         guard parsesStartLine(startLine) else { return .smuggling }
         if direction == .httpRequest, isConnectRequestLine(startLine) { return .smuggling }
-        var headerLines: [String] = []
+        var fieldLines: [FieldLine] = []
+        var sawFold = false
         for line in lines.dropFirst() {
             if line.isEmpty { continue }
-            if let first = line.utf8.first, first == 0x20 || first == 0x09 {
-                guard !headerLines.isEmpty else { return .smuggling } // continuation with no field
-                let continuation = line.drop { $0 == " " || $0 == "\t" }
-                headerLines[headerLines.count - 1] += " " + String(continuation)
+            let first = bytes[line.lowerBound]
+            if first == 0x20 || first == 0x09 {
+                guard let previous = fieldLines.popLast() else { return .smuggling } // continuation with no field
+                var contentStart = line.lowerBound
+                while contentStart < line.upperBound, bytes[contentStart] == 0x20 || bytes[contentStart] == 0x09 {
+                    contentStart += 1
+                }
+                var joined = previous.bytes(in: bytes)
+                joined.append(0x20)
+                joined.append(contentsOf: bytes[contentStart..<line.upperBound])
+                fieldLines.append(.folded(joined))
+                sawFold = true
                 continue
             }
-            headerLines.append(line)
+            fieldLines.append(.span(line))
         }
         var headers: [Header] = []
+        headers.reserveCapacity(fieldLines.count)
         var contentLengthValues: [String] = []
         var transferEncodingValues: [String] = []
-        for line in headerLines {
-            guard let colon = line.firstIndex(of: ":") else { return .smuggling }
-            let name = String(line[..<colon])
-            let value = String(line[line.index(after: colon)...])
-                .trimmingCharacters(in: Self.fieldValueOWS)
+        for fieldLine in fieldLines {
+            let field: Header?
+            switch fieldLine {
+            case .span(let range):
+                field = Self.parseFieldLine(UnsafeRawBufferPointer(rebasing: bytes[range]))
+            case .folded(let joined):
+                field = joined.withUnsafeBytes { Self.parseFieldLine($0) }
+            }
+            guard let (name, value) = field else { return .smuggling }
             guard HTTPHeader.isValidName(name) else { return .smuggling }
             if Self.containsCRorLF(value) { return .smuggling }
             if ASCII.equalsIgnoringCase(name, "content-length") {
@@ -1611,7 +1703,28 @@ actor MITMHTTP1Stream {
         if !transferEncodingValues.isEmpty && !contentLengthValues.isEmpty {
             return .smuggling
         }
-        return .ok(ParsedHead(startLine: startLine, headers: headers))
+        return .ok(ParsedHead(startLine: startLine, headers: headers, verbatim: sawFold ? nil : verbatim))
+    }
+
+    private static func parseFieldLine(_ line: UnsafeRawBufferPointer) -> Header? {
+        guard let colon = line.firstIndex(of: 0x3A) else { return nil }
+        var valueStart = colon + 1
+        var valueEnd = line.count
+        while valueStart < valueEnd, line[valueStart] == 0x20 || line[valueStart] == 0x09 { valueStart += 1 }
+        while valueEnd > valueStart, line[valueEnd - 1] == 0x20 || line[valueEnd - 1] == 0x09 { valueEnd -= 1 }
+        return (
+            name: latin1String(UnsafeRawBufferPointer(rebasing: line[..<colon])),
+            value: latin1String(UnsafeRawBufferPointer(rebasing: line[valueStart..<valueEnd]))
+        )
+    }
+
+    private static func latin1String(_ bytes: UnsafeRawBufferPointer) -> String {
+        if !bytes.contains(where: { $0 >= 0x80 }) {
+            return String(decoding: bytes, as: UTF8.self)
+        }
+        var scalars = String.UnicodeScalarView()
+        for byte in bytes { scalars.append(Unicode.Scalar(byte)) }
+        return String(scalars)
     }
 
     static func isCleanContentLength(_ trimmed: String) -> Bool {
@@ -1727,6 +1840,12 @@ actor MITMHTTP1Stream {
     }
 
     private func serializeHead(startLine: String, headers: [Header]) -> Data {
+        if let verbatim = verbatimHead,
+           verbatim.startLine == startLine,
+           verbatim.headers.elementsEqual(headers, by: { $0.name == $1.name && $0.value == $1.value }) {
+            verbatimHead = nil
+            return verbatim.bytes
+        }
         let safeHeaders = headers.filter { entry in
             guard !Self.containsCRorLF(entry.name),
                   !Self.containsCRorLF(entry.value) else {
@@ -2126,10 +2245,10 @@ nonisolated private final class ChunkedReader {
                     scanCursor = max(0, buffer.count - 1)
                     return .needMore
                 }
-                let line = buffer.subdata(in: 0..<lineEnd)
-                guard let size = MITMHTTP1Stream.parseHexSize(line) else { return .malformed }
-                output.append(line)
-                output.append(contentsOf: [0x0D, 0x0A])
+                guard let size = buffer.withUnsafeBytes(in: 0..<lineEnd, MITMHTTP1Stream.parseHexSize) else {
+                    return .malformed
+                }
+                buffer.appendPrefix(lineEnd + 2, to: &output)
                 buffer.removeFirst(lineEnd + 2)
                 scanCursor = 0
                 if size == 0 {
@@ -2139,7 +2258,7 @@ nonisolated private final class ChunkedReader {
                 }
             case .chunkData(let remaining, let originalSize):
                 let take = min(remaining, buffer.count)
-                output.append(buffer.prefix(take))
+                buffer.appendPrefix(take, to: &output)
                 buffer.removeFirst(take)
                 let left = remaining - take
                 if left == 0 {
@@ -2162,12 +2281,10 @@ nonisolated private final class ChunkedReader {
                     scanCursor = max(0, buffer.count - 1)
                     return .needMore
                 }
-                let line = buffer.subdata(in: 0..<lineEnd)
-                output.append(line)
-                output.append(contentsOf: [0x0D, 0x0A])
+                buffer.appendPrefix(lineEnd + 2, to: &output)
                 buffer.removeFirst(lineEnd + 2)
                 scanCursor = 0
-                if line.isEmpty {
+                if lineEnd == 0 {
                     return .complete
                 }
             }
@@ -2184,8 +2301,9 @@ nonisolated private final class ChunkedReader {
                     scanCursor = max(0, buffer.count - 1)
                     return .needMore
                 }
-                let line = buffer.subdata(in: 0..<lineEnd)
-                guard let size = MITMHTTP1Stream.parseHexSize(line) else { return .malformed }
+                guard let size = buffer.withUnsafeBytes(in: 0..<lineEnd, MITMHTTP1Stream.parseHexSize) else {
+                    return .malformed
+                }
                 buffer.removeFirst(lineEnd + 2)
                 scanCursor = 0
                 state = size == 0 ? .trailerOrEnd : .chunkData(remaining: size, originalSize: size)
@@ -2211,10 +2329,9 @@ nonisolated private final class ChunkedReader {
                     scanCursor = max(0, buffer.count - 1)
                     return .needMore
                 }
-                let line = buffer.subdata(in: 0..<lineEnd)
                 buffer.removeFirst(lineEnd + 2)
                 scanCursor = 0
-                if line.isEmpty { return .complete }
+                if lineEnd == 0 { return .complete }
             }
         }
         return .needMore
@@ -2229,10 +2346,10 @@ nonisolated private final class ChunkedReader {
                     scanCursor = max(0, buffer.count - 1)
                     return .needMore
                 }
-                let line = buffer.subdata(in: 0..<lineEnd)
+                let parsedSize = buffer.withUnsafeBytes(in: 0..<lineEnd, MITMHTTP1Stream.parseHexSize)
                 buffer.removeFirst(lineEnd + 2)
                 scanCursor = 0
-                guard let size = MITMHTTP1Stream.parseHexSize(line) else { return .malformed }
+                guard let size = parsedSize else { return .malformed }
                 if size == 0 {
                     state = .trailerOrEnd
                 } else {
@@ -2240,7 +2357,7 @@ nonisolated private final class ChunkedReader {
                 }
             case .chunkData(let remaining, let originalSize):
                 let take = min(remaining, buffer.count)
-                output.append(buffer.prefix(take))
+                buffer.appendPrefix(take, to: &output)
                 buffer.removeFirst(take)
                 let left = remaining - take
                 if left == 0 {
@@ -2263,10 +2380,9 @@ nonisolated private final class ChunkedReader {
                     scanCursor = max(0, buffer.count - 1)
                     return .needMore
                 }
-                let line = buffer.subdata(in: 0..<lineEnd)
                 buffer.removeFirst(lineEnd + 2)
                 scanCursor = 0
-                if line.isEmpty {
+                if lineEnd == 0 {
                     return .complete(sizes: sizes)
                 }
             }

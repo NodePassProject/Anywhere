@@ -165,6 +165,39 @@ nonisolated enum MITMHTTP2FrameCodec {
         return out
     }
 
+    static func dataFrames(streamID: UInt32, payload parts: [Data], endStream: Bool) -> [Data] {
+        var remaining = parts.reduce(0) { $0 + $1.count }
+        var frames: [Data] = []
+        var partIndex = 0
+        var offset = parts.first?.startIndex ?? 0
+        repeat {
+            let length = min(remaining, maxFramePayloadSize)
+            remaining -= length
+            var header = Data(capacity: 9)
+            appendFrameHeader(
+                typeCode: FrameType.data,
+                flags: (remaining == 0 && endStream) ? 0x1 : 0,
+                streamID: streamID,
+                payloadLength: length,
+                into: &header
+            )
+            frames.append(header)
+            var needed = length
+            while needed > 0 {
+                if offset >= parts[partIndex].endIndex {
+                    partIndex += 1
+                    offset = parts[partIndex].startIndex
+                    continue
+                }
+                let take = min(needed, parts[partIndex].endIndex - offset)
+                frames.append(parts[partIndex][offset..<(offset + take)])
+                offset += take
+                needed -= take
+            }
+        } while remaining > 0
+        return frames
+    }
+
     // MARK: Control frames
 
     static func settingsAck() -> Data {

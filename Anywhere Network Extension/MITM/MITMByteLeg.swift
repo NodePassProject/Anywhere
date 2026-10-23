@@ -17,6 +17,8 @@ nonisolated protocol MITMByteLeg: AnyObject, Sendable {
 
     func send(_ data: Data) async throws
 
+    func send(contentsOf parts: [Data]) async throws
+
     func cancel()
 }
 
@@ -77,6 +79,16 @@ nonisolated final class PlaintextLeg: MITMByteLeg, Sendable {
 
     func send(_ data: Data) async throws {
         try await transport.send(data)
+    }
+
+    func send(contentsOf parts: [Data]) async throws {
+        if parts.count == 1, parts[0].startIndex == 0 {
+            try await transport.send(parts[0])
+            return
+        }
+        var joined = Data(capacity: parts.reduce(0) { $0 + $1.count })
+        for part in parts { joined.append(part) }
+        try await transport.send(joined)
     }
 
     func cancel() {

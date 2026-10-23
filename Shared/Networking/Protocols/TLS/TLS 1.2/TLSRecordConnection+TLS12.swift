@@ -14,19 +14,19 @@ nonisolated extension TLSRecordConnection {
 
     // MARK: - TLS 1.2 Record Crypto
 
-    func encryptTLS12Record(plaintext: Data, contentType: UInt8 = TLSContentType.applicationData) throws -> Data {
+    func appendTLS12Record(plaintext: Data, contentType: UInt8, to records: inout Data) throws {
         let egress = nextEgressState()
 
         let version = tlsVersion
 
         if TLSCipherSuite.isAEAD(cipherSuite) {
-            return try encryptTLS12AEAD(plaintext: plaintext, contentType: contentType, egress: egress, version: version)
+            try appendTLS12AEAD(plaintext: plaintext, contentType: contentType, egress: egress, version: version, to: &records)
         } else {
-            return try encryptTLS12CBC(plaintext: plaintext, contentType: contentType, egress: egress, version: version)
+            records.append(try encryptTLS12CBC(plaintext: plaintext, contentType: contentType, egress: egress, version: version))
         }
     }
 
-    private func encryptTLS12AEAD(plaintext: Data, contentType: UInt8, egress: DirectionState, version: UInt16) throws -> Data {
+    private func appendTLS12AEAD(plaintext: Data, contentType: UInt8, egress: DirectionState, version: UInt16, to records: inout Data) throws {
         let seqNum = egress.seqNum
         let isChaCha = TLSCipherSuite.isChaCha20(cipherSuite)
         let explicitNonceLen = isChaCha ? 0 : 8
@@ -55,19 +55,14 @@ nonisolated extension TLSRecordConnection {
         aad.append(UInt8((plaintext.count >> 8) & 0xFF))
         aad.append(UInt8(plaintext.count & 0xFF))
 
-        let (ct, tag) = try sealAEAD(plaintext: plaintext, nonce: nonce, aad: aad, key: egress.symmetricKey)
-
-        let recordPayloadLen = explicitNonceLen + ct.count + tag.count
-        var record = Data(capacity: 5 + recordPayloadLen)
-        record.append(contentType)
-        record.append(UInt8(version >> 8))
-        record.append(UInt8(version & 0xFF))
-        record.append(UInt8((recordPayloadLen >> 8) & 0xFF))
-        record.append(UInt8(recordPayloadLen & 0xFF))
-        record.append(explicitNonce)
-        record.append(ct)
-        record.append(tag)
-        return record
+        let recordPayloadLen = explicitNonceLen + plaintext.count + 16
+        records.append(contentType)
+        records.append(UInt8(version >> 8))
+        records.append(UInt8(version & 0xFF))
+        records.append(UInt8((recordPayloadLen >> 8) & 0xFF))
+        records.append(UInt8(recordPayloadLen & 0xFF))
+        records.append(explicitNonce)
+        try appendSealedAEAD(plaintext: plaintext, nonce: nonce, aad: aad, key: egress.symmetricKey, to: &records)
     }
 
     private func encryptTLS12CBC(plaintext: Data, contentType: UInt8, egress: DirectionState, version: UInt16) throws -> Data {
@@ -162,8 +157,8 @@ nonisolated extension TLSRecordConnection {
             throw AnywhereError.tls(.record(.ciphertextTooShort))
         }
 
-        let explicitNonce = isChaCha ? Data() : Data(ciphertext.prefix(explicitNonceLen))
-        let payload = Data(ciphertext.suffix(from: ciphertext.startIndex + explicitNonceLen))
+        let explicitNonce = isChaCha ? Data() : ciphertext.prefix(explicitNonceLen)
+        let payload = ciphertext.suffix(from: ciphertext.startIndex + explicitNonceLen)
 
         let nonce: Data
         if isChaCha {
@@ -185,8 +180,8 @@ nonisolated extension TLSRecordConnection {
         aad.append(UInt8((plaintextLen >> 8) & 0xFF))
         aad.append(UInt8(plaintextLen & 0xFF))
 
-        let ct = Data(payload.prefix(payload.count - 16))
-        let tag = Data(payload.suffix(16))
+        let ct = payload.prefix(payload.count - 16)
+        let tag = payload.suffix(16)
 
         return try openAEAD(ciphertext: ct, tag: tag, nonce: nonce, aad: aad, key: ingress.symmetricKey)
     }

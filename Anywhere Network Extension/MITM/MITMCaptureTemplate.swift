@@ -7,8 +7,6 @@
 
 import Foundation
 
-/// Capture refs: `$0` whole match, `$1`…`$9` single-digit groups, `${10}` braced for
-/// any index, `$$` a literal `$`; any other `$` stays literal.
 nonisolated struct MITMCaptureTemplate: Equatable {
     private enum Token: Equatable {
         case literal(String)
@@ -17,7 +15,6 @@ nonisolated struct MITMCaptureTemplate: Equatable {
 
     private let tokens: [Token]
 
-    /// True when any `$N` reference is present; lets callers pick the static vs templated path.
     let referencesCaptures: Bool
 
     init(_ raw: String) {
@@ -80,7 +77,6 @@ nonisolated struct MITMCaptureTemplate: Equatable {
     }
 
     func expand(_ captureLookup: (Int) -> String?) -> String {
-        // Fast path: literal-only template, the common case.
         if tokens.count == 1, case .literal(let text) = tokens[0] { return text }
         var out = ""
         for token in tokens {
@@ -94,22 +90,28 @@ nonisolated struct MITMCaptureTemplate: Equatable {
         return out
     }
 
-    /// Expands against an array of capture strings (index 0 = whole match).
     func expand(captures: [String?]) -> String {
         expand { index in (index >= 0 && index < captures.count) ? captures[index] : nil }
     }
 
-    /// Expands against a Swift `Regex` match's output (index 0 = whole match).
-    func expand(output: AnyRegexOutput) -> String {
-        expand { index in
-            guard index >= 0, index < output.count else { return nil }
-            return output[index].substring.map(String.init)
+    func regularExpressionTemplate(captureGroupCount: Int) -> String {
+        var out = ""
+        var followsGroup = false
+        for token in tokens {
+            switch token {
+            case .literal(let text):
+                var escaped = NSRegularExpression.escapedTemplate(for: text)
+                if followsGroup, let first = escaped.first, first.isASCII, first.isNumber {
+                    escaped.insert("\\", at: escaped.startIndex)
+                }
+                out += escaped
+                followsGroup = false
+            case .group(let index):
+                guard index <= captureGroupCount else { continue }
+                out += "$\(index)"
+                followsGroup = true
+            }
         }
-    }
-
-    /// Verbatim replacement when no captures are referenced (`$$` already reduced to `$`),
-    /// else `nil`; lets the hot path use a constant with `String.replacing(_:with:)`.
-    var staticReplacement: String? {
-        referencesCaptures ? nil : expand { _ in nil }
+        return out
     }
 }

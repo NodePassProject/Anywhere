@@ -888,6 +888,15 @@ actor MITMBridgeClientLeg: MITMResponseSink {
                     guard leg.phase != .torn else { return }
                     guard leg.streamMethods[streamID] != nil else { return }
                     switch outcome {
+                    case .message(let updated) where updated.body == plaintext:
+                        leg.emitBufferedRequest(
+                            streamID: streamID,
+                            headers: buffer.rewrittenHeaders,
+                            body: buffer.data,
+                            neverIndexed: buffer.neverIndexed,
+                            resolvedUpstream: buffer.resolvedUpstream,
+                            originalURL: buffer.originalURL
+                        )
                     case .message(let updated):
                         leg.emitBufferedRequest(
                             streamID: streamID,
@@ -1052,7 +1061,8 @@ actor MITMBridgeClientLeg: MITMResponseSink {
         paceStates[streamID]?.pending.append(data)
         if endStream { paceStates[streamID]?.sawEnd = true }
         flushResponse(streamID)
-        if let backlog = paceStates[streamID]?.pending.count, backlog > Self.maxClientBufferedBytes {
+        guard let backlog = paceStates[streamID]?.pending.count, backlog > 0 else { return }
+        if backlog > Self.maxClientBufferedBytes {
             logger.warning("bridge \(host) stream \(streamID): client-bound backlog \(backlog) B over cap; resetting stream")
             rstToClient(streamID, errorCode: Codec.ErrorCode.internalError, abortUpstream: true)
             return
@@ -1075,8 +1085,10 @@ actor MITMBridgeClientLeg: MITMResponseSink {
         if available > 0 {
             let bodyDrained = paceState.sawEnd && available == paceState.pending.count
             let endOnData = bodyDrained && paceState.pendingTrailers == nil
-            let chunk = paceState.pending.popFirst(available)
-            delegate?.clientLegWriteToClient(Codec.frameData(streamID: streamID, payload: chunk, endStream: endOnData))
+            let chunks = paceState.pending.popChunks(available)
+            for part in Codec.dataFrames(streamID: streamID, payload: chunks, endStream: endOnData) {
+                delegate?.clientLegWriteToClient(part)
+            }
             paceState.streamWindow -= available
             if endOnData { paceState.isFinished = true }
             delegate?.clientLegResponseDrained(streamID: streamID, byteCount: available)

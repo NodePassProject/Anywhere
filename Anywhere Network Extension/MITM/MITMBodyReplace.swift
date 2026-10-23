@@ -12,15 +12,14 @@ nonisolated private let logger = AnywhereLogger(category: "MITMBodyReplace")
 
 nonisolated enum MITMBodyReplace {
     struct CompiledOperation {
-        let search: Regex<AnyRegexOutput>
-        let template: MITMCaptureTemplate
-        let staticReplacement: String?
+        let search: NSRegularExpression
+        let template: String
     }
 
     static func compile(search: String, replacement: String) -> CompiledOperation? {
-        guard let regex = try? Regex(search) else { return nil }
-        let template = MITMCaptureTemplate(replacement)
-        return CompiledOperation(search: regex, template: template, staticReplacement: template.staticReplacement)
+        guard let regex = try? NSRegularExpression(pattern: search, options: []) else { return nil }
+        let template = MITMCaptureTemplate(replacement).regularExpressionTemplate(captureGroupCount: regex.numberOfCaptureGroups)
+        return CompiledOperation(search: regex, template: template)
     }
 
     static func applyAll(_ operations: [CompiledOperation], to body: Data) async -> Data {
@@ -37,14 +36,27 @@ nonisolated enum MITMBodyReplace {
             return body
         }
         var current = text
+        var replacedAny = false
         for operation in operations {
-            guard let replaced = await boundedReplace(current, operation: operation) else {
+            switch await boundedReplace(current, operation: operation) {
+            case .failed:
                 return body
+            case .unmatched:
+                continue
+            case .replaced(let replaced):
+                current = replaced
+                replacedAny = true
             }
-            current = replaced
         }
+        guard replacedAny else { return body }
         guard let out = current.data(using: encoding) else { return body }
         return out
+    }
+
+    private enum Substitution {
+        case replaced(String)
+        case unmatched
+        case failed
     }
 
     private static let substitutionTimeLimitSeconds = 1
@@ -52,22 +64,18 @@ nonisolated enum MITMBodyReplace {
 
     private static let substitutionInFlight = Atomic<Bool>(false)
 
-    private static func boundedReplace(_ text: String, operation: CompiledOperation) async -> String? {
+    private static func boundedReplace(_ text: String, operation: CompiledOperation) async -> Substitution {
         guard substitutionInFlight.compareExchange(
             expected: false, desired: true, ordering: .sequentiallyConsistent
         ).exchanged else {
             logger.warning("bodyReplace: another substitution is in flight; leaving this \(text.utf8.count) B body unchanged")
-            return nil
+            return .failed
         }
 
         let byteCount = text.utf8.count
-        let search = operation.search
-        let staticReplacement = operation.staticReplacement
-        let template = operation.template
         let outcome = await MITMRegexConcurrencyBridge.shared.applyingSubstitution(
-            search, to: text,
-            staticReplacement: staticReplacement,
-            expand: { output in template.expand(output: output) },
+            operation.search, to: text,
+            template: operation.template,
             deadlineMillis: substitutionTimeLimitSeconds * 1000,
             hardCapSeconds: hardCapSeconds,
             hardCapMessage: {
@@ -77,11 +85,13 @@ nonisolated enum MITMBodyReplace {
         )
 
         switch outcome {
-        case .completed(let out):
-            return out
+        case .completed(let out?):
+            return .replaced(out)
+        case .completed(nil):
+            return .unmatched
         case .timedOut:
             logger.warning("bodyReplace: regex substitution exceeded its time budget over a \(text.utf8.count) B body; leaving the body unchanged (possible catastrophic backtracking in the pattern)")
-            return nil
+            return .failed
         }
     }
 }
