@@ -75,9 +75,11 @@ actor MITMHTTP1Stream {
         self.direction = direction
         self.bridgeClientStreamID = bridgeClientStreamID
         let matchedSet = policy.set(for: host)
-        self.rules = matchedSet?.rules.filter { $0.phase == direction } ?? []
+        let urlPrefix = MITMGateRegex.urlPrefix(scheme: scheme, host: host)
+        let reachableRules = matchedSet?.rules.filter { $0.gate.mayMatch(urlPrefix: urlPrefix) } ?? []
+        self.rules = reachableRules.filter { $0.phase == direction }
         self.responseBodyGateRules = direction == .httpRequest
-            ? (matchedSet?.rules.filter { $0.phase == .httpResponse } ?? [])
+            ? reachableRules.filter { $0.phase == .httpResponse }
             : []
         self.ruleSetID = matchedSet?.id
         self.effectiveAuthority = effectiveAuthority

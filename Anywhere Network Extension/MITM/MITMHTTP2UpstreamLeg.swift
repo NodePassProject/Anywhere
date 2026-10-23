@@ -31,6 +31,7 @@ actor MITMHTTP2UpstreamLeg {
     private let flowController: MITMHTTP2FlowController
     private let sessionContext: SessionExecutionContext
     private let decoder = HPACKDecoder()
+    private let encoder = HPACKDynamicEncoder()
 
     private typealias Codec = MITMHTTP2FrameCodec
 
@@ -340,7 +341,11 @@ actor MITMHTTP2UpstreamLeg {
         delegate?.upstreamLegWriteToOrigin(
             Codec.emitHeaders(
                 streamID: upstreamStreamID,
-                block: HPACKEncoder.encodeHeaderBlock(block, neverIndexed: head.neverIndexed),
+                block: encoder.encodeHeaderBlock(
+                    block,
+                    neverIndexed: head.indexing.neverIndexed,
+                    indexedFields: head.indexing.indexedFields
+                ),
                 endStream: endStream
             )
         )
@@ -420,7 +425,7 @@ actor MITMHTTP2UpstreamLeg {
         let block = trailers.map { (name: $0.name.lowercased(), value: $0.value) }
         delegate?.upstreamLegWriteToOrigin(Codec.emitHeaders(
             streamID: upstreamStreamID,
-            block: HPACKEncoder.encodeHeaderBlock(block),
+            block: encoder.encodeHeaderBlock(block),
             endStream: true
         ))
     }
@@ -588,6 +593,7 @@ actor MITMHTTP2UpstreamLeg {
             let identifier = (UInt16(payload[i]) << 8) | UInt16(payload[i + 1])
             let value = (UInt32(payload[i + 2]) << 24) | (UInt32(payload[i + 3]) << 16)
                 | (UInt32(payload[i + 4]) << 8) | UInt32(payload[i + 5])
+            if identifier == 0x1 { encoder.setPeerMaxTableSize(Int(value)) }
             if identifier == 0x4 { applyServerInitialWindowSize(Int(value)) }
             if identifier == 0x3 { serverMaxConcurrentStreams = Int(value) } // SETTINGS_MAX_CONCURRENT_STREAMS
             i += 6
@@ -671,6 +677,7 @@ actor MITMHTTP2UpstreamLeg {
             fail("stray CONTINUATION")
             return false
         }
+        pending = nil
         let isFinal = frame.flags & 0x4 != 0
         if frame.payload.isEmpty && !isFinal {
             fail("zero-length CONTINUATION without END_HEADERS")
@@ -687,7 +694,6 @@ actor MITMHTTP2UpstreamLeg {
         }
         pendingHeaders.fragments.append(frame.payload)
         if isFinal {
-            pending = nil
             return finalizeHeaders(streamID: pendingHeaders.streamID, fragments: pendingHeaders.fragments, originalFlags: pendingHeaders.originalFlags)
         }
         pending = pendingHeaders

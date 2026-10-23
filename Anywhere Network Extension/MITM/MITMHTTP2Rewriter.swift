@@ -32,7 +32,8 @@ nonisolated final class MITMHTTP2Rewriter: Sendable {
     ) {
         self.host = host
         let matchedSet = policy.set(for: host)
-        let matchedRules = matchedSet?.rules ?? []
+        let urlPrefix = MITMGateRegex.urlPrefix(scheme: "https", host: host)
+        let matchedRules = matchedSet?.rules.filter { $0.gate.mayMatch(urlPrefix: urlPrefix) } ?? []
         self.requestRules = matchedRules.filter { $0.phase == .httpRequest }
         self.responseRules = matchedRules.filter { $0.phase == .httpResponse }
         self.cachedRuleSetID = matchedSet?.id

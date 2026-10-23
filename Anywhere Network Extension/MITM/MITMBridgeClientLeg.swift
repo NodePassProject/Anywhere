@@ -98,7 +98,7 @@ actor MITMBridgeClientLeg: MITMResponseSink {
         var rewrittenHeaders: [(name: String, value: String)]
         let codec: MITMBodyCodec.Plan
         var data: Data
-        let neverIndexed: Set<String>
+        let indexing: HPACKIndexingHints
         let isScripted: Bool
         let resolvedUpstream: (host: String, port: UInt16?)?
         let originalURL: String?
@@ -412,6 +412,7 @@ actor MITMBridgeClientLeg: MITMResponseSink {
             fail("stray CONTINUATION")
             return false
         }
+        pending = nil
         let isFinal = frame.flags & 0x4 != 0
         if frame.payload.isEmpty && !isFinal {
             fail("zero-length CONTINUATION without END_HEADERS")
@@ -428,7 +429,6 @@ actor MITMBridgeClientLeg: MITMResponseSink {
         }
         pendingHeaders.fragments.append(frame.payload)
         if isFinal {
-            pending = nil
             return finalizeHeaders(streamID: pendingHeaders.streamID, fragments: pendingHeaders.fragments, endStream: pendingHeaders.endStream)
         }
         pending = pendingHeaders
@@ -436,12 +436,12 @@ actor MITMBridgeClientLeg: MITMResponseSink {
     }
 
     private func finalizeHeaders(streamID: UInt32, fragments: Data, endStream: Bool) -> Bool {
-        guard let result = decoder.decodeHeaders(from: fragments) else {
+        guard let result = decoder.decodeHeadersWithIndexing(from: fragments) else {
             fail("HPACK decode failure (table desync)", code: Codec.ErrorCode.compressionError)
             return false
         }
         let decoded = result.fields
-        let neverIndexed = result.neverIndexed
+        let indexing = result.indexing
 
         let isNewStream = streamID > highestStreamID
         if isNewStream { highestStreamID = streamID }
@@ -516,7 +516,7 @@ actor MITMBridgeClientLeg: MITMResponseSink {
         }
 
         let head = PendingRequestHead(
-            streamID: streamID, decoded: decoded, neverIndexed: neverIndexed,
+            streamID: streamID, decoded: decoded, indexing: indexing,
             endStream: endStream, method: method.uppercased(), requestURL: requestURL, originalPath: path
         )
         if let gates = rewriter.peekRequestHeadGates(originalPath: path) {
@@ -528,7 +528,7 @@ actor MITMBridgeClientLeg: MITMResponseSink {
     private struct PendingRequestHead: Sendable {
         let streamID: UInt32
         let decoded: [(name: String, value: String)]
-        let neverIndexed: Set<String>
+        let indexing: HPACKIndexingHints
         let endStream: Bool
         let method: String
         let requestURL: String?
@@ -539,7 +539,7 @@ actor MITMBridgeClientLeg: MITMResponseSink {
         let streamID = head.streamID
         let endStream = head.endStream
         let requestURL = head.requestURL
-        let neverIndexed = head.neverIndexed
+        let indexing = head.indexing
 
         if let synthesized = rewriter.requestSynthesizedResponse(gates: gates) {
             answerWithSynthesizedResponse(streamID: streamID, response: synthesized)
@@ -575,7 +575,7 @@ actor MITMBridgeClientLeg: MITMResponseSink {
                     rewrittenHeaders: rewritten,
                     codec: codec,
                     data: Data(),
-                    neverIndexed: neverIndexed,
+                    indexing: indexing,
                     isScripted: true,
                     resolvedUpstream: resolvedUpstream,
                     originalURL: requestURL
@@ -599,7 +599,7 @@ actor MITMBridgeClientLeg: MITMResponseSink {
                     rewrittenHeaders: rewritten,
                     codec: codec,
                     data: Data(),
-                    neverIndexed: neverIndexed,
+                    indexing: indexing,
                     isScripted: false,
                     resolvedUpstream: resolvedUpstream,
                     originalURL: requestURL
@@ -613,7 +613,7 @@ actor MITMBridgeClientLeg: MITMResponseSink {
             streamID: streamID,
             rewritten: rewritten,
             framing: framing,
-            neverIndexed: neverIndexed,
+            indexing: indexing,
             resolvedUpstream: resolvedUpstream,
             originalURL: requestURL
         ) else {
@@ -659,7 +659,7 @@ actor MITMBridgeClientLeg: MITMResponseSink {
         streamID: UInt32,
         rewritten: [(name: String, value: String)],
         framing: MITMBridgeBodyFraming,
-        neverIndexed: Set<String>,
+        indexing: HPACKIndexingHints,
         resolvedUpstream: (host: String, port: UInt16?)?,
         originalURL: String?
     ) -> MITMRequestHead? {
@@ -682,7 +682,7 @@ actor MITMBridgeClientLeg: MITMResponseSink {
             path: path,
             headers: MITMBridgeHeaders.upstreamRequestHeaders(decoded: rewritten),
             framing: framing,
-            neverIndexed: neverIndexed,
+            indexing: indexing,
             resolvedUpstream: resolvedUpstream,
             originalURL: originalURL
         )
@@ -799,7 +799,7 @@ actor MITMBridgeClientLeg: MITMResponseSink {
             streamID: streamID,
             rewritten: buffer.rewrittenHeaders,
             framing: .chunked,
-            neverIndexed: buffer.neverIndexed,
+            indexing: buffer.indexing,
             resolvedUpstream: buffer.resolvedUpstream,
             originalURL: buffer.originalURL
         ) else {
@@ -835,7 +835,7 @@ actor MITMBridgeClientLeg: MITMResponseSink {
                 streamID: streamID,
                 headers: buffer.rewrittenHeaders,
                 body: buffer.data,
-                neverIndexed: buffer.neverIndexed,
+                indexing: buffer.indexing,
                 resolvedUpstream: buffer.resolvedUpstream,
                 originalURL: buffer.originalURL
             )
@@ -855,7 +855,7 @@ actor MITMBridgeClientLeg: MITMResponseSink {
                     streamID: streamID,
                     headers: buffer.rewrittenHeaders,
                     body: buffer.data,
-                    neverIndexed: buffer.neverIndexed,
+                    indexing: buffer.indexing,
                     resolvedUpstream: buffer.resolvedUpstream,
                     originalURL: buffer.originalURL
                 )
@@ -893,7 +893,7 @@ actor MITMBridgeClientLeg: MITMResponseSink {
                             streamID: streamID,
                             headers: buffer.rewrittenHeaders,
                             body: buffer.data,
-                            neverIndexed: buffer.neverIndexed,
+                            indexing: buffer.indexing,
                             resolvedUpstream: buffer.resolvedUpstream,
                             originalURL: buffer.originalURL
                         )
@@ -902,7 +902,7 @@ actor MITMBridgeClientLeg: MITMResponseSink {
                             streamID: streamID,
                             headers: scriptedHeaders,
                             body: updated.body,
-                            neverIndexed: buffer.neverIndexed,
+                            indexing: buffer.indexing,
                             resolvedUpstream: buffer.resolvedUpstream,
                             originalURL: buffer.originalURL
                         )
@@ -919,7 +919,7 @@ actor MITMBridgeClientLeg: MITMResponseSink {
         streamID: UInt32,
         headers: [(name: String, value: String)],
         body: Data,
-        neverIndexed: Set<String>,
+        indexing: HPACKIndexingHints,
         resolvedUpstream: (host: String, port: UInt16?)?,
         originalURL: String?
     ) {
@@ -927,7 +927,7 @@ actor MITMBridgeClientLeg: MITMResponseSink {
             streamID: streamID,
             rewritten: headers,
             framing: .contentLength(body.count),
-            neverIndexed: neverIndexed,
+            indexing: indexing,
             resolvedUpstream: resolvedUpstream,
             originalURL: originalURL
         ) else {

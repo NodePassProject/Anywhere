@@ -647,6 +647,7 @@ actor TLSClient {
     }
     
     private func generateMLKEMEncapsulationKey() -> Data? {
+        guard configuration.fingerprint.offersPostQuantumKeyShare else { return nil }
         if #available(iOS 26.0, macOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *) {
             if let mlkemPrivateKey = try? CryptoKit.MLKEM768.PrivateKey() {
                 mlkemPrivateKeyStorage = mlkemPrivateKey

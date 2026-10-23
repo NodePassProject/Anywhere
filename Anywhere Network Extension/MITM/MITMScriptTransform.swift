@@ -6,10 +6,20 @@
 //
 
 import Foundation
-import JavaScriptCore
 import Synchronization
+import JavaScriptCore
+import os
+
+nonisolated private let logger = AnywhereLogger(category: "MITMScriptTransform")
+
+nonisolated private let nativeBodyEditReservedBytes = Atomic<Int>(0)
 
 nonisolated enum MITMScriptTransform {
+    private static let bodyJSONMemoryFactor = 5
+    private static let bodyReplaceMemoryFactor = 12
+    private static let nativeBodyEditHeadroom = 8 * 1024 * 1024
+    private static let maxNativeBodyEditReservedBytes = 48 * 1024 * 1024
+
     static func rulesDidReload(scopedRules: [(scope: UUID, rules: [CompiledMITMRule])]) {
         let hasScriptRule = scopedRules.contains { entry in
             entry.rules.contains { rule in
@@ -99,12 +109,46 @@ nonisolated enum MITMScriptTransform {
             if case .bodyReplace(let replaceOperation) = operation { replaceOperations.append(replaceOperation) }
         }
         if !jsonOperations.isEmpty {
-            message.body = MITMJSONPatch.applyAll(jsonOperations, to: message.body)
+            let cost = message.body.count * bodyJSONMemoryFactor
+            if reserveNativeBodyEdit(cost) {
+                message.body = MITMJSONPatch.applyAll(jsonOperations, to: message.body)
+                releaseNativeBodyEdit(cost)
+            } else {
+                logger.warning("bodyJSON: not enough memory headroom for a \(message.body.count) B body; leaving it unchanged")
+            }
         }
         if !replaceOperations.isEmpty {
-            message.body = await MITMBodyReplace.applyAll(replaceOperations, to: message.body)
+            let cost = message.body.count * bodyReplaceMemoryFactor
+            if reserveNativeBodyEdit(cost) {
+                message.body = await MITMBodyReplace.applyAll(replaceOperations, to: message.body)
+                releaseNativeBodyEdit(cost)
+            } else {
+                logger.warning("bodyReplace: not enough memory headroom for a \(message.body.count) B body; leaving it unchanged")
+            }
         }
         return message
+    }
+
+    private static func reserveNativeBodyEdit(_ bytes: Int) -> Bool {
+        let available = os_proc_available_memory()
+        let limit = available > 0
+            ? min(available - nativeBodyEditHeadroom, maxNativeBodyEditReservedBytes)
+            : maxNativeBodyEditReservedBytes
+        var reserved = nativeBodyEditReservedBytes.load(ordering: .relaxed)
+        while reserved + bytes <= limit {
+            let (exchanged, current) = nativeBodyEditReservedBytes.compareExchange(
+                expected: reserved,
+                desired: reserved + bytes,
+                ordering: .relaxed
+            )
+            if exchanged { return true }
+            reserved = current
+        }
+        return false
+    }
+
+    private static func releaseNativeBodyEdit(_ bytes: Int) {
+        nativeBodyEditReservedBytes.wrappingSubtract(bytes, ordering: .relaxed)
     }
 
     static func apply(

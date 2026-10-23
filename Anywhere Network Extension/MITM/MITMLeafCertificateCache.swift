@@ -30,11 +30,23 @@ nonisolated final class MITMLeafCertificateCache: Sendable {
     private static let validity: TimeInterval = 7 * 24 * 60 * 60
     private static let refreshThreshold: TimeInterval = 24 * 60 * 60
 
-    private let entries = Mutex<[String: CacheEntry]>([:])
+    private struct State {
+        var entries: [String: CacheEntry] = [:]
+        var inFlight: [String: [CheckedContinuation<Leaf, Error>]] = [:]
+    }
+    private let state = Mutex(State())
+
+    private let mintQueue = DispatchQueue(label: "com.argsment.Anywhere.MITMLeafCertificateCache", qos: .userInitiated)
 
     private struct CacheEntry {
         let leaf: Leaf
         var lastAccess: TimeInterval
+    }
+
+    private enum Lookup {
+        case cached(Leaf)
+        case joined
+        case mint
     }
 
     init(store: MITMCertificateStore) throws(AnywhereError) {
@@ -44,34 +56,54 @@ nonisolated final class MITMLeafCertificateCache: Sendable {
 
     func leaf(for hostname: String) async throws -> Leaf {
         let normalized = hostname.lowercased()
-        if let cached = cachedLeaf(for: normalized) {
-            return cached
+        return try await withCheckedThrowingContinuation { continuation in
+            let lookup: Lookup = state.withLock { state in
+                if let cached = Self.freshLeaf(for: normalized, in: &state.entries) {
+                    return .cached(cached)
+                }
+                if state.inFlight[normalized] != nil {
+                    state.inFlight[normalized]?.append(continuation)
+                    return .joined
+                }
+                state.inFlight[normalized] = [continuation]
+                return .mint
+            }
+            switch lookup {
+            case .cached(let leaf):
+                continuation.resume(returning: leaf)
+            case .joined:
+                break
+            case .mint:
+                mintQueue.async { [self] in
+                    mintAndStore(for: normalized)
+                }
+            }
         }
-        return try await Task.detached(priority: .userInitiated) { [self] in
-            try mintAndStore(for: normalized)
-        }.value
     }
 
     // MARK: - Internals
 
-    private func cachedLeaf(for normalized: String) -> Leaf? {
-        entries.withLock { entries in
-            guard let entry = entries[normalized],
-                  entry.leaf.expiry.timeIntervalSince(Date()) > Self.refreshThreshold else {
-                return nil
-            }
-            entries[normalized]?.lastAccess = MonotonicClock.now
-            return entry.leaf
+    private static func freshLeaf(for normalized: String, in entries: inout [String: CacheEntry]) -> Leaf? {
+        guard let entry = entries[normalized],
+              entry.leaf.expiry.timeIntervalSince(Date()) > refreshThreshold else {
+            return nil
         }
+        entries[normalized]?.lastAccess = MonotonicClock.now
+        return entry.leaf
     }
 
-    private func mintAndStore(for normalized: String) throws -> Leaf {
-        let leaf = try mintLeaf(for: normalized)
-        entries.withLock { entries in
-            entries[normalized] = CacheEntry(leaf: leaf, lastAccess: MonotonicClock.now)
-            Self.evictIfNeeded(&entries)
+    private func mintAndStore(for normalized: String) {
+        let result = Result { try mintLeaf(for: normalized) }
+        let waiters = state.withLock { state -> [CheckedContinuation<Leaf, Error>] in
+            if case .success(let leaf) = result {
+                state.entries[normalized] = CacheEntry(leaf: leaf, lastAccess: MonotonicClock.now)
+                Self.evictIfNeeded(&state.entries)
+            }
+            return state.inFlight.removeValue(forKey: normalized) ?? []
         }
-        return leaf
+        for waiter in waiters {
+            waiter.resume(with: result)
+        }
     }
 
     private func mintLeaf(for hostname: String) throws -> Leaf {

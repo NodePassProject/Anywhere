@@ -7,47 +7,41 @@
 
 import Foundation
 
-/// Connection-scoped: the dynamic table persists across all HEADERS frames on one connection
-/// (RFC 7541 §2.2) and is bounded by §4 eviction so a peer cannot grow it unbounded.
-nonisolated class HPACKDecoder {
+nonisolated struct HPACKField: Hashable, Sendable {
+    let name: String
+    let value: String
+}
 
-    /// SETTINGS_HEADER_TABLE_SIZE we advertise (RFC 9113 §6.5.2). We send no custom value in our
-    /// preface, so the peer's encoder assumes this default — and a decoder's table cap is governed
-    /// by what *we* advertise, so it is fixed here. (A peer's own SETTINGS_HEADER_TABLE_SIZE bounds
-    /// *our* encoder, which is static-table-only and so already respects any limit; it does not
-    /// touch this decoder, which is why no setter wires it in.)
+nonisolated struct HPACKIndexingHints: Sendable {
+    var neverIndexed: Set<String> = []
+    var indexedFields: Set<HPACKField> = []
+}
+
+nonisolated class HPACKDecoder {
     private static let defaultMaxTableSize = 4096
 
-    /// Cap on the cumulative *decoded* header-list size (RFC 9113 §6.5.2 metric: Σ name+value+32).
-    /// HPACK expands a tiny indexed block into a large list — a 1-byte reference to a ~64 KiB
-    /// dynamic-table entry, repeated — and re-encoding materializes every entry, so an uncapped list
-    /// is a memory-amplification DoS even though the compressed block is bounded. h2 enforces this
-    /// via SETTINGS_MAX_HEADER_LIST_SIZE; mirror it here and advertise the same value in the preface.
     static let maxDecodedHeaderListSize = 256 * 1024
 
     private var dynamicTable: [(name: String, value: String)] = []
 
-    /// Running dynamic-table size in octets (RFC 7541 §4.1).
     private var currentSize = 0
 
-    /// The advertised limit (the default — we send no custom SETTINGS_HEADER_TABLE_SIZE); a peer
-    /// §6.3 dynamic-table-size update above it is a decoding error (§4.2). Fixed: our advertised
-    /// value never changes.
     private let protocolMaxSize = HPACKDecoder.defaultMaxTableSize
 
-    /// Effective eviction cap: starts at protocolMaxSize and only drops when the peer lowers it
-    /// in-band via a §6.3 update (it never rises above what we advertise).
     private var maxSize = HPACKDecoder.defaultMaxTableSize
 
-    /// Decodes an HPACK header block, updating the persistent dynamic table. Also
-    /// returns the lowercased names received §6.2.3 never-indexed, which an
-    /// intermediary must re-emit never-indexed (RFC 7541 §7.1.3).
     func decodeHeaders(from data: Data) -> (fields: [(name: String, value: String)], neverIndexed: Set<String>)? {
+        decode(data, collectsIndexedFields: false).map { ($0.fields, $0.indexing.neverIndexed) }
+    }
+
+    func decodeHeadersWithIndexing(from data: Data) -> (fields: [(name: String, value: String)], indexing: HPACKIndexingHints)? {
+        decode(data, collectsIndexedFields: true)
+    }
+
+    private func decode(_ data: Data, collectsIndexedFields: Bool) -> (fields: [(name: String, value: String)], indexing: HPACKIndexingHints)? {
         var headers: [(name: String, value: String)] = []
-        var neverIndexed: Set<String> = []
+        var indexing = HPACKIndexingHints()
         var offset = data.startIndex
-        // Running decoded-list size (RFC 9113 §6.5.2). Bail past the cap so an HPACK-expanded
-        // block can't blow up into a multi-GiB list on append/re-encode.
         var listSize = 0
         func account(_ name: String, _ value: String) -> Bool {
             listSize += Self.wireOctetCount(name) + Self.wireOctetCount(value) + 32
@@ -58,40 +52,47 @@ nonisolated class HPACKDecoder {
             let byte = data[offset]
 
             if byte & 0x80 != 0 {
-                // §6.1 Indexed Header Field (1xxxxxxx)
                 let index = HPACKEncoder.decodeInteger(from: data, at: &offset, prefixBits: 7)
                 guard let index, let entry = HPACKEncoder.lookupEntry(index, dynamicTable: dynamicTable) else {
                     return nil
                 }
                 headers.append(entry)
                 guard account(entry.name, entry.value) else { return nil }
+                if collectsIndexedFields, index > HPACKEncoder.staticTableCount {
+                    indexing.indexedFields.insert(HPACKField(name: entry.name, value: entry.value))
+                }
 
             } else if byte & 0xC0 == 0x40 {
-                // §6.2.1 Literal with Incremental Indexing (01xxxxxx)
-                guard let (name, value) = HPACKEncoder.decodeLiteral(from: data, at: &offset, prefixBits: 6,
-                                                                     dynamicTable: dynamicTable) else { return nil }
+                guard let (name, value) = HPACKEncoder.decodeLiteral(
+                    from: data,
+                    at: &offset,
+                    prefixBits: 6,
+                    dynamicTable: dynamicTable
+                ) else { return nil }
                 headers.append((name, value))
                 guard account(name, value) else { return nil }
                 insertWithEviction(name: name, value: value)
+                if collectsIndexedFields {
+                    indexing.indexedFields.insert(HPACKField(name: name, value: value))
+                }
 
             } else if byte & 0xF0 == 0x00 || byte & 0xF0 == 0x10 {
-                // §6.2.2/§6.2.3 Literal without Indexing / Never Indexed (0000xxxx / 0001xxxx);
-                // record never-indexed names so the re-encoder preserves the marker (§7.1.3).
                 let isNeverIndexed = (byte & 0xF0 == 0x10)
-                guard let (name, value) = HPACKEncoder.decodeLiteral(from: data, at: &offset, prefixBits: 4,
-                                                                     dynamicTable: dynamicTable) else { return nil }
+                guard let (name, value) = HPACKEncoder.decodeLiteral(
+                    from: data,
+                    at: &offset,
+                    prefixBits: 4,
+                    dynamicTable: dynamicTable
+                ) else { return nil }
                 headers.append((name, value))
                 guard account(name, value) else { return nil }
-                if isNeverIndexed { neverIndexed.insert(name.lowercased()) }
+                if isNeverIndexed { indexing.neverIndexed.insert(name.lowercased()) }
 
             } else if byte & 0xE0 == 0x20 {
-                // §6.3 Dynamic Table Size Update (001xxxxx)
                 guard let newSize = HPACKEncoder.decodeInteger(from: data, at: &offset, prefixBits: 5) else {
                     return nil
                 }
-                // §4.2: an update above the protocol limit is a decoding error.
                 guard newSize <= protocolMaxSize else { return nil }
-                // §4.3: shrink the cap and evict from the oldest end to fit.
                 maxSize = newSize
                 evictToFit()
             } else {
@@ -99,43 +100,34 @@ nonisolated class HPACKDecoder {
             }
         }
 
-        return (headers, neverIndexed)
+        return (headers, indexing)
     }
 
-    /// Size of a dynamic-table entry in octets (RFC 7541 §4.1).
     private func entrySize(name: String, value: String) -> Int {
         Self.wireOctetCount(name) + Self.wireOctetCount(value) + 32
     }
 
-    /// On-the-wire octet length of a header string (ISO-8859-1, the byte encoding HPACK uses), so the
-    /// dynamic-table size we track matches what the peer's encoder computed (RFC 7541 §4.1). Counting
-    /// `utf8` octets would over-count a latin-1-decoded value (a 0x80–0xFF octet becomes a 2-byte UTF-8
-    /// scalar) and drift the eviction boundary, desyncing the table against the peer.
     static func wireOctetCount(_ headerString: String) -> Int {
         var octetCount = 0
-        for scalar in headerString.unicodeScalars {
-            octetCount += scalar.value <= 0xFF ? 1 : String(scalar).utf8.count
+        for byte in headerString.utf8 where byte != 0xC2 && byte != 0xC3 {
+            octetCount += 1
         }
         return octetCount
     }
 
-    /// Inserts at the head after evicting from the oldest end to stay within maxSize (RFC 7541 §4.4).
     private func insertWithEviction(name: String, value: String) {
         let size = entrySize(name: name, value: value)
-        // §4.4: evict until the new entry fits, or the table is empty.
         while currentSize + size > maxSize, let last = dynamicTable.last {
             currentSize -= entrySize(name: last.name, value: last.value)
             dynamicTable.removeLast()
         }
         guard size <= maxSize else {
-            // §4.4: an over-sized entry empties the table and is not inserted.
             return
         }
         dynamicTable.insert((name, value), at: 0)
         currentSize += size
     }
 
-    /// Evicts from the oldest end until the table fits maxSize (RFC 7541 §4.3).
     private func evictToFit() {
         while currentSize > maxSize, let last = dynamicTable.last {
             currentSize -= entrySize(name: last.name, value: last.value)
@@ -148,7 +140,6 @@ nonisolated enum HPACKEncoder {
 
     // MARK: - CONNECT Request Encoding
 
-    /// Encodes an HTTP/2 CONNECT request header block.
     static func encodeConnectRequest(
         authority: String,
         extraHeaders: [(name: String, value: String)]
@@ -157,10 +148,11 @@ nonisolated enum HPACKEncoder {
         encodeLiteralWithoutIndexing(nameIndex: 2, value: "CONNECT", into: &block)
         encodeLiteralWithoutIndexing(nameIndex: 1, value: authority, into: &block)
         for header in extraHeaders {
-            if let nameIdx = staticTableNameIndex(header.name) {
+            let name = lowercasedName(header.name)
+            if let nameIdx = staticTableNameIndex[name] {
                 encodeLiteralWithoutIndexing(nameIndex: nameIdx, value: header.value, into: &block)
             } else {
-                encodeLiteralWithoutIndexing(name: header.name, value: header.value, into: &block)
+                encodeLiteralWithoutIndexing(name: name, value: header.value, into: &block)
             }
         }
         return block
@@ -168,30 +160,26 @@ nonisolated enum HPACKEncoder {
 
     // MARK: - Generic Header Block Encoding
 
-    /// Statelessly encodes a header list using only static-table representations, so
-    /// no value ever enters the peer's dynamic table. Fields in `neverIndexed` are
-    /// re-emitted §6.2.3 never-indexed (RFC 7541 §7.1.3 MUST), and that check runs
-    /// first so they never collapse to a §6.1 indexed byte.
     static func encodeHeaderBlock(
         _ headers: [(name: String, value: String)],
         neverIndexed: Set<String> = []
     ) -> Data {
         var block = Data()
+        block.reserveCapacity(headers.reduce(0) { $0 + $1.name.utf8.count + $1.value.utf8.count + 4 })
         for header in headers {
-            if !neverIndexed.isEmpty, neverIndexed.contains(header.name.lowercased()) {
-                // §6.2.3 Literal Header Field Never Indexed — preserve the marker.
-                if let nameIdx = staticTableNameIndex(header.name) {
+            let name = lowercasedName(header.name)
+            if !neverIndexed.isEmpty, neverIndexed.contains(name) {
+                if let nameIdx = staticTableNameIndex[name] {
                     encodeLiteralNeverIndexed(nameIndex: nameIdx, value: header.value, into: &block)
                 } else {
-                    encodeLiteralNeverIndexed(name: header.name, value: header.value, into: &block)
+                    encodeLiteralNeverIndexed(name: name, value: header.value, into: &block)
                 }
-            } else if let fullIndex = staticTableFullIndex(header.name, header.value) {
-                // §6.1 Indexed Header Field — one index byte supplies both name and value.
+            } else if let fullIndex = staticTableFullIndex(name, header.value) {
                 encodeIndexed(fullIndex, into: &block)
-            } else if let nameIdx = staticTableNameIndex(header.name) {
+            } else if let nameIdx = staticTableNameIndex[name] {
                 encodeLiteralWithoutIndexing(nameIndex: nameIdx, value: header.value, into: &block)
             } else {
-                encodeLiteralWithoutIndexing(name: header.name, value: header.value, into: &block)
+                encodeLiteralWithoutIndexing(name: name, value: header.value, into: &block)
             }
         }
         return block
@@ -199,8 +187,6 @@ nonisolated enum HPACKEncoder {
 
     // MARK: - Response Decoding
 
-    /// Decodes an HPACK header block into name-value pairs.
-    /// Maintains a local dynamic table for the duration of the decode only.
     static func decodeHeaders(from data: Data) -> [(name: String, value: String)]? {
         var headers: [(name: String, value: String)] = []
         var offset = data.startIndex
@@ -210,7 +196,6 @@ nonisolated enum HPACKEncoder {
             let byte = data[offset]
 
             if byte & 0x80 != 0 {
-                // §6.1 Indexed Header Field (1xxxxxxx)
                 let index = decodeInteger(from: data, at: &offset, prefixBits: 7)
                 guard let index, let entry = lookupEntry(index, dynamicTable: dynamicTable) else {
                     return nil
@@ -218,22 +203,26 @@ nonisolated enum HPACKEncoder {
                 headers.append(entry)
 
             } else if byte & 0xC0 == 0x40 {
-                // §6.2.1 Literal with Incremental Indexing (01xxxxxx)
-                guard let (name, value) = decodeLiteral(from: data, at: &offset, prefixBits: 6,
-                                                        dynamicTable: dynamicTable) else { return nil }
+                guard let (name, value) = decodeLiteral(
+                    from: data,
+                    at: &offset,
+                    prefixBits: 6,
+                    dynamicTable: dynamicTable
+                ) else { return nil }
                 headers.append((name, value))
                 dynamicTable.insert((name, value), at: 0)
 
             } else if byte & 0xF0 == 0x00 || byte & 0xF0 == 0x10 {
-                // §6.2.2/§6.2.3 Literal without Indexing / Never Indexed (0000xxxx / 0001xxxx)
-                guard let (name, value) = decodeLiteral(from: data, at: &offset, prefixBits: 4,
-                                                        dynamicTable: dynamicTable) else { return nil }
+                guard let (name, value) = decodeLiteral(
+                    from: data,
+                    at: &offset,
+                    prefixBits: 4,
+                    dynamicTable: dynamicTable
+                ) else { return nil }
                 headers.append((name, value))
 
             } else if byte & 0xE0 == 0x20 {
-                // §6.3 Dynamic Table Size Update (001xxxxx)
                 let _ = decodeInteger(from: data, at: &offset, prefixBits: 5)
-                // We don't need to enforce table size for our minimal client
             } else {
                 return nil
             }
@@ -242,17 +231,18 @@ nonisolated enum HPACKEncoder {
         return headers
     }
 
-    // MARK: - Integer Encoding (RFC 7541 §5.1)
+    // MARK: - Integer Encoding
 
-    /// Encodes an integer with the given prefix bit width, appending to `data`.
-    ///
-    /// The first byte written shares bits with a `prefix` byte — caller must OR in the high bits.
     static func encodeInteger(_ value: Int, prefixBits: Int, into data: inout Data) {
+        encodeInteger(value, prefixBits: prefixBits, flags: 0, into: &data)
+    }
+
+    fileprivate static func encodeInteger(_ value: Int, prefixBits: Int, flags: UInt8, into data: inout Data) {
         let maxPrefix = (1 << prefixBits) - 1
         if value < maxPrefix {
-            data.append(UInt8(value))
+            data.append(flags | UInt8(value))
         } else {
-            data.append(UInt8(maxPrefix))
+            data.append(flags | UInt8(maxPrefix))
             var remaining = value - maxPrefix
             while remaining >= 128 {
                 data.append(UInt8(remaining % 128 + 128))
@@ -262,8 +252,6 @@ nonisolated enum HPACKEncoder {
         }
     }
 
-    /// Decodes an integer with the given prefix bit width from `data` at `offset`.
-    /// Advances `offset` past the consumed bytes.
     static func decodeInteger(from data: Data, at offset: inout Int, prefixBits: Int) -> Int? {
         guard offset < data.endIndex else { return nil }
         let maxPrefix = (1 << prefixBits) - 1
@@ -277,8 +265,6 @@ nonisolated enum HPACKEncoder {
         var shiftBits = 0
         repeat {
             guard offset < data.endIndex else { return nil }
-            // RFC 7541 §5.1: every legitimate integer here fits in 32 bits. Reject
-            // over-long or overflowing varints instead of letting `value +=` trap (remote DoS).
             guard shiftBits < 32 else { return nil }
             let b = data[offset]
             offset += 1
@@ -292,100 +278,86 @@ nonisolated enum HPACKEncoder {
         return value
     }
 
-    // MARK: - String Encoding (RFC 7541 §5.2)
+    // MARK: - String Encoding
 
-    /// Encodes a string in raw (non-Huffman) format.
     static func encodeString(_ string: String, into data: inout Data) {
-        // HPACK string literals are byte sequences (RFC 7541 §5.2). Emit ISO-8859-1 so an octet that
-        // was decoded as latin-1 round-trips to the same byte; fall back to UTF-8 only for a rewritten
-        // value carrying scalars > 0xFF, which latin-1 can't represent.
+        let appendedASCII = string.utf8.withContiguousStorageIfAvailable { bytes -> Bool in
+            guard !bytes.contains(where: { $0 >= 0x80 }) else { return false }
+            encodeInteger(bytes.count, prefixBits: 7, flags: 0x00, into: &data)
+            data.append(bytes)
+            return true
+        } ?? false
+        guard !appendedASCII else { return }
         let bytes: [UInt8]
         if let latin1 = string.data(using: .isoLatin1) {
             bytes = [UInt8](latin1)
         } else {
             bytes = [UInt8](string.utf8)
         }
-        // H=0 (raw), length
-        var lengthData = Data()
-        encodeInteger(bytes.count, prefixBits: 7, into: &lengthData)
-        lengthData[lengthData.startIndex] &= 0x7F  // Clear H bit
-        data.append(lengthData)
+        encodeInteger(bytes.count, prefixBits: 7, flags: 0x00, into: &data)
         data.append(contentsOf: bytes)
     }
 
-    /// Decodes a string (raw or Huffman) from `data` at `offset`.
     static func decodeString(from data: Data, at offset: inout Int) -> String? {
         guard offset < data.endIndex else { return nil }
         let huffman = data[offset] & 0x80 != 0
         guard let length = decodeInteger(from: data, at: &offset, prefixBits: 7) else { return nil }
-        // Compute headroom by subtraction so `offset + length` can't overflow Int.
         guard length >= 0, length <= data.endIndex - offset else { return nil }
 
         let stringData = data[offset..<(offset + length)]
         offset += length
 
-        // Decode as ISO-8859-1, not UTF-8: an HPACK string is a byte sequence (RFC 7541 §5.2), and
-        // latin-1 maps every octet 1:1 so a legal non-UTF-8 field value round-trips instead of failing
-        // the decode — a nil here aborts the whole block and (for the persistent decoder) desyncs the
-        // dynamic table, forcing a connection teardown on otherwise-valid headers.
         if huffman {
             guard let decoded = HPACKHuffman.decode(stringData) else { return nil }
-            return String(bytes: decoded, encoding: .isoLatin1)
+            return decoded.withUnsafeBytes { latin1String($0) }
         } else {
-            return String(bytes: stringData, encoding: .isoLatin1)
+            return stringData.withUnsafeBytes { latin1String($0) }
         }
+    }
+
+    private static func latin1String(_ bytes: UnsafeRawBufferPointer) -> String {
+        guard bytes.contains(where: { $0 >= 0x80 }) else {
+            return String(decoding: bytes, as: UTF8.self)
+        }
+        var scalars = String.UnicodeScalarView()
+        for byte in bytes {
+            scalars.append(Unicode.Scalar(byte))
+        }
+        return String(scalars)
     }
 
     // MARK: - Indexed Header Encoding
 
-    /// Encodes a §6.1 Indexed Header Field; only called with static indices (1–61),
-    /// which fit the 7-bit prefix in a single byte.
     private static func encodeIndexed(_ index: Int, into data: inout Data) {
-        var indexData = Data()
-        encodeInteger(index, prefixBits: 7, into: &indexData)
-        indexData[indexData.startIndex] |= 0x80  // 1xxxxxxx — Indexed Header Field
-        data.append(indexData)
+        encodeInteger(index, prefixBits: 7, flags: 0x80, into: &data)
     }
 
     // MARK: - Literal Header Encoding
 
-    /// Encodes a literal header without indexing, using an indexed name from the static table.
     private static func encodeLiteralWithoutIndexing(nameIndex: Int, value: String, into data: inout Data) {
-        var indexData = Data()
-        encodeInteger(nameIndex, prefixBits: 4, into: &indexData)
-        indexData[indexData.startIndex] &= 0x0F  // 0000xxxx prefix
-        data.append(indexData)
+        encodeInteger(nameIndex, prefixBits: 4, flags: 0x00, into: &data)
         encodeString(value, into: &data)
     }
 
-    /// Encodes a literal header without indexing, using a literal name.
     private static func encodeLiteralWithoutIndexing(name: String, value: String, into data: inout Data) {
-        data.append(0x00)  // 0000 0000 — literal name, no indexing
-        encodeString(name.lowercased(), into: &data)
+        data.append(0x00)
+        encodeString(name, into: &data)
         encodeString(value, into: &data)
     }
 
-    /// Encodes a §6.2.3 "Literal Header Field Never Indexed" with an indexed name;
-    /// the 0001 prefix forbids every downstream decoder from indexing the field (RFC 7541 §7.1.3).
     private static func encodeLiteralNeverIndexed(nameIndex: Int, value: String, into data: inout Data) {
-        var indexData = Data()
-        encodeInteger(nameIndex, prefixBits: 4, into: &indexData)
-        indexData[indexData.startIndex] &= 0x0F
-        indexData[indexData.startIndex] |= 0x10  // 0001xxxx — never indexed
-        data.append(indexData)
+        encodeInteger(nameIndex, prefixBits: 4, flags: 0x10, into: &data)
         encodeString(value, into: &data)
     }
 
-    /// Encodes a §6.2.3 "Literal Header Field Never Indexed" with a literal name.
     private static func encodeLiteralNeverIndexed(name: String, value: String, into data: inout Data) {
-        data.append(0x10)  // 0001 0000 — literal name, never indexed
-        encodeString(name.lowercased(), into: &data)
+        data.append(0x10)
+        encodeString(name, into: &data)
         encodeString(value, into: &data)
     }
 
     // MARK: - Literal Header Decoding
 
-    /// Decodes a literal header field from `data` at `offset`.
     static func decodeLiteral(
         from data: Data,
         at offset: inout Int,
@@ -411,8 +383,6 @@ nonisolated enum HPACKEncoder {
 
     // MARK: - Table Lookup
 
-    /// Looks up a header by index (1-based). Static table is indices 1–61,
-    /// dynamic table starts at 62.
     static func lookupEntry(
         _ index: Int,
         dynamicTable: [(name: String, value: String)]
@@ -426,24 +396,28 @@ nonisolated enum HPACKEncoder {
         return dynamicTable[dynIndex]
     }
 
-    /// Returns the first static table index whose name matches (case-insensitive), or `nil`.
-    private static func staticTableNameIndex(_ name: String) -> Int? {
-        let lower = name.lowercased()
-        for (i, entry) in staticTable.enumerated() {
-            if entry.name == lower { return i + 1 }  // 1-based
+    fileprivate static func lowercasedName(_ name: String) -> String {
+        name.utf8.contains(where: { $0 >= 0x80 || (0x41...0x5A).contains($0) }) ? name.lowercased() : name
+    }
+
+    fileprivate static let staticTableNameIndex: [String: Int] = {
+        var indices: [String: Int] = [:]
+        for (i, entry) in staticTable.enumerated() where indices[entry.name] == nil {
+            indices[entry.name] = i + 1
+        }
+        return indices
+    }()
+
+    fileprivate static func staticTableFullIndex(_ name: String, _ value: String) -> Int? {
+        guard var index = staticTableNameIndex[name] else { return nil }
+        while index <= staticTable.count, staticTable[index - 1].name == name {
+            if staticTable[index - 1].value == value { return index }
+            index += 1
         }
         return nil
     }
 
-    /// Returns the static table index matching name (case-insensitive) and value
-    /// (exact), or nil; enables the single-byte §6.1 form for common entries.
-    private static func staticTableFullIndex(_ name: String, _ value: String) -> Int? {
-        let lower = name.lowercased()
-        for (i, entry) in staticTable.enumerated() {
-            if entry.name == lower && entry.value == value { return i + 1 }  // 1-based
-        }
-        return nil
-    }
+    fileprivate static var staticTableCount: Int { staticTable.count }
 
     // MARK: - HPACK Static Table (RFC 7541 Appendix A)
 
@@ -512,18 +486,151 @@ nonisolated enum HPACKEncoder {
     ]
 }
 
+// MARK: - Dynamic Table Encoder
+
+nonisolated final class HPACKDynamicEncoder {
+    static let defaultMaxTableSize = 4096
+
+    private struct Entry {
+        let field: HPACKField
+        let size: Int
+    }
+
+    private let preferredMaxSize: Int
+    private var maxSize: Int
+    private var currentSize = 0
+    private var entries: [Entry] = []
+    private var head = 0
+    private var insertedCount = 0
+    private var fieldIDs: [HPACKField: Int] = [:]
+    private var nameIDs: [String: Int] = [:]
+    private var pendingMinimumSize: Int?
+    private var pendingFinalSize: Int?
+
+    init(preferredMaxSize: Int = HPACKDynamicEncoder.defaultMaxTableSize) {
+        self.preferredMaxSize = min(preferredMaxSize, Self.defaultMaxTableSize)
+        self.maxSize = self.preferredMaxSize
+    }
+
+    func setPeerMaxTableSize(_ size: Int) {
+        let target = min(size, preferredMaxSize)
+        guard target != (pendingFinalSize ?? maxSize) else { return }
+        pendingMinimumSize = min(pendingMinimumSize ?? target, target)
+        pendingFinalSize = target
+    }
+
+    func encodeHeaderBlock(
+        _ headers: [(name: String, value: String)],
+        neverIndexed: Set<String> = [],
+        indexedFields: Set<HPACKField> = []
+    ) -> Data {
+        var block = Data()
+        block.reserveCapacity(headers.reduce(8) { $0 + $1.name.utf8.count + $1.value.utf8.count + 4 })
+        emitPendingSizeUpdates(into: &block)
+        for header in headers {
+            let name = HPACKEncoder.lowercasedName(header.name)
+            let field = HPACKField(name: name, value: header.value)
+            let nameIsASCII = Self.isASCII(name)
+            let isASCII = nameIsASCII && Self.isASCII(header.value)
+            let nameIndex = HPACKEncoder.staticTableNameIndex[name] ?? (nameIsASCII ? dynamicNameIndex(name) : nil)
+            if !neverIndexed.isEmpty, neverIndexed.contains(name) {
+                if let nameIndex {
+                    HPACKEncoder.encodeInteger(nameIndex, prefixBits: 4, flags: 0x10, into: &block)
+                } else {
+                    block.append(0x10)
+                    HPACKEncoder.encodeString(name, into: &block)
+                }
+                HPACKEncoder.encodeString(header.value, into: &block)
+            } else if let index = HPACKEncoder.staticTableFullIndex(name, header.value) ?? (isASCII ? dynamicFieldIndex(field) : nil) {
+                HPACKEncoder.encodeInteger(index, prefixBits: 7, flags: 0x80, into: &block)
+            } else {
+                let size = name.utf8.count + header.value.utf8.count + 32
+                let indexes = isASCII && size * 4 <= maxSize * 3 && indexedFields.contains(field)
+                let flags: UInt8 = indexes ? 0x40 : 0x00
+                if let nameIndex {
+                    HPACKEncoder.encodeInteger(nameIndex, prefixBits: indexes ? 6 : 4, flags: flags, into: &block)
+                } else {
+                    block.append(flags)
+                    HPACKEncoder.encodeString(name, into: &block)
+                }
+                HPACKEncoder.encodeString(header.value, into: &block)
+                if indexes { insert(field, size: size) }
+            }
+        }
+        return block
+    }
+
+    private func emitPendingSizeUpdates(into block: inout Data) {
+        guard let finalSize = pendingFinalSize else { return }
+        if let minimumSize = pendingMinimumSize, minimumSize < finalSize {
+            HPACKEncoder.encodeInteger(minimumSize, prefixBits: 5, flags: 0x20, into: &block)
+            resize(to: minimumSize)
+        }
+        HPACKEncoder.encodeInteger(finalSize, prefixBits: 5, flags: 0x20, into: &block)
+        resize(to: finalSize)
+        pendingMinimumSize = nil
+        pendingFinalSize = nil
+    }
+
+    private func resize(to size: Int) {
+        maxSize = size
+        while currentSize > maxSize { evictOldest() }
+    }
+
+    private func insert(_ field: HPACKField, size: Int) {
+        while currentSize + size > maxSize, head < entries.count { evictOldest() }
+        guard size <= maxSize else { return }
+        let id = insertedCount
+        insertedCount += 1
+        entries.append(Entry(field: field, size: size))
+        currentSize += size
+        fieldIDs[field] = id
+        nameIDs[field.name] = id
+    }
+
+    private func evictOldest() {
+        guard head < entries.count else { return }
+        let id = insertedCount - (entries.count - head)
+        let entry = entries[head]
+        currentSize -= entry.size
+        if fieldIDs[entry.field] == id { fieldIDs.removeValue(forKey: entry.field) }
+        if nameIDs[entry.field.name] == id { nameIDs.removeValue(forKey: entry.field.name) }
+        head += 1
+        if head == entries.count {
+            entries.removeAll(keepingCapacity: true)
+            head = 0
+        } else if head >= 32, head * 2 >= entries.count {
+            entries.removeFirst(head)
+            head = 0
+        }
+    }
+
+    private func dynamicFieldIndex(_ field: HPACKField) -> Int? {
+        fieldIDs[field].map(index(forID:))
+    }
+
+    private func dynamicNameIndex(_ name: String) -> Int? {
+        nameIDs[name].map(index(forID:))
+    }
+
+    private func index(forID id: Int) -> Int {
+        HPACKEncoder.staticTableCount + insertedCount - id
+    }
+
+    private static func isASCII(_ string: String) -> Bool {
+        !string.utf8.contains(where: { $0 >= 0x80 })
+    }
+}
+
 // MARK: - HPACK Huffman Decoder
 
 nonisolated enum HPACKHuffman {
-
-    /// Trie node for Huffman decoding. Children are array indices; -1 = no child.
     private struct Node {
         var left: Int32 = -1
         var right: Int32 = -1
-        var symbol: Int16 = -1  // >= 0 for leaf nodes, 256 = EOS
+        var symbol: Int16 = -1
     }
 
-    /// Lazily-built decode trie.
     private static let tree: [Node] = {
         var nodes = [Node()]
         for (sym, entry) in huffmanTable.enumerated() {
@@ -550,7 +657,6 @@ nonisolated enum HPACKHuffman {
         return nodes
     }()
 
-    /// Byte length of `string` once Huffman-encoded per RFC 7541 Appendix B.
     static func encodedByteLength(_ string: String) -> Int {
         var bits = 0
         for byte in string.utf8 {
@@ -559,49 +665,104 @@ nonisolated enum HPACKHuffman {
         return (bits + 7) / 8
     }
 
-    /// Decodes Huffman bytes, rejecting any RFC 7541 §5.2 violation (off-tree bit,
-    /// explicit EOS, bad padding) so the MITM never re-emits "laundered" malformed input.
+    private struct Transition {
+        var next: UInt16 = 0
+        var symbol: UInt8 = 0
+        var tailBits: UInt8 = 0
+        var flags: UInt8 = 0
+    }
+
+    private static let emitsSymbol: UInt8 = 0x01
+    private static let failsDecode: UInt8 = 0x02
+    private static let tailAllOnes: UInt8 = 0x04
+
+    private static let transitions: [Transition] = {
+        var stateOfNode = [Int](repeating: -1, count: tree.count)
+        var internalNodes: [Int] = []
+        for (index, node) in tree.enumerated() where node.symbol < 0 {
+            stateOfNode[index] = internalNodes.count
+            internalNodes.append(index)
+        }
+        var table: [Transition] = []
+        table.reserveCapacity(internalNodes.count * 16)
+        for start in internalNodes {
+            for nibble in 0..<16 {
+                var node = start
+                var transition = Transition(flags: tailAllOnes)
+                for shift in stride(from: 3, through: 0, by: -1) {
+                    let bit = (nibble >> shift) & 1
+                    transition.tailBits += 1
+                    if bit == 0 { transition.flags &= ~tailAllOnes }
+                    let child = bit == 0 ? tree[node].left : tree[node].right
+                    guard child >= 0 else {
+                        transition.flags |= failsDecode
+                        break
+                    }
+                    node = Int(child)
+                    let symbol = tree[node].symbol
+                    guard symbol >= 0 else { continue }
+                    guard symbol != 256 else {
+                        transition.flags |= failsDecode
+                        break
+                    }
+                    transition.symbol = UInt8(symbol)
+                    transition.flags |= emitsSymbol | tailAllOnes
+                    transition.tailBits = 0
+                    node = 0
+                }
+                if transition.flags & failsDecode == 0 {
+                    transition.next = UInt16(stateOfNode[node])
+                }
+                table.append(transition)
+            }
+        }
+        return table
+    }()
+
     static func decode(_ data: some Collection<UInt8>) -> [UInt8]? {
+        if let decoded = data.withContiguousStorageIfAvailable({ decode(bytes: $0) }) {
+            return decoded
+        }
+        return Array(data).withUnsafeBufferPointer { decode(bytes: $0) }
+    }
+
+    private static func decode(bytes data: UnsafeBufferPointer<UInt8>) -> [UInt8]? {
         var result: [UInt8] = []
-        var nodeIdx = 0
-        // Bits since the last completed symbol, for validating the trailing padding.
+        result.reserveCapacity(data.count * 8 / 5)
+        var state = 0
         var bitsSinceSymbol = 0
         var paddingAllOnes = true
 
-        for byte in data {
-            for bitPos in stride(from: 7, through: 0, by: -1) {
-                let bit = (byte >> bitPos) & 1
-                bitsSinceSymbol += 1
-                if bit == 0 { paddingAllOnes = false }
-                let next = bit == 0 ? tree[nodeIdx].left : tree[nodeIdx].right
-                guard next >= 0 else { return nil }
-                nodeIdx = Int(next)
-
-                let sym = tree[nodeIdx].symbol
-                if sym >= 0 {
-                    // RFC 7541 §5.2: an explicit EOS symbol is a decoding error.
-                    if sym == 256 { return nil }
-                    result.append(UInt8(sym))
-                    nodeIdx = 0
-                    bitsSinceSymbol = 0
-                    paddingAllOnes = true
+        let walked = transitions.withUnsafeBufferPointer { table -> Bool in
+            for byte in data {
+                var nibble = byte >> 4
+                for _ in 0..<2 {
+                    let transition = table[state &* 16 &+ Int(nibble)]
+                    guard transition.flags & failsDecode == 0 else { return false }
+                    if transition.flags & emitsSymbol != 0 {
+                        result.append(transition.symbol)
+                        bitsSinceSymbol = Int(transition.tailBits)
+                        paddingAllOnes = transition.flags & tailAllOnes != 0
+                    } else {
+                        bitsSinceSymbol += 4
+                        paddingAllOnes = paddingAllOnes && transition.flags & tailAllOnes != 0
+                    }
+                    state = Int(transition.next)
+                    nibble = byte & 0x0F
                 }
             }
+            return true
         }
+        guard walked else { return nil }
 
-        // RFC 7541 §5.2: any trailing partial code must be all-ones EOS padding,
-        // strictly fewer than 8 bits; nodeIdx == 0 means no padding at all.
-        if nodeIdx != 0 {
+        if state != 0 {
             guard paddingAllOnes, bitsSinceSymbol < 8 else { return nil }
         }
         return result
     }
 
-    // MARK: - Huffman Code Table (RFC 7541 Appendix B)
+    // MARK: - Huffman Code Table
 
-    /// Each entry is (code: UInt32 left-aligned, bitLength: UInt8).
-    /// Indexed by symbol value 0–256 (256 = EOS).
-    // swiftlint:disable:next function_body_length
     private static let huffmanTable: [(UInt32, UInt8)] = [
         (0xffc00000, 13), (0xffffb000, 23), (0xfffffe20, 28), (0xfffffe30, 28),
         (0xfffffe40, 28), (0xfffffe50, 28), (0xfffffe60, 28), (0xfffffe70, 28),
@@ -678,16 +839,11 @@ nonisolated enum HPACKHuffman {
     ]
 }
 
-// MARK: - HTTP/2 frame wire format (shared by the MITM bridge and the CONNECT-tunnel multiplexer)
+// MARK: - HTTP/2 frame wire format
 
-/// Byte-format-only layer (RFC 9113 §4.1) shared by both hand-rolled HTTP/2 stacks so a wire-format
-/// fix lands once; each stack keeps its own frame structs, decode loops, and state machines.
 nonisolated enum HTTP2FrameWire {
-
-    /// Frame header length (RFC 9113 §4.1): 24-bit length + 8-bit type + 8-bit flags + 31-bit stream id.
     static let headerSize = 9
 
-    /// Appends the 9-byte frame header. The reserved high bit of the stream id is cleared.
     static func appendHeader(
         type: UInt8,
         flags: UInt8,
@@ -707,8 +863,6 @@ nonisolated enum HTTP2FrameWire {
         out.append(UInt8(maskedStreamID & 0xFF))
     }
 
-    /// Appends a 32-bit big-endian value — the 4-byte body of WINDOW_UPDATE / RST_STREAM and the
-    /// fields of GOAWAY. The caller masks the reserved bit where the field is a stream id.
     static func appendUInt32(_ value: UInt32, into out: inout Data) {
         out.append(UInt8((value >> 24) & 0xFF))
         out.append(UInt8((value >> 16) & 0xFF))
@@ -716,7 +870,6 @@ nonisolated enum HTTP2FrameWire {
         out.append(UInt8(value & 0xFF))
     }
 
-    /// Reads a 32-bit big-endian value at `payload` start + `offset`; nil if fewer than 4 bytes remain.
     static func readUInt32(_ payload: Data, offset: Int = 0) -> UInt32? {
         let s = payload.startIndex + offset
         guard s >= payload.startIndex, s + 4 <= payload.endIndex else { return nil }
@@ -724,8 +877,6 @@ nonisolated enum HTTP2FrameWire {
              | UInt32(payload[s + 2]) << 8 | UInt32(payload[s + 3])
     }
 
-    /// Parses a SETTINGS payload (RFC 9113 §6.5) into (identifier, value) pairs, ignoring a trailing
-    /// partial entry (a length not a multiple of 6).
     static func parseSettings(_ payload: Data) -> [(id: UInt16, value: UInt32)] {
         var result: [(id: UInt16, value: UInt32)] = []
         var offset = payload.startIndex
@@ -739,8 +890,6 @@ nonisolated enum HTTP2FrameWire {
         return result
     }
 
-    /// Parses a GOAWAY payload (RFC 9113 §6.8): last-stream-id (reserved bit cleared) + error code.
-    /// Trailing debug data is ignored.
     static func parseGoaway(_ payload: Data) -> (lastStreamID: UInt32, errorCode: UInt32)? {
         guard let last = readUInt32(payload, offset: 0),
               let error = readUInt32(payload, offset: 4) else { return nil }

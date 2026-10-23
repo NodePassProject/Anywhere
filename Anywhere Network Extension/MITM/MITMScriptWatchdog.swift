@@ -11,45 +11,53 @@ import Synchronization
 nonisolated enum MITMScriptWatchdog {
     static let hardCapSeconds = 30
 
-    private struct Span {
-        var generation: UInt64 = 0
-        var label = ""
-        var deadline: DeadlineToken?
+    private final class Source: DeadlineSource {
+        private struct Span {
+            var label = ""
+            var deadline: Deadline?
+        }
+        private let span = Mutex(Span())
+
+        func begin(_ label: String) {
+            let deadline = Deadline(in: .seconds(MITMScriptWatchdog.hardCapSeconds), precision: .lazy)
+            span.withLock { span in
+                span.label = label
+                span.deadline = deadline
+            }
+        }
+
+        func end() {
+            span.withLock { span in
+                span.label = ""
+                span.deadline = nil
+            }
+        }
+
+        func nextDeadline() -> Deadline? {
+            span.withLock { $0.deadline }
+        }
+
+        func fire(now: MonotonicClock.Instant) {
+            let label: String? = span.withLock { span in
+                guard let deadline = span.deadline, deadline.scheduledAt <= now else { return nil }
+                return span.label
+            }
+            guard let label else { return }
+            let shown = label.count > 200 ? String(label.prefix(200)) + "…" : label
+            MITMScriptDiskStore.shared.flush()
+            fatalError("A JavaScript script span ran \(MITMScriptWatchdog.hardCapSeconds)s without returning. Offending script: \(shown)")
+        }
     }
-    private static let span = Mutex(Span())
+
+    private static let source = Source()
+    private static let registration = TickScheduler.shared.register(source)
 
     static func begin(_ label: String) {
-        let stale: DeadlineToken? = span.withLock { span in
-            let previous = span.deadline
-            span.generation &+= 1
-            span.label = label
-            let generation = span.generation
-            span.deadline = TickScheduler.shared.schedule(in: .seconds(hardCapSeconds), precision: .lazy) {
-                checkInFlightSpan(generation: generation)
-            }
-            return previous
-        }
-        stale?.cancel()
+        source.begin(label)
+        registration.poke()
     }
 
     static func end() {
-        let armed: DeadlineToken? = span.withLock { span in
-            let armed = span.deadline
-            span.deadline = nil
-            span.label = ""
-            return armed
-        }
-        armed?.cancel()
-    }
-
-    private static func checkInFlightSpan(generation: UInt64) {
-        let label: String? = span.withLock { span in
-            guard span.deadline != nil, span.generation == generation else { return nil }
-            return span.label
-        }
-        guard let label else { return }
-        let shown = label.count > 200 ? String(label.prefix(200)) + "…" : label
-        MITMScriptDiskStore.shared.flush()
-        fatalError("A JavaScript script span ran \(hardCapSeconds)s without returning. Offending script: \(shown)")
+        source.end()
     }
 }

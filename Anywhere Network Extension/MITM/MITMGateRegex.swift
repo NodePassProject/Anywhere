@@ -23,9 +23,16 @@ nonisolated final class MITMGateRegex: Sendable {
 
     private let isLiteral: Bool
     private let literalPattern: String
+    private let literalPatternBytes: [UInt8]
 
     private let alwaysMatches: Bool
-    private let requiredLiterals: [String]
+    private let requiredLiterals: [[UInt8]]
+
+    private enum PrefixAtom {
+        case byte(UInt8)
+        case any
+    }
+    private let anchoredPrefix: [(atom: PrefixAtom, isOptional: Bool)]
 
     private static let regexMetacharacters: Set<Character> = [
         "\\", "^", "$", ".", "|", "?", "*", "+", "(", ")", "[", "]", "{", "}"
@@ -61,8 +68,90 @@ nonisolated final class MITMGateRegex: Sendable {
             self.requiredLiterals = []
         } else {
             self.literalPattern = pattern
-            self.requiredLiterals = MITMRegexLiterals.required(in: pattern) ?? []
+            self.requiredLiterals = (MITMRegexLiterals.required(in: pattern) ?? []).map { Array($0.utf8) }
             Self.warnIfHostRegionHasUppercase(pattern)
+        }
+        self.literalPatternBytes = Array(literalPattern.utf8)
+        self.anchoredPrefix = literal ? [] : Self.anchoredPrefix(of: pattern)
+    }
+
+    static func urlPrefix(scheme: String, host: String) -> [UInt8]? {
+        let host = host.lowercased()
+        guard !host.isEmpty, !host.hasSuffix("."),
+              host.utf8.allSatisfy({ (0x21...0x7E).contains($0) && $0 != UInt8(ascii: "/") && $0 != UInt8(ascii: "?") && $0 != UInt8(ascii: "#") })
+        else { return nil }
+        return Array("\(scheme.lowercased())://\(host)".utf8)
+    }
+
+    func mayMatch(urlPrefix: [UInt8]?) -> Bool {
+        guard let urlPrefix, !anchoredPrefix.isEmpty else { return true }
+        var positions: Set<Int> = [0]
+        for token in anchoredPrefix {
+            var next: Set<Int> = []
+            for position in positions {
+                if position == urlPrefix.count { return true }
+                if token.isOptional { next.insert(position) }
+                switch token.atom {
+                case .any:
+                    next.insert(position + 1)
+                case .byte(let byte) where urlPrefix[position] == byte:
+                    next.insert(position + 1)
+                case .byte:
+                    break
+                }
+            }
+            guard !next.isEmpty else { return false }
+            positions = next
+        }
+        return true
+    }
+
+    private static func anchoredPrefix(of pattern: String) -> [(atom: PrefixAtom, isOptional: Bool)] {
+        let bytes = Array(pattern.utf8)
+        guard bytes.first == UInt8(ascii: "^"), !bytes.contains(UInt8(ascii: "|")) else { return [] }
+        let stops = Set("^$()[]{}*+?|".utf8)
+        let quantifiers = Set("*+?{".utf8)
+        var tokens: [(atom: PrefixAtom, isOptional: Bool)] = []
+        var index = 1
+        while index < bytes.count {
+            let byte = bytes[index]
+            let atom: PrefixAtom
+            var next = index + 1
+            if byte == UInt8(ascii: "\\") {
+                guard next < bytes.count else { break }
+                let escaped = bytes[next]
+                guard (0x21...0x7E).contains(escaped), !isASCIIAlphanumeric(escaped) else { break }
+                atom = .byte(escaped)
+                next += 1
+            } else if byte == UInt8(ascii: ".") {
+                atom = .any
+            } else if stops.contains(byte) || !(0x21...0x7E).contains(byte) {
+                break
+            } else {
+                atom = .byte(byte)
+            }
+            var isOptional = false
+            if next < bytes.count, quantifiers.contains(bytes[next]) {
+                guard bytes[next] == UInt8(ascii: "?"),
+                      next + 1 >= bytes.count || !quantifiers.contains(bytes[next + 1])
+                else { break }
+                isOptional = true
+                next += 1
+            }
+            tokens.append((atom: atom, isOptional: isOptional))
+            index = next
+        }
+        return tokens
+    }
+
+    private static func isASCIIAlphanumeric(_ byte: UInt8) -> Bool {
+        (0x30...0x39).contains(byte) || (0x41...0x5A).contains(byte) || (0x61...0x7A).contains(byte)
+    }
+
+    private static func contains(_ haystack: UnsafeBufferPointer<UInt8>, _ needle: [UInt8]) -> Bool {
+        guard !needle.isEmpty, needle.count <= haystack.count, let base = haystack.baseAddress else { return false }
+        return needle.withUnsafeBufferPointer { needle in
+            memmem(base, haystack.count, needle.baseAddress, needle.count) != nil
         }
     }
 
@@ -85,12 +174,17 @@ nonisolated final class MITMGateRegex: Sendable {
 
     func peek(_ normalizedURL: String, wantsCaptures: Bool) -> Verdict? {
         if isLiteral {
-            guard let range = normalizedURL.range(of: literalPattern, options: .literal) else { return .noMatch }
-            return .match(wantsCaptures ? [String(normalizedURL[range])] : nil)
+            var url = normalizedURL
+            guard url.withUTF8({ Self.contains($0, literalPatternBytes) }) else { return .noMatch }
+            return .match(wantsCaptures ? [literalPattern] : nil)
         }
         if alwaysMatches, !wantsCaptures { return .match(nil) }
-        if requiredLiterals.contains(where: { normalizedURL.range(of: $0, options: .literal) == nil }) {
-            return .noMatch
+        if !requiredLiterals.isEmpty {
+            var url = normalizedURL
+            let missesLiteral = url.withUTF8 { haystack in
+                requiredLiterals.contains { !Self.contains(haystack, $0) }
+            }
+            if missesLiteral { return .noMatch }
         }
         return state.withLock { state in
             if state.isQuarantined { return .noMatch }

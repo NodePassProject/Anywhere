@@ -126,7 +126,7 @@ nonisolated enum MITMJSONPatch {
     }
 
     static func serialize(_ object: Any) -> Data? {
-        guard isJSONEncodable(object) else { return nil }
+        guard JSONSerialization.isValidJSONObject(object) || isJSONEncodable(object) else { return nil }
         return try? JSONSerialization.data(withJSONObject: object, options: [.fragmentsAllowed, .withoutEscapingSlashes])
     }
 

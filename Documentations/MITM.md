@@ -372,9 +372,7 @@ accumulated (auto-decoding `gzip` / `deflate` / `br`, up to **4 MiB**), edited,
 and re-emitted with a fresh `Content-Length`. The contract is otherwise
 **total** — a `search` that matches nothing, or a `replacement` unrepresentable
 in the body's bytes, leaves the body unchanged. **Every** matching `body-replace`
-rule fires, in rule order, so replacements compose. (Body substitutions are
-process-serialized: if two run at once, or one exceeds a 1 s soft deadline, that
-message is left with its remaining edits unapplied.)
+rule fires, in rule order, so replacements compose.
 
 When several body transforms match one message they run in a fixed order:
 `body-json` first, then `body-replace`, then a `script` (so the script sees the
@@ -407,9 +405,8 @@ Like `script`, `body-json` is a **buffered** transform (auto-decoding, 4 MiB
 cap). The contract is **total** — a body that isn't JSON, a path that doesn't
 resolve, or an unserializable result leaves the body **byte-for-byte** unchanged.
 A *successful* edit re-serializes the whole document, so object member order is
-not preserved and slashes are not escaped; a document nested deeper than ~600
-levels, or containing non-finite numbers, is left unchanged. **Every** matching
-`body-json` rule fires in rule order; a matching `script` runs after them.
+not preserved and slashes are not escaped. **Every** matching `body-json` rule
+fires in rule order; a matching `script` runs after them.
 
 ```
 1, 5, ^/api/user, add, $.user.vip, true
@@ -863,52 +860,6 @@ Consolidate composed behavior into one `process(ctx)` rather than splitting it
 across rules. Static operations (`rewrite`, `header-*`) and buffered body rules
 (`body-replace`, `body-json`) are **not** capped — all matching ones apply, in
 order.
-
----
-
-## Limits and safety
-
-| Limit                                                | Value        | Effect on exceed |
-| ---------------------------------------------------- | ------------ | ---------------- |
-| Rules per rule set                                   | 10,000       | import / subscription / refresh rejected; in-app add blocked |
-| Parameters per rule set                              | 256          | extra parameter lines dropped at parse |
-| Icon size (decoded)                                  | 256 KB       | icon dropped |
-| Buffered body (`script` / `body-replace` / `body-json`) | 4 MiB     | `Content-Length` → passthrough; chunked → **fails closed** (connection closed / 502) |
-| Per-scope `Anywhere.store` (memory / onDisk)         | 1 MiB each   | `set` throws |
-| Total `Anywhere.store` (memory / onDisk)             | 16 MiB each  | `set` throws |
-| `Anywhere.crypto.randomBytes`                        | 64 KiB       | throws |
-| Synthesized response body                            | 4 MiB        | truncated |
-| `Anywhere.http` timeout                              | 10 s idle default / 30 s max, ~60 s absolute | Promise rejects |
-| `Anywhere.http` per script                           | 4 concurrent / 16 total | Promise rejects |
-| `Anywhere.http` concurrent (all scripts)             | 32           | Promise rejects |
-| `Anywhere.http` in-flight body bytes (all scripts)   | 16 MiB       | Promise rejects |
-| `Anywhere.http` response body                        | 4 MiB        | Promise rejects |
-| `Anywhere.http` redirects                            | 10 hops      | Promise rejects |
-| HTTP/1 request/response head                         | 64 KiB       | connection closed (request) / 502 (response) |
-| Body bytes pinned by suspended `async` scripts (all) | 16 MiB       | new flow passes through unmodified |
-| Contexts pinned by unsettled scripts (all)           | 32           | new flow passes through unmodified; new stream runs unscripted |
-| Idle suspended `async` script                        | ~60 s no progress | reverted to original, released |
-| Runaway synchronous JS span                          | ~30 s        | extension crashes & relaunches clean |
-
-Other safety properties:
-
-- **Isolation.** Each invocation runs in its own JavaScript context, so a script
-  cannot reach another's globals or patch a shared built-in. The boundary is per
-  *invocation* — two connections running the same rule set are isolated too.
-  [`Anywhere.store`](#anywherestore) is the one deliberate channel.
-- **Wire safety.** Header names, values, methods, and request targets produced by
-  scripts and rules are validated; CR/LF/NUL and other smuggling vectors are
-  rejected. (The exception noted above: `header-delete` is not guarded against
-  framing headers.)
-- **Watchdogs.** *Idle async:* a suspended `async` script that stops making
-  progress is reverted and released after ~60 s. *Runaway sync:* a CPU-bound loop
-  or pathological regex can't be preempted, so it wedges its own connection and
-  the scripts queued behind it — but a synchronous span past a ~30 s hard cap
-  crashes the extension so the OS relaunches it clean. Keep loops and regexes
-  bounded.
-- **Failure is safe-by-default.** A compile failure, a missing `process`, or an
-  uncaught throw (including an unhandled `Anywhere.http` rejection) passes the
-  original message through unchanged.
 
 ---
 

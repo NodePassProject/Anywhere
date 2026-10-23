@@ -164,4 +164,8 @@ nonisolated enum TLSFingerprint: String, Codable, CaseIterable {
         default:          return self
         }
     }
+
+    var offersPostQuantumKeyShare: Bool {
+        withoutPostQuantum != self
+    }
 }

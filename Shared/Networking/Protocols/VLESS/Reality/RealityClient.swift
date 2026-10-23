@@ -158,7 +158,7 @@ actor RealityClient {
         }
 
         var mlkemEncapsulationKey: Data?
-        if #available(iOS 26.0, macOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *) {
+        if #available(iOS 26.0, macOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *), configuration.fingerprint.offersPostQuantumKeyShare {
             if let mlkemPrivateKey = try? CryptoKit.MLKEM768.PrivateKey() {
                 mlkemPrivateKeyStorage = mlkemPrivateKey
                 mlkemEncapsulationKey = Data(mlkemPrivateKey.publicKey.rawRepresentation)
