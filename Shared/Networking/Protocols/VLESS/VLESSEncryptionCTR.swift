@@ -7,6 +7,7 @@
 
 import Foundation
 import CommonCrypto
+import BLAKE
 
 nonisolated final class VLESSEncryptionCTR {
     private let cryptor: CCCryptorRef
@@ -15,7 +16,7 @@ nonisolated final class VLESSEncryptionCTR {
         guard iv.count == 16 else {
             throw AnywhereError.proxy(.vlessEncryption, .protocolViolation(detail: "framing: VLESS CTR IV must be 16 bytes, got \(iv.count)"))
         }
-        let derivedKey = BLAKE3Hasher.deriveKey(context: "VLESS", input: key, count: 32)
+        let derivedKey = BLAKE3.deriveKey(context: "VLESS", keyMaterial: key, outputByteCount: 32)
 
         var ref: CCCryptorRef?
         let status = derivedKey.withUnsafeBytes { keyPtr -> CCCryptorStatus in

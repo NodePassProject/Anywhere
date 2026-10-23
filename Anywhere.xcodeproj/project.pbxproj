@@ -11,6 +11,9 @@
 		3853793F30753251000675B7 /* AnywhereQUIC in Frameworks */ = {isa = PBXBuildFile; productRef = 3853793E30753251000675B7 /* AnywhereQUIC */; };
 		3853794130753258000675B7 /* AnywhereQUIC in Frameworks */ = {isa = PBXBuildFile; productRef = 3853794030753258000675B7 /* AnywhereQUIC */; };
 		385379433075325D000675B7 /* AnywhereQUIC in Frameworks */ = {isa = PBXBuildFile; productRef = 385379423075325D000675B7 /* AnywhereQUIC */; };
+		38B2C4186D241EF7A2278F02 /* BLAKE in Frameworks */ = {isa = PBXBuildFile; productRef = 38B2C49B7761D5E2B8BE528B /* BLAKE */; };
+		38B2C41E20D0A1397B879414 /* BLAKE in Frameworks */ = {isa = PBXBuildFile; productRef = 38B2C410032BCA6342DED63E /* BLAKE */; };
+		38B2C426234A7168B56E86CC /* BLAKE in Frameworks */ = {isa = PBXBuildFile; productRef = 38B2C4CE1CDB7A0B75D898C9 /* BLAKE */; };
 		38B2C4A5307A1F0100D4E6F1 /* YAML in Frameworks */ = {isa = PBXBuildFile; productRef = 38B2C4A3307A1F0100D4E6F1 /* YAML */; };
 		38B2C4A6307A1F0100D4E6F1 /* YAML in Frameworks */ = {isa = PBXBuildFile; productRef = 38B2C4A4307A1F0100D4E6F1 /* YAML */; };
 		7870E4302FF89000006C0F14 /* Anywhere Watch App.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = 7870E41A2FF88ED5006C0F14 /* Anywhere Watch App.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -191,12 +194,6 @@
 				Networking/Protocols/Core/TransportReclaim.swift,
 				Networking/Protocols/Core/TunneledTransport.swift,
 				Networking/Protocols/Core/UDPFraming.swift,
-				Networking/Protocols/Crypto/BLAKE2/blake2b.c,
-				Networking/Protocols/Crypto/BLAKE2bHasher.swift,
-				Networking/Protocols/Crypto/BLAKE3/blake3_dispatch.c,
-				Networking/Protocols/Crypto/BLAKE3/blake3_portable.c,
-				Networking/Protocols/Crypto/BLAKE3/blake3.c,
-				Networking/Protocols/Crypto/BLAKE3Hasher.swift,
 				Networking/Protocols/Direct/DirectProxyConnection.swift,
 				Networking/Protocols/Direct/DirectUDPProxyConnection.swift,
 				Networking/Protocols/HTTP3/HTTP3Framer.swift,
@@ -513,6 +510,7 @@
 				CBFA0DE000000000000000C1 /* AnywhereRules in Frameworks */,
 				3853794130753258000675B7 /* AnywhereQUIC in Frameworks */,
 				38B2C4A5307A1F0100D4E6F1 /* YAML in Frameworks */,
+				38B2C4186D241EF7A2278F02 /* BLAKE in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -523,6 +521,7 @@
 				CB1C107A2F23B82F00B74CD8 /* NetworkExtension.framework in Frameworks */,
 				382A1871306A04490032C2BF /* AnywhereIP in Frameworks */,
 				3853793F30753251000675B7 /* AnywhereQUIC in Frameworks */,
+				38B2C426234A7168B56E86CC /* BLAKE in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -533,6 +532,7 @@
 				CBFA0DE000000000000000C2 /* AnywhereRules in Frameworks */,
 				385379433075325D000675B7 /* AnywhereQUIC in Frameworks */,
 				38B2C4A6307A1F0100D4E6F1 /* YAML in Frameworks */,
+				38B2C41E20D0A1397B879414 /* BLAKE in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -660,6 +660,7 @@
 				CBFA0DE000000000000000B1 /* AnywhereRules */,
 				3853794030753258000675B7 /* AnywhereQUIC */,
 				38B2C4A3307A1F0100D4E6F1 /* YAML */,
+				38B2C49B7761D5E2B8BE528B /* BLAKE */,
 			);
 			productName = Anywhere;
 			productReference = CB1C10652F23B81500B74CD8 /* Anywhere.app */;
@@ -684,6 +685,7 @@
 			packageProductDependencies = (
 				382A1870306A04490032C2BF /* AnywhereIP */,
 				3853793E30753251000675B7 /* AnywhereQUIC */,
+				38B2C4CE1CDB7A0B75D898C9 /* BLAKE */,
 			);
 			productName = "Network Extension";
 			productReference = CB1C10772F23B82F00B74CD8 /* Anywhere Network Extension.appex */;
@@ -712,6 +714,7 @@
 				CBFA0DE000000000000000B2 /* AnywhereRules */,
 				385379423075325D000675B7 /* AnywhereQUIC */,
 				38B2C4A4307A1F0100D4E6F1 /* YAML */,
+				38B2C410032BCA6342DED63E /* BLAKE */,
 			);
 			productName = Anywhere;
 			productReference = CB2B549C2F6C3E2700F24AC2 /* Anywhere TV.app */;
@@ -791,6 +794,7 @@
 				38B2C4A0307A1F0100D4E6F1 /* XCLocalSwiftPackageReference "Packages/AnywhereIP" */,
 				38B2C4A1307A1F0100D4E6F1 /* XCLocalSwiftPackageReference "Packages/AnywhereQUIC" */,
 				38B2C4A2307A1F0100D4E6F1 /* XCLocalSwiftPackageReference "Packages/YAML" */,
+				38B2C44881FD8FEA5EEA4D6E /* XCLocalSwiftPackageReference "Packages/BLAKE" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = CB1C10662F23B81500B74CD8 /* Products */;
@@ -1003,20 +1007,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 352;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
-				GCC_PREPROCESSOR_DEFINITIONS = (
-					"$(inherited)",
-					"BLAKE3_NO_SSE2=1",
-					"BLAKE3_NO_SSE41=1",
-					"BLAKE3_NO_AVX2=1",
-					"BLAKE3_NO_AVX512=1",
-					"BLAKE3_USE_NEON=0",
-				);
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = (
-					"$(inherited)",
-					"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2",
-					"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3",
-				);
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.argsment.Anywhere.Tests;
@@ -1028,7 +1019,6 @@
 				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_OBJC_BRIDGING_HEADER = Anywhere/BridgingHeader.h;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -1043,20 +1033,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 352;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
-				GCC_PREPROCESSOR_DEFINITIONS = (
-					"$(inherited)",
-					"BLAKE3_NO_SSE2=1",
-					"BLAKE3_NO_SSE41=1",
-					"BLAKE3_NO_AVX2=1",
-					"BLAKE3_NO_AVX512=1",
-					"BLAKE3_USE_NEON=0",
-				);
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = (
-					"$(inherited)",
-					"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2",
-					"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3",
-				);
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.argsment.Anywhere.Tests;
@@ -1068,7 +1045,6 @@
 				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_OBJC_BRIDGING_HEADER = Anywhere/BridgingHeader.h;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -1216,19 +1192,7 @@
 				CURRENT_PROJECT_VERSION = 406;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				ENABLE_PREVIEWS = YES;
-				GCC_PREPROCESSOR_DEFINITIONS = (
-					"$(inherited)",
-					"BLAKE3_NO_SSE2=1",
-					"BLAKE3_NO_SSE41=1",
-					"BLAKE3_NO_AVX2=1",
-					"BLAKE3_NO_AVX512=1",
-					"BLAKE3_USE_NEON=0",
-				);
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = (
-					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2\"",
-					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3\"",
-				);
 				INFOPLIST_FILE = Anywhere/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
@@ -1252,7 +1216,6 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_OBJC_BRIDGING_HEADER = Anywhere/BridgingHeader.h;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -1270,19 +1233,7 @@
 				CURRENT_PROJECT_VERSION = 406;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				ENABLE_PREVIEWS = YES;
-				GCC_PREPROCESSOR_DEFINITIONS = (
-					"$(inherited)",
-					"BLAKE3_NO_SSE2=1",
-					"BLAKE3_NO_SSE41=1",
-					"BLAKE3_NO_AVX2=1",
-					"BLAKE3_NO_AVX512=1",
-					"BLAKE3_USE_NEON=0",
-				);
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = (
-					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2\"",
-					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3\"",
-				);
 				INFOPLIST_FILE = Anywhere/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
@@ -1306,7 +1257,6 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_OBJC_BRIDGING_HEADER = Anywhere/BridgingHeader.h;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -1321,19 +1271,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 406;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
-				GCC_PREPROCESSOR_DEFINITIONS = (
-					"$(inherited)",
-					"BLAKE3_NO_SSE2=1",
-					"BLAKE3_NO_SSE41=1",
-					"BLAKE3_NO_AVX2=1",
-					"BLAKE3_NO_AVX512=1",
-					"BLAKE3_USE_NEON=0",
-				);
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = (
-					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2\"",
-					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3\"",
-				);
 				INFOPLIST_FILE = "Anywhere Network Extension/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "Anywhere Network Extension";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
@@ -1353,7 +1291,6 @@
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) NETWORK_EXTENSION";
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_OBJC_BRIDGING_HEADER = "Anywhere Network Extension/BridgingHeader.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2,3";
@@ -1369,19 +1306,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 406;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
-				GCC_PREPROCESSOR_DEFINITIONS = (
-					"$(inherited)",
-					"BLAKE3_NO_SSE2=1",
-					"BLAKE3_NO_SSE41=1",
-					"BLAKE3_NO_AVX2=1",
-					"BLAKE3_NO_AVX512=1",
-					"BLAKE3_USE_NEON=0",
-				);
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = (
-					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2\"",
-					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3\"",
-				);
 				INFOPLIST_FILE = "Anywhere Network Extension/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "Anywhere Network Extension";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
@@ -1401,7 +1326,6 @@
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) NETWORK_EXTENSION";
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_OBJC_BRIDGING_HEADER = "Anywhere Network Extension/BridgingHeader.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2,3";
@@ -1418,19 +1342,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 406;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
-				GCC_PREPROCESSOR_DEFINITIONS = (
-					"$(inherited)",
-					"BLAKE3_NO_SSE2=1",
-					"BLAKE3_NO_SSE41=1",
-					"BLAKE3_NO_AVX2=1",
-					"BLAKE3_NO_AVX512=1",
-					"BLAKE3_USE_NEON=0",
-				);
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = (
-					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2\"",
-					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3\"",
-				);
 				INFOPLIST_FILE = "Anywhere TV/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
@@ -1449,7 +1361,6 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_OBJC_BRIDGING_HEADER = "Anywhere TV/BridgingHeader.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = 3;
@@ -1466,19 +1377,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 406;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
-				GCC_PREPROCESSOR_DEFINITIONS = (
-					"$(inherited)",
-					"BLAKE3_NO_SSE2=1",
-					"BLAKE3_NO_SSE41=1",
-					"BLAKE3_NO_AVX2=1",
-					"BLAKE3_NO_AVX512=1",
-					"BLAKE3_USE_NEON=0",
-				);
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = (
-					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2\"",
-					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3\"",
-				);
 				INFOPLIST_FILE = "Anywhere TV/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
@@ -1497,7 +1396,6 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_OBJC_BRIDGING_HEADER = "Anywhere TV/BridgingHeader.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = 3;
@@ -1638,6 +1536,10 @@
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
+		38B2C44881FD8FEA5EEA4D6E /* XCLocalSwiftPackageReference "Packages/BLAKE" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/BLAKE;
+		};
 		38B2C4A0307A1F0100D4E6F1 /* XCLocalSwiftPackageReference "Packages/AnywhereIP" */ = {
 			isa = XCLocalSwiftPackageReference;
 			relativePath = Packages/AnywhereIP;
@@ -1680,6 +1582,14 @@
 			isa = XCSwiftPackageProductDependency;
 			productName = AnywhereQUIC;
 		};
+		38B2C410032BCA6342DED63E /* BLAKE */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = BLAKE;
+		};
+		38B2C49B7761D5E2B8BE528B /* BLAKE */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = BLAKE;
+		};
 		38B2C4A3307A1F0100D4E6F1 /* YAML */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = YAML;
@@ -1687,6 +1597,10 @@
 		38B2C4A4307A1F0100D4E6F1 /* YAML */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = YAML;
+		};
+		38B2C4CE1CDB7A0B75D898C9 /* BLAKE */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = BLAKE;
 		};
 		CBFA0DE000000000000000B1 /* AnywhereRules */ = {
 			isa = XCSwiftPackageProductDependency;

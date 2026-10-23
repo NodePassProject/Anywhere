@@ -7,6 +7,7 @@
 
 import Foundation
 import Security
+import BLAKE
 
 nonisolated enum VLESSVisionUDPGlobalID {
     private static let baseKey: [UInt8] = {
@@ -17,8 +18,8 @@ nonisolated enum VLESSVisionUDPGlobalID {
 
     /// Source address format: "udp:host:port"
     static func generateGlobalID(sourceAddress: String) -> Data {
-        var hasher = BLAKE3Hasher(key: baseKey)
-        hasher.update(Array(sourceAddress.utf8))
-        return hasher.finalizeData(count: 8)
+        var hasher = BLAKE3(key: baseKey)
+        hasher.update(data: Array(sourceAddress.utf8))
+        return Data(hasher.finalize(outputByteCount: 8))
     }
 }

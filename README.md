@@ -25,13 +25,13 @@ No Electron. No WebView. No sing-box wrapper. Pure protocol implementation from 
 
 ## Why Anywhere?
 
-Most iOS proxy clients wrap sing-box or Xray-core in a Go/C++ bridge. Anywhere takes a different approach — every protocol, every transport, the QUIC stack, and the entire packet tunnel are implemented natively in Swift and C. The result is a smaller binary, lower memory usage, tighter system integration, and no bridging overhead.
+Most iOS proxy clients wrap sing-box or Xray-core in a Go/C++ bridge. Anywhere takes a different approach — every protocol, every transport, the QUIC stack, and the entire packet tunnel are implemented natively in Swift. The result is a smaller binary, lower memory usage, tighter system integration, and no bridging overhead.
 
 ## Features
 
 ### Highlights
 
-- **Native core** — Swift 6 with strict concurrency, the native AnywhereIP TCP/IP stack, the native AnywhereQUIC engine, and vendored C for BLAKE2 and BLAKE3. No Go or C++ core, no bridging layer, no third-party networking engines. A single codebase builds the iOS, iPadOS, tvOS, and watchOS apps, the packet tunnel, and the Control Center controls.
+- **Native core** — Swift 6 with strict concurrency, the native AnywhereIP TCP/IP stack, the native AnywhereQUIC engine, and native BLAKE2b and BLAKE3. No Go or C++ core, no bridging layer, no third-party networking engines. A single codebase builds the iOS, iPadOS, tvOS, and watchOS apps, the packet tunnel, and the Control Center controls.
 - **Native TLS stack** — TLS 1.2 and 1.3, client and server, implemented in Swift. Browser-exact ClientHello fingerprints for Chrome, Firefox, Safari, and Edge; Encrypted Client Hello from an inline configuration or from DNS HTTPS records; hybrid X25519 and ML-KEM key shares. The same stack terminates TLS for MITM and provides the handshake primitives for Reality.
 - **Native QUIC stack** — AnywhereQUIC implemented in Swift, with BBR, CUBIC, and Brutal congestion control, connection migration, DATAGRAM frames, session resumption, and pluggable packet obfuscation. One engine serves Hysteria2, Nowhere, and XHTTP over HTTP/3.
 - **Multi-stage routing** — a five-tier matcher built from domain-suffix tries, keyword automata, and CIDR tries classifies each destination at DNS time through Fake-IP, at connect time before the TCP handshake is accepted, and again mid-connection from the sniffed TLS SNI. Bundled service, ad-block, and country-bypass rule sets are complemented by importable and subscribable `.arrs` rule sets.

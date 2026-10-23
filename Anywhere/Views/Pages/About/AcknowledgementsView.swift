@@ -29,28 +29,6 @@ struct AcknowledgementsView: View {
 
     private static let libraries: [OpenSourceLibrary] = [
         OpenSourceLibrary(
-            name: "BLAKE2",
-            licenseType: "CC0 1.0 / OpenSSL / Apache 2.0",
-            licenseText: """
-                BLAKE2 reference C implementation, copyright 2012 Samuel Neves.
-
-                This work is triple-licensed under the Creative Commons Zero v1.0 Universal (CC0 1.0) public domain dedication, the OpenSSL License, and the Apache License, Version 2.0. You may use it under the terms of any of these licenses.
-
-                Unless required by applicable law or agreed to in writing, the software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-                """
-        ),
-        OpenSourceLibrary(
-            name: "BLAKE3",
-            licenseType: "CC0 1.0 / Apache 2.0",
-            licenseText: """
-                BLAKE3 reference C implementation, version 1.8.5, by Jack O'Connor, Jean-Philippe Aumasson, Samuel Neves, and Zooko Wilcox-O'Hearn.
-
-                This work is dual-licensed under the Creative Commons Zero v1.0 Universal (CC0 1.0) public domain dedication and the Apache License, Version 2.0. You may use it under the terms of either license.
-
-                Unless required by applicable law or agreed to in writing, the software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-                """
-        ),
-        OpenSourceLibrary(
             name: "MaxMind GeoLite2",
             licenseType: "CC BY-SA 4.0",
             licenseText: """

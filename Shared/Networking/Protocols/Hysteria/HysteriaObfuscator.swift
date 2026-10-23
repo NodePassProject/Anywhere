@@ -8,6 +8,7 @@
 import Foundation
 import Security
 import Synchronization
+import BLAKE
 
 // MARK: - Salamander
 
@@ -15,14 +16,18 @@ nonisolated final class SalamanderObfuscator: QUICPacketObfuscator {
     static let saltLength = 8
     private static let keyLength = 32  // BLAKE2b-256 digest
 
-    private let passwordBytes: [UInt8]
+    private let passwordHasher: BLAKE2b
 
     init(password: String) {
-        self.passwordBytes = Array(password.utf8)
+        var hasher = BLAKE2b(digestByteCount: Self.keyLength)
+        hasher.update(data: Array(password.utf8))
+        self.passwordHasher = hasher
     }
 
     private func keystream(salt: UnsafeRawBufferPointer) -> [UInt8] {
-        BLAKE2bHasher.hash256(passwordBytes, salt)
+        var hasher = passwordHasher
+        hasher.update(bufferPointer: salt)
+        return hasher.finalize()
     }
 
     func seal(_ packet: UnsafeRawBufferPointer) -> [Data] {

@@ -8,6 +8,7 @@
 import Foundation
 import CryptoKit
 import Synchronization
+import BLAKE
 
 // MARK: - Wire constants
 
@@ -36,12 +37,7 @@ nonisolated private final class VLESSEncryptionAEAD: Sendable {
     private let nonce = Mutex<[UInt8]>(Array(repeating: 0, count: 12))
     
     init(context: Data, key: Data, useAES: Bool) {
-        let derived = BLAKE3Hasher.deriveKey(
-            contextBytes: context,
-            input: key,
-            count: 32
-        )
-        self.key = SymmetricKey(data: derived)
+        self.key = SymmetricKey(data: BLAKE3.deriveKey(context: context, keyMaterial: key))
         self.useAES = useAES
     }
     
@@ -274,7 +270,7 @@ nonisolated final class VLESSEncryptionClient {
         for publicKeyBytes in config.publicKeys {
             keys.append(try VLESSNfsPublicKey.parse(publicKeyBytes))
             raw.append(publicKeyBytes)
-            hashes.append(BLAKE3Hasher.hash(publicKeyBytes))
+            hashes.append(Data(BLAKE3.hash(data: publicKeyBytes)))
         }
         self.nfsKeys = keys
         self.nfsKeysRaw = raw

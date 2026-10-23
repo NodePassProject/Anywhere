@@ -8,12 +8,11 @@
 import Foundation
 import CryptoKit
 import CommonCrypto
+import BLAKE
 
 // MARK: - Key Derivation
 
 nonisolated enum ShadowsocksKeyDerivation {
-
-    /// Derives a master key from a password via EVP_BytesToKey (MD5).
     static func deriveKey(password: String, keySize: Int) -> Data {
         guard keySize > 0 else { return Data() }
         let passwordData = Array(password.utf8)
@@ -37,7 +36,6 @@ nonisolated enum ShadowsocksKeyDerivation {
         return Data(result.prefix(keySize))
     }
 
-    /// Derives a per-salt subkey via HKDF-SHA1 with info "ss-subkey".
     static func deriveSubkey(masterKey: Data, salt: Data, keySize: Int) -> Data {
         let symmetricKey = SymmetricKey(data: masterKey)
         let info = "ss-subkey".data(using: .utf8)!
@@ -50,9 +48,7 @@ nonisolated enum ShadowsocksKeyDerivation {
         return derivedKey.withUnsafeBytes { Data($0) }
     }
 
-    /// Decodes a base64 PSK for Shadowsocks 2022; must be exactly keySize bytes.
     static func decodePSK(password: String, keySize: Int) -> Data? {
-        // Colon-separated multi-PSK: the client uses the last one.
         let parts = password.split(separator: ":")
         guard let lastPart = parts.last,
               let psk = Data(base64Encoded: ShadowsocksKeyDerivation.padBase64(String(lastPart))) else {
@@ -64,7 +60,6 @@ nonisolated enum ShadowsocksKeyDerivation {
         return psk
     }
 
-    /// Decodes all colon-separated base64 PSKs; nil if any fails to decode or has the wrong size.
     static func decodePSKList(password: String, keySize: Int) -> [Data]? {
         let parts = password.split(separator: ":")
         var psks: [Data] = []
@@ -81,21 +76,27 @@ nonisolated enum ShadowsocksKeyDerivation {
     }
 
     static func blake3Hash16(_ data: Data) -> Data {
-        BLAKE3Hasher.hash(data, count: 16)
+        Data(BLAKE3.hash(data: data, outputByteCount: 16))
     }
 
     static func deriveIdentitySubkey(psk: Data, salt: Data, keySize: Int) -> Data {
-        var input = Data(psk)
-        input.append(salt)
-        return BLAKE3Hasher.deriveKey(context: "shadowsocks 2022 identity subkey",
-                                     input: input, count: keySize)
+        Data(
+            BLAKE3.deriveKey(
+                context: "shadowsocks 2022 identity subkey",
+                keyMaterial: psk + salt,
+                outputByteCount: keySize
+            )
+        )
     }
 
     static func deriveSessionKey(psk: Data, salt: Data, keySize: Int) -> Data {
-        var input = Data(psk)
-        input.append(salt)
-        return BLAKE3Hasher.deriveKey(context: "shadowsocks 2022 session subkey",
-                                     input: input, count: keySize)
+        Data(
+            BLAKE3.deriveKey(
+                context: "shadowsocks 2022 session subkey",
+                keyMaterial: psk + salt,
+                outputByteCount: keySize
+            )
+        )
     }
 
     private static func padBase64(_ string: String) -> String {
@@ -107,7 +108,6 @@ nonisolated enum ShadowsocksKeyDerivation {
 
 // MARK: - Nonce Generator
 
-/// Incrementing little-endian AEAD nonce: starts at all 0xFF, so the first returned nonce is all zeros.
 nonisolated struct ShadowsocksNonce {
     private var bytes: [UInt8]
 
@@ -127,7 +127,6 @@ nonisolated struct ShadowsocksNonce {
 // MARK: - AEAD Seal/Open
 
 nonisolated enum ShadowsocksAEADCrypto {
-
     static func seal(cipher: ShadowsocksCipher, key: Data, nonce: Data, plaintext: Data) throws -> Data {
         let symmetricKey = SymmetricKey(data: key)
 
@@ -135,7 +134,6 @@ nonisolated enum ShadowsocksAEADCrypto {
         case .aes128gcm, .aes256gcm, .blake3aes128gcm, .blake3aes256gcm:
             let nonceObj = try AES.GCM.Nonce(data: nonce)
             let sealed = try AES.GCM.seal(plaintext, using: symmetricKey, nonce: nonceObj)
-            // combined = nonce(12) + ciphertext + tag; skip nonce prefix
             guard let combined = sealed.combined else { throw AnywhereError.proxy(.shadowsocks, .cipher(.decryptionFailed)) }
             return combined.suffix(from: 12)
 
@@ -181,12 +179,6 @@ nonisolated enum ShadowsocksAEADCrypto {
 
 // MARK: - ShadowsocksAEADWriter (Encrypt)
 
-/// Encrypts into Shadowsocks AEAD chunks — `[sealed 2-byte length][sealed payload]` —
-/// with the salt prepended to the first output.
-///
-/// Plain value-semantic state machine (nonce advance, one-shot salt). It is not shared
-/// directly: the owning connection is the object that crosses concurrency domains and it
-/// holds this value inside its own `Mutex`, so every mutation happens under that lock.
 nonisolated struct ShadowsocksAEADWriter {
     private let cipher: ShadowsocksCipher
     private let subkey: Data
@@ -194,7 +186,7 @@ nonisolated struct ShadowsocksAEADWriter {
     private var nonce: ShadowsocksNonce
     private var saltWritten = false
 
-    static let maxPayloadSize = 0x3FFF // 16383
+    static let maxPayloadSize = 0x3FFF
 
     init(cipher: ShadowsocksCipher, masterKey: Data) {
         self.cipher = cipher
@@ -254,12 +246,6 @@ nonisolated struct ShadowsocksAEADWriter {
 
 // MARK: - ShadowsocksAEADReader (Decrypt)
 
-/// Decrypts a Shadowsocks AEAD stream, reassembling `[sealed length][sealed payload]`
-/// chunks across arbitrary read boundaries.
-///
-/// Plain value-semantic state machine (subkey, nonce, reassembly buffer). It is not shared
-/// directly: the owning connection is the object that crosses concurrency domains and it
-/// holds this value inside its own `Mutex`, so every mutation happens under that lock.
 nonisolated struct ShadowsocksAEADReader {
     private let cipher: ShadowsocksCipher
     private let masterKey: Data
@@ -277,7 +263,6 @@ nonisolated struct ShadowsocksAEADReader {
     private var bufferOffset = 0
     private var pendingPayloadLength = 0
 
-    /// Compaction threshold — avoid O(n) shifts until dead space is significant.
     private static let compactThreshold = 4096
 
     init(cipher: ShadowsocksCipher, masterKey: Data) {
@@ -360,8 +345,6 @@ nonisolated struct ShadowsocksAEADReader {
 // MARK: - UDP Crypto
 
 nonisolated enum ShadowsocksUDPCrypto {
-
-    /// Encrypts a UDP packet: random salt + single AEAD seal (no chunking).
     static func encrypt(cipher: ShadowsocksCipher, masterKey: Data, payload: Data) throws -> Data {
         guard cipher != .none else { return payload }
 
