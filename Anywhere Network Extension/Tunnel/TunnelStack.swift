@@ -221,6 +221,7 @@ actor TunnelStack {
     private let _mitmEnabled = Atomic<Bool>(false)
     nonisolated var mitmEnabled: Bool { _mitmEnabled.load(ordering: .relaxed) }
     nonisolated let mitmPolicy = MITMRewritePolicy()
+    nonisolated let mitmUpstreamALPNCache = MITMUpstreamALPNCache()
     private let _mitmLeafCache = Mutex<MITMLeafCertificateCache?>(nil)
     nonisolated let mitmCertificateStore = MITMCertificateStore()
 

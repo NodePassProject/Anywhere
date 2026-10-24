@@ -44,7 +44,9 @@ An intercepted **HTTPS** connection is handled in four steps:
 
 1. Mint a leaf certificate for the requested host (cached, per host) and
    complete the **inner** TLS handshake with the client, negotiating ALPN from
-   the client's own offer (intersected with `h2` / `http/1.1`).
+   the client's own offer (intersected with `h2` / `http/1.1`). If the client
+   offers both and this `host:port` has answered an earlier probe with
+   HTTP/1.1, only `http/1.1` is offered.
 2. Read the first request and apply the matching rules. A `rewrite` rule can
    answer on the inner leg (302 / reject — no upstream) or change the
    destination host.
@@ -52,8 +54,7 @@ An intercepted **HTTPS** connection is handled in four steps:
    it — the rewritten host when set, otherwise the original — and run its own TLS
    handshake. An HTTP/1.1 client goes to an HTTP/1.1 upstream; an HTTP/2 client
    is **bridged** to whatever the upstream speaks: HTTP/2 directly, or HTTP/1.1
-   with on-the-fly translation (one short-lived upstream connection per request
-   stream).
+   with on-the-fly translation.
 4. Decrypt each direction, run the matching rules, and re-encrypt to the
    opposite leg.
 

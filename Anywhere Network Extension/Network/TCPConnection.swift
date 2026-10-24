@@ -947,6 +947,7 @@ actor TCPConnection: MITMSessionHost {
             dstPort: dstPort,
             clientHello: initialClientHello,
             leafCache: cache,
+            upstreamALPNCache: stack.mitmUpstreamALPNCache,
             policy: stack.mitmPolicy,
             sessionContext: sessionContext,
             isPlaintext: mitmPlaintext

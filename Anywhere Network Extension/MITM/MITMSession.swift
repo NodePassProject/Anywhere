@@ -128,6 +128,7 @@ actor MITMSession: MITMHTTP1StreamDelegate {
     private let isPlaintext: Bool
 
     private let leafCache: MITMLeafCertificateCache?
+    private let upstreamALPNCache: MITMUpstreamALPNCache
     private let policy: MITMRewritePolicy
 
     private var proxyClient: ProxyClient?
@@ -375,6 +376,7 @@ actor MITMSession: MITMHTTP1StreamDelegate {
         dstPort: UInt16,
         clientHello: Data,
         leafCache: MITMLeafCertificateCache?,
+        upstreamALPNCache: MITMUpstreamALPNCache,
         policy: MITMRewritePolicy,
         sessionContext: SessionExecutionContext,
         isPlaintext: Bool = false
@@ -383,6 +385,7 @@ actor MITMSession: MITMHTTP1StreamDelegate {
         self.dstPort = dstPort
         self.pendingClientBytes = clientHello
         self.leafCache = leafCache
+        self.upstreamALPNCache = upstreamALPNCache
         self.policy = policy
         self.sessionContext = sessionContext
         self.isPlaintext = isPlaintext
@@ -631,7 +634,11 @@ actor MITMSession: MITMHTTP1StreamDelegate {
         clientSupportsTLS13: Bool
     ) {
         let supported: Set<String> = ["h2", "http/1.1"]
-        let intersected = clientALPNs.filter { supported.contains($0) }
+        var intersected = clientALPNs.filter { supported.contains($0) }
+        if intersected.contains("h2"), intersected.contains("http/1.1"),
+           upstreamALPNCache.lacksHTTP2(host: dstHost, port: dstPort) {
+            intersected.removeAll { $0 == "h2" }
+        }
         let alpns: [String] = intersected.isEmpty ? ["http/1.1"] : intersected
         var tlsVersions: Set<UInt16> = [0x0303]
         if clientSupportsTLS13 { tlsVersions.insert(0x0304) }
@@ -1416,6 +1423,9 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
             sharedUpstreamRecord = record
             let dialTarget = firstUpstreamDialTarget
             firstUpstreamDialTarget = nil
+            if let dialTarget {
+                upstreamALPNCache.record(negotiatedALPN: record.negotiatedALPN, host: dialTarget.host, port: dialTarget.port)
+            }
             if record.negotiatedALPN == "h2" {
                 bindH2Upstream(record: record, target: dialTarget)
             } else {
