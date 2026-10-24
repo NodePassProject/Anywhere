@@ -176,6 +176,10 @@ nonisolated final class ConnectionRouter: Sendable {
     // MARK: - DNS-time verdict
 
     func dnsVerdict(forDomain domain: String) -> (match: DomainRouter.Match?, rulesVersion: UInt64) {
+        if let cached = fakeIPPool.cachedVerdict(domain: domain),
+           cached.version == domainRouter.currentRulesVersion {
+            return (cached.match, cached.version)
+        }
         let versioned = domainRouter.matchDomainVersioned(domain)
         return (versioned.match, versioned.version)
     }

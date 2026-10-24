@@ -135,6 +135,14 @@ nonisolated final class FakeIPPool: Sendable {
         }
     }
 
+    func cachedVerdict(domain: String) -> (match: DomainRouter.Match?, version: UInt64)? {
+        state.withLock { state in
+            guard let offset = state.domainToOffset[domain],
+                  let entry = state.offsetToEntry[offset] else { return nil }
+            return (entry.verdict, entry.verdictVersion)
+        }
+    }
+
     func lookup(ip: String) -> Entry? {
         state.withLock { state in
             guard let offset = ipv4ToOffset(ip) else { return nil }

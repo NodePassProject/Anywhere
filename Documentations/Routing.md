@@ -46,8 +46,7 @@ A destination is classified at several points:
 1. **DNS time.** DNS queries are intercepted and the queried domain is matched
    against domain rules immediately. A **reject** verdict answers `0.0.0.0` /
    `::` (NODATA for other query types) and the domain never resolves.
-   Otherwise a fake IP is allocated and the verdict is cached with it, tagged
-   with the rules version so a rules reload invalidates it.
+   Otherwise a fake IP is allocated and the verdict is cached with it.
 2. **Connect time, fake IP.** A connection to a fake IP is routed by the
    cached domain verdict (re-matched if the rules changed since DNS time).
 3. **Connect time, literal IP.** A connection to a real IP is matched against
