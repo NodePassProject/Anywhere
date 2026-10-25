@@ -65,8 +65,10 @@ A destination is classified at several points:
 
 So domain rules always take precedence for a connection with a known host; IP
 rules apply to literal-IP traffic and, as a fallback, to unmatched domains.
-Rejected domains and IPs are additionally remembered, so follow-up packets to
-them are dropped at intake.
+Domains rejected by a domain rule and literal IPs rejected by a CIDR rule are
+additionally remembered, so follow-up packets to them are dropped at intake. A
+resolved-IP fallback reject is not remembered: it rejects only the connection
+that triggered it, since the domain's resolved address can change.
 
 A destination that matches **no** rule takes the default route. Rules only
 override that default where they match — an empty or fully-unmatched rule base
@@ -352,7 +354,8 @@ deeper suffix wins within the tier regardless of set order.
   literal-IP traffic and, unless Prevent DNS Leak is on, to unmatched domains
   via their resolved IPv4.
 - **Reject is enforced early.** Reject-matched domains get null DNS answers;
-  reject-marked domains and IPs are dropped at packet intake.
+  reject-marked domains and IPs are dropped at packet intake. Resolved-IP
+  fallback rejects are per connection and never mark the domain.
 - **First tier wins.** ADBlock > Built-in > User > Neutral > Country Bypass; a
   higher tier beats a more-specific rule in a lower one.
 - **Most-specific wins within a tier.** Deepest suffix, longest keyword,

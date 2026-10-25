@@ -84,7 +84,7 @@ nonisolated final class ConnectionRouter: Sendable {
                     return RouteDecision(
                         host: domain,
                         hostIsResolvedDomain: true,
-                        action: markingIfRejected(action(for: match), domain: domain)
+                        action: action(for: match)
                     )
                 }
             } else {
