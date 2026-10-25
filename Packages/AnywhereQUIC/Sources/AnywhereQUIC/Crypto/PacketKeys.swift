@@ -13,6 +13,7 @@ struct AEADError: Error { }
 final class PacketKeys {
     let suite: QUICCipherSuite
     let secret: [UInt8]
+    let labelPrefix: String
     let key: SymmetricKey
     let headerProtector: HeaderProtector
     private let noncePrefix: UInt32
@@ -20,27 +21,28 @@ final class PacketKeys {
 
     var aead: AEADAlgorithm { self.suite.aead }
 
-    convenience init(suite: QUICCipherSuite, secret: [UInt8]) {
+    convenience init(suite: QUICCipherSuite, secret: [UInt8], labelPrefix: String = "quic") {
         let aead = suite.aead
         let keyBytes = KeyDerivation.expandLabel(
             secret: secret,
-            label: "quic key",
+            label: "\(labelPrefix) key",
             length: aead.keyLength,
             hash: suite.hash
         )
         let headerKey = KeyDerivation.expandLabel(
             secret: secret,
-            label: "quic hp",
+            label: "\(labelPrefix) hp",
             length: aead.keyLength,
             hash: suite.hash
         )
         self.init(
             suite: suite,
             secret: secret,
+            labelPrefix: labelPrefix,
             key: SymmetricKey(data: keyBytes),
             iv: KeyDerivation.expandLabel(
                 secret: secret,
-                label: "quic iv",
+                label: "\(labelPrefix) iv",
                 length: AEADAlgorithm.nonceLength,
                 hash: suite.hash
             ),
@@ -51,6 +53,7 @@ final class PacketKeys {
     private init(
         suite: QUICCipherSuite,
         secret: [UInt8],
+        labelPrefix: String,
         key: SymmetricKey,
         iv: [UInt8],
         headerProtector: HeaderProtector
@@ -58,6 +61,7 @@ final class PacketKeys {
         precondition(iv.count == AEADAlgorithm.nonceLength)
         self.suite = suite
         self.secret = secret
+        self.labelPrefix = labelPrefix
         self.key = key
         self.headerProtector = headerProtector
         (self.noncePrefix, self.nonceSuffix) = iv.withUnsafeBytes { raw in
@@ -65,34 +69,40 @@ final class PacketKeys {
         }
     }
 
-    static func initial(destinationID: QUICConnectionID, isClient: Bool) -> (read: PacketKeys, write: PacketKeys) {
-        let secrets = KeyDerivation.initialSecrets(destinationID: destinationID)
-        let client = PacketKeys(suite: .TLS_AES_128_GCM_SHA256, secret: secrets.client)
-        let server = PacketKeys(suite: .TLS_AES_128_GCM_SHA256, secret: secrets.server)
+    static func initial(
+        destinationID: QUICConnectionID,
+        isClient: Bool,
+        version: QUICVersion = .v1
+    ) -> (read: PacketKeys, write: PacketKeys) {
+        let secrets = KeyDerivation.initialSecrets(destinationID: destinationID, version: version)
+        let labelPrefix = version.packetProtectionLabelPrefix
+        let client = PacketKeys(suite: .TLS_AES_128_GCM_SHA256, secret: secrets.client, labelPrefix: labelPrefix)
+        let server = PacketKeys(suite: .TLS_AES_128_GCM_SHA256, secret: secrets.server, labelPrefix: labelPrefix)
         return isClient ? (server, client) : (client, server)
     }
 
     func updated() -> PacketKeys {
         let nextSecret = KeyDerivation.expandLabel(
             secret: self.secret,
-            label: "quic ku",
+            label: "\(self.labelPrefix) ku",
             length: self.suite.hash.digestLength,
             hash: self.suite.hash
         )
         let aead = self.suite.aead
         let keyBytes = KeyDerivation.expandLabel(
             secret: nextSecret,
-            label: "quic key",
+            label: "\(self.labelPrefix) key",
             length: aead.keyLength,
             hash: self.suite.hash
         )
         return PacketKeys(
             suite: self.suite,
             secret: nextSecret,
+            labelPrefix: self.labelPrefix,
             key: SymmetricKey(data: keyBytes),
             iv: KeyDerivation.expandLabel(
                 secret: nextSecret,
-                label: "quic iv",
+                label: "\(self.labelPrefix) iv",
                 length: AEADAlgorithm.nonceLength,
                 hash: self.suite.hash
             ),

@@ -1,6 +1,6 @@
 # Exclusions
 
-AnywhereQUIC implements the client side of RFC 9000 (QUIC version 1), RFC 9001 (Using TLS to Secure QUIC), RFC 9002 (Loss Detection and Congestion Control) and RFC 9221 (DATAGRAM frames). This document records only where it intentionally departs from those RFCs. QUIC extensions defined in other RFCs, such as QUIC version 2 (RFC 9369), compatible version negotiation (RFC 9368) and greasing the QUIC bit (RFC 9287), are not implemented.
+AnywhereQUIC implements the client side of RFC 9000 (QUIC version 1), RFC 9001 (Using TLS to Secure QUIC), RFC 9002 (Loss Detection and Congestion Control) and RFC 9221 (DATAGRAM frames). This document records only where it intentionally departs from those RFCs. QUIC extensions defined in other RFCs, such as QUIC version 2 (RFC 9369), compatible version negotiation (RFC 9368) and greasing the QUIC bit (RFC 9287), are not implemented. The one exception is `QUICInitialPeek`, which also derives version 2 Initial keys so that an observer on the path can read a version 2 client's Initial packets; connections themselves still speak version 1 only.
 
 ## Optional or server-only behaviour that is not implemented
 

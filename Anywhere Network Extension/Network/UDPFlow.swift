@@ -20,6 +20,7 @@ actor UDPFlow {
 
     nonisolated let flowKey: TunnelStack.UDPFlowKey
     nonisolated let dstHost: String
+    nonisolated let sniffedHost: String?
     nonisolated var dstPort: UInt16 { flowKey.destination.port }
     nonisolated let configuration: ProxyConfiguration
 
@@ -130,6 +131,7 @@ actor UDPFlow {
         ledger: UDPBufferLedger,
         flowKey: TunnelStack.UDPFlowKey,
         dstHost: String,
+        sniffedHost: String? = nil,
         configuration: ProxyConfiguration,
         routeTarget: RouteTarget,
         ruleSetName: String?
@@ -139,10 +141,11 @@ actor UDPFlow {
         self.ledger = ledger
         self.flowKey = flowKey
         self.dstHost = dstHost
+        self.sniffedHost = sniffedHost
         self.configuration = configuration
         self.routeTarget = routeTarget
         self.activityRecord = stack.udpActivity.open(
-            host: dstHost,
+            host: sniffedHost ?? dstHost,
             port: flowKey.destination.port,
             routeTarget: routeTarget,
             defaultRouteTarget: stack.udpConfig().defaultRouteTarget,

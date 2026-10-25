@@ -38,6 +38,21 @@ actor UDPPlane {
     }
     private var pendingResolutions: [TunnelStack.UDPFlowKey: PendingDatagrams] = [:]
 
+    private struct PendingSniff {
+        var sniffer: QUICClientHelloSniffer
+        var datagrams: [InboundDatagram] = []
+        var byteCount = 0
+        let generation: UInt64
+    }
+    private var pendingSniffs: [TunnelStack.UDPFlowKey: PendingSniff] = [:]
+    private var sniffGeneration: UInt64 = 0
+    private var pendingSniffCapWarned = false
+
+    private enum SniffStage {
+        case pending
+        case done(serverName: String?)
+    }
+
     private var ssSessions: [UUID: ShadowsocksUDPSession] = [:]
 
     private var multiplexerPoolStorage: (any UDPMultiplexerPool)?
@@ -148,7 +163,11 @@ actor UDPPlane {
         }
     }
 
-    private func handleInboundUDP(_ datagram: InboundDatagram, awaitedResolution: Bool = false) async {
+    private func handleInboundUDP(
+        _ datagram: InboundDatagram,
+        awaitedResolution: Bool = false,
+        sniff: SniffStage = .pending
+    ) async {
         let payload = datagram.payload
         let dstAddress = datagram.destination.address
         let dstPort = datagram.destination.port
@@ -218,7 +237,40 @@ actor UDPPlane {
             return
         }
 
-        if dstPort == 443, blocksQUIC(to: dstHost, udpConfig: udpConfig) {
+        var sniffedServerName: String?
+        switch sniff {
+        case .done(let serverName):
+            sniffedServerName = serverName
+        case .pending:
+            if !decision.hostIsResolvedDomain {
+                switch await sniffQUIC(datagram, flowKey: flowKey) {
+                case .consumed:
+                    return
+                case .finished(let serverName):
+                    sniffedServerName = serverName
+                }
+            }
+        }
+
+        if let sniffedServerName,
+           let action = stack.connectionRouter.action(forSniffedHost: sniffedServerName, port: dstPort, proto: "UDP") {
+            switch action {
+            case .route(let target, let configuration, let matchedRuleSet):
+                routeTarget = target
+                ruleSetName = matchedRuleSet
+                flowConfiguration = configuration ?? defaultConfiguration
+            case .reject(let matchedRuleSet):
+                stack.requestLog.record(protocol: .udp, host: sniffedServerName, port: dstPort, routeTarget: .reject, ruleSetName: matchedRuleSet)
+                return
+            case .unreachable:
+                stack.sendICMPPortUnreachable(rejecting: datagram)
+                return
+            }
+        }
+
+        let policyHost = sniffedServerName ?? dstHost
+
+        if dstPort == 443, blocksQUIC(to: policyHost, udpConfig: udpConfig) {
             stack.sendICMPPortUnreachable(rejecting: datagram)
             return
         }
@@ -235,7 +287,7 @@ actor UDPPlane {
 
         guard makeRoomForNewFlow() else { return }
 
-        stack.requestLog.record(protocol: .udp, host: dstHost, port: dstPort, routeTarget: routeTarget, ruleSetName: ruleSetName)
+        stack.requestLog.record(protocol: .udp, host: policyHost, port: dstPort, routeTarget: routeTarget, ruleSetName: ruleSetName)
 
         let flow = UDPFlow(
             stack: stack,
@@ -243,6 +295,7 @@ actor UDPPlane {
             ledger: bufferLedger,
             flowKey: flowKey,
             dstHost: dstHost,
+            sniffedHost: sniffedServerName,
             configuration: flowConfiguration,
             routeTarget: routeTarget,
             ruleSetName: ruleSetName
@@ -268,10 +321,103 @@ actor UDPPlane {
     private func revalidateQUIC() {
         let udpConfig = stack.udpConfig()
         for (key, flow) in flows where key.destination.port == 443 {
-            guard blocksQUIC(to: flow.dstHost, udpConfig: udpConfig)
+            guard blocksQUIC(to: flow.sniffedHost ?? flow.dstHost, udpConfig: udpConfig)
                     || blocksQUIC(routedTo: flow.routeTarget, udpConfig: udpConfig) else { continue }
             flows.removeValue(forKey: key)
             Task { await flow.close() }
+        }
+    }
+
+    // MARK: - QUIC SNI sniffing
+
+    private enum SniffOutcome {
+        case consumed
+        case finished(serverName: String?)
+    }
+
+    private func sniffQUIC(_ datagram: InboundDatagram, flowKey: TunnelStack.UDPFlowKey) async -> SniffOutcome {
+        var pending: PendingSniff
+        if let held = pendingSniffs.removeValue(forKey: flowKey) {
+            pending = held
+        } else {
+            guard QUICClientHelloSniffer.looksLikeClientInitial(datagram.payload) else {
+                return .finished(serverName: nil)
+            }
+            guard pendingSniffs.count < TunnelLimits.udpMaxPendingSniffs else {
+                if !pendingSniffCapWarned {
+                    pendingSniffCapWarned = true
+                    logger.warning("[UDP] pending-sniff table full (\(TunnelLimits.udpMaxPendingSniffs))")
+                }
+                return .finished(serverName: nil)
+            }
+            sniffGeneration += 1
+            pending = PendingSniff(
+                sniffer: QUICClientHelloSniffer(
+                    bufferLimit: TunnelConstants.quicSnifferBufferLimit,
+                    datagramLimit: TunnelConstants.quicSnifferDatagramLimit
+                ),
+                generation: sniffGeneration
+            )
+        }
+
+        var state = pending.sniffer.feed(datagram.payload)
+        if state == .needMore, pending.byteCount + datagram.payload.count > TunnelConstants.udpPendingSniffMaxBytes {
+            state = .unavailable
+        }
+
+        switch state {
+        case .needMore:
+            pending.datagrams.append(datagram)
+            pending.byteCount += datagram.payload.count
+            let isFirst = pending.datagrams.count == 1
+            pendingSniffs[flowKey] = pending
+            if isFirst {
+                let generation = pending.generation
+                Task { [weak self] in
+                    try? await Task.sleep(seconds: TunnelConstants.sniffDeadline, precision: .prompt)
+                    await self?.sniffDeadlineFired(flowKey: flowKey, generation: generation)
+                }
+            }
+            return .consumed
+        case .found(let serverName):
+            notePendingSniffDrained()
+            logger.debug("[UDP] QUIC SNI \(serverName) for \(flowKey)")
+            return await releaseHeldDatagrams(pending.datagrams, then: datagram, serverName: serverName)
+        case .notQUIC, .unavailable:
+            notePendingSniffDrained()
+            return await releaseHeldDatagrams(pending.datagrams, then: datagram, serverName: nil)
+        }
+    }
+
+    private func releaseHeldDatagrams(
+        _ held: [InboundDatagram],
+        then datagram: InboundDatagram,
+        serverName: String?
+    ) async -> SniffOutcome {
+        guard !held.isEmpty else {
+            return .finished(serverName: serverName)
+        }
+        for datagram in held + [datagram] {
+            guard stack.publishedPhase.load(ordering: .relaxed) == .running else { break }
+            await handleInboundUDP(datagram, sniff: .done(serverName: serverName))
+        }
+        return .consumed
+    }
+
+    private func sniffDeadlineFired(flowKey: TunnelStack.UDPFlowKey, generation: UInt64) async {
+        guard let pending = pendingSniffs[flowKey], pending.generation == generation else { return }
+        pendingSniffs.removeValue(forKey: flowKey)
+        notePendingSniffDrained()
+        logger.debug("[UDP] QUIC sniff deadline passed for \(flowKey)")
+        for datagram in pending.datagrams {
+            guard stack.publishedPhase.load(ordering: .relaxed) == .running else { return }
+            await handleInboundUDP(datagram, sniff: .done(serverName: nil))
+        }
+    }
+
+    private func notePendingSniffDrained() {
+        if pendingSniffCapWarned, pendingSniffs.count <= TunnelLimits.udpMaxPendingSniffs / 2 {
+            pendingSniffCapWarned = false
         }
     }
 
@@ -566,6 +712,8 @@ actor UDPPlane {
         purgeShadowsocksUDPSessions()
         pendingResolutions.removeAll()
         pendingResolutionCapWarned = false
+        pendingSniffs.removeAll()
+        pendingSniffCapWarned = false
         let all = Array(flows.values)
         flows.removeAll()
         for flow in all {

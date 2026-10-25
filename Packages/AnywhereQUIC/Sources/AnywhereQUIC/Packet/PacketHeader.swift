@@ -55,6 +55,7 @@ struct QUICVersion: RawRepresentable, Sendable {
 extension QUICVersion: Hashable {
     static let negotiation = QUICVersion(rawValue: 0x0000_0000)
     static let v1 = QUICVersion(rawValue: 0x0000_0001)
+    static let v2 = QUICVersion(rawValue: 0x6B33_43CF)
 }
 
 extension QUICVersion: CustomStringConvertible {

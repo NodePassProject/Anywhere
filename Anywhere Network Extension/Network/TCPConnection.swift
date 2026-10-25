@@ -433,7 +433,6 @@ actor TCPConnection: MITMSessionHost {
             routeTarget = .reject
             stack.requestLog.record(protocol: .tcp, host: sni, port: dstPort, routeTarget: .reject, ruleSetName: match.ruleSetName)
             publishRoute()
-            logger.debug("[TCP] SNI rejected by routing rule: \(sni) (\(dstHost):\(dstPort))")
             rejectSilently()
         case .proxy(let id):
             guard let resolved = router.resolveConfiguration(action: match.action) else {

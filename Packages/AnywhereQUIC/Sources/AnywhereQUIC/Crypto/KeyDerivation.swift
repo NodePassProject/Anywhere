@@ -14,6 +14,11 @@ enum KeyDerivation {
         0x9A, 0xE6, 0xA4, 0xC8, 0x0C, 0xAD, 0xCC, 0xBB, 0x7F, 0x0A,
     ]
 
+    static let initialSaltV2: [UInt8] = [
+        0x0D, 0xED, 0xE3, 0xDE, 0xF7, 0x00, 0xA6, 0xDB, 0x81, 0x93,
+        0x81, 0xBE, 0x6E, 0x26, 0x9D, 0xCB, 0xF9, 0xBD, 0x2E, 0xD9,
+    ]
+
     static func extract(salt: [UInt8], inputKeyMaterial: [UInt8], hash: HashAlgorithm) -> [UInt8] {
         switch hash {
         case .sha256:
@@ -72,10 +77,23 @@ enum KeyDerivation {
         )
     }
 
-    static func initialSecrets(destinationID: QUICConnectionID) -> (client: [UInt8], server: [UInt8]) {
-        let initialSecret = Self.extract(salt: Self.initialSaltV1, inputKeyMaterial: destinationID.bytes, hash: .sha256)
+    static func initialSecrets(
+        destinationID: QUICConnectionID,
+        version: QUICVersion = .v1
+    ) -> (client: [UInt8], server: [UInt8]) {
+        let initialSecret = Self.extract(salt: version.initialSalt, inputKeyMaterial: destinationID.bytes, hash: .sha256)
         let client = Self.expandLabel(secret: initialSecret, label: "client in", length: 32, hash: .sha256)
         let server = Self.expandLabel(secret: initialSecret, label: "server in", length: 32, hash: .sha256)
         return (client, server)
+    }
+}
+
+extension QUICVersion {
+    var initialSalt: [UInt8] {
+        return self == .v2 ? KeyDerivation.initialSaltV2 : KeyDerivation.initialSaltV1
+    }
+
+    var packetProtectionLabelPrefix: String {
+        return self == .v2 ? "quicv2" : "quic"
     }
 }

@@ -215,8 +215,20 @@ nonisolated final class ConnectionRouter: Sendable {
         dnsRejectLogged.withLock { $0.removeAll(keepingCapacity: true) }
     }
 
-    private func action(for match: DomainRouter.Match, host: String, port: UInt16,
-                        ruleKind: String, proto: String) -> RouteDecision.Action {
+    // MARK: - Sniffed host
+
+    func action(forSniffedHost host: String, port: UInt16, proto: String) -> RouteDecision.Action? {
+        guard let match = domainRouter.matchDomain(host) else { return nil }
+        return action(for: match, host: host, port: port, ruleKind: "SNI", proto: proto)
+    }
+
+    private func action(
+        for match: DomainRouter.Match,
+        host: String,
+        port: UInt16,
+        ruleKind: String,
+        proto: String
+    ) -> RouteDecision.Action {
         switch match.action {
         case .default, .defaultProxy:
             return .route(target: match.action, configuration: nil, ruleSetName: match.ruleSetName)

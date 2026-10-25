@@ -82,6 +82,12 @@ nonisolated enum TunnelConstants {
     
     static let httpSnifferBufferLimit = 64 * 1024
 
+    // MARK: - QUIC Sniffer
+
+    static let quicSnifferBufferLimit = 8192
+    static let quicSnifferDatagramLimit = 4
+    static let udpPendingSniffMaxBytes = 8 * 1024
+
     // MARK: - Fake-IP Pool
     
     static let fakeIPPoolBaseIPv4: UInt32 = 0xC612_0000
