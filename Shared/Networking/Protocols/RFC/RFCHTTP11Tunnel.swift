@@ -8,8 +8,6 @@
 import Foundation
 import Synchronization
 
-nonisolated private let logger = AnywhereLogger(category: "RFCHTTP11Tunnel")
-
 // MARK: - RFCHTTP11Tunnel
 
 nonisolated enum RFCHTTP11Tunnel {

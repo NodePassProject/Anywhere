@@ -168,7 +168,7 @@ nonisolated final class MITMGateRegex: Sendable {
         guard let schemeRange = pattern.range(of: "://") else { return }
         let authority = pattern[schemeRange.upperBound...].prefix { $0 != "/" }
         if authority.contains(where: { $0.isASCII && $0.isUppercase }) {
-            logger.warning("gate pattern \"\(pattern)\" has an uppercase letter in its host region; the URL host is matched lowercased, so this rule will never fire")
+            logger.warning("[MITM] Uppercase host in URL pattern: \(pattern)")
         }
     }
 
@@ -274,20 +274,18 @@ nonisolated final class MITMGateRegex: Sendable {
     }
 
     private func recordStrike() {
-        let message: String? = state.withLock { state in
-            guard !state.isQuarantined else { return nil }
+        let struck = state.withLock { state in
+            guard !state.isQuarantined else { return false }
             state.timeoutStrikes += 1
             if state.timeoutStrikes >= Self.strikeLimit {
                 state.isQuarantined = true
                 state.cache.removeAll(keepingCapacity: false)
                 state.cacheOrder.removeAll(keepingCapacity: false)
-                return "URL-gate pattern quarantined after \(Self.strikeLimit) match timeouts (\(Self.matchDeadlineMillis)ms each); the rule is disabled. Pattern: \(pattern)"
-            } else {
-                return "URL-gate match exceeded its \(Self.matchDeadlineMillis)ms budget (strike \(state.timeoutStrikes)/\(Self.strikeLimit)); failing this match closed. Pattern: \(pattern)"
             }
+            return true
         }
-        if let message {
-            logger.warning(message)
+        if struck {
+            logger.warning("[MITM] URL pattern match timed out: \(pattern)")
         }
     }
 }

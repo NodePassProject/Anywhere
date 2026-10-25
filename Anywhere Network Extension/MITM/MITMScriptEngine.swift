@@ -17,6 +17,8 @@ nonisolated private let mitmScriptSuspendedBodyBytes = Atomic<Int>(0)
 
 nonisolated private let mitmScriptGlobalFetchCount = Atomic<Int>(0)
 
+nonisolated private let mitmScriptRuleSetNames = Mutex<[UUID: String]>([:])
+
 actor MITMScriptEngine {
     nonisolated var unownedExecutor: UnownedSerialExecutor {
         JSCConcurrencyBridge.shared.executor.asUnownedSerialExecutor()
@@ -96,6 +98,11 @@ actor MITMScriptEngine {
         fileprivate func claimFetchID() -> Int {
             nextFetchID += 1
             return nextFetchID
+        }
+
+        var logPrefix: String {
+            guard let scope, let name = mitmScriptRuleSetNames.withLock({ $0[scope] }) else { return "[Script]" }
+            return "[Script] \(name)"
         }
 
         fileprivate init(scope: UUID?, allowsHTTP: Bool, context: JSContext, original: Message?) {
@@ -185,16 +192,12 @@ actor MITMScriptEngine {
             defer { context?.exception = exception }
             guard let run else { return }
             if run.isFormattingException {
-                logger.warning("[MITM][JS] uncaught (nested throw while formatting exception)")
+                logger.warning("\(run.logPrefix): Uncaught exception")
                 return
             }
             run.isFormattingException = true
             defer { run.isFormattingException = false }
-            if let exception {
-                logger.warning("[MITM][JS] uncaught: \(String(describing: exception))")
-            } else {
-                logger.warning("[MITM][JS] uncaught: <unknown>")
-            }
+            logger.warning("\(run.logPrefix): \(exception.map(Self.describe) ?? "Uncaught exception")")
         }
         installAnywhereGlobals(context: context, for: run)
     }
@@ -230,7 +233,7 @@ actor MITMScriptEngine {
         }
         guard timedOut else { return }
         guard let run = liveRuns[id], !run.isDelivered, let original = run.original else { return }
-        logger.warning("[MITM][JS] process(ctx) did not settle within \(Self.invocationIdleTimeout)s; reverting")
+        logger.warning("\(run.logPrefix): process(ctx) timed out")
         deliver(.modified(original), for: run)
     }
 
@@ -273,7 +276,7 @@ actor MITMScriptEngine {
             if original.phase == .httpRequest {
                 return .respond(response)
             }
-            logger.warning("[MITM][JS] Anywhere.respond ignored on response phase")
+            logger.warning("[Script] Anywhere.respond unavailable in response phase")
             return .modified(updated)
         }
     }
@@ -332,12 +335,12 @@ actor MITMScriptEngine {
         let bodyBytes = message.body.count
         let pinned = Self.suspendedBodyBytes()
         if pinned + bodyBytes > Self.maxSuspendedBodyBytes {
-            logger.warning("[MITM][JS] suspended-body budget reached (\(pinned) B pinned by awaiting scripts); passing this flow through unmodified")
+            logger.warning("[Script] Suspended body budget exceeded")
             continuation.resume(returning: .modified(message))
             return
         }
         if liveRuns.count >= Self.maxLiveRuns {
-            logger.warning("[MITM][JS] \(Self.maxLiveRuns) unsettled scripts already hold a context; passing this flow through unmodified")
+            logger.warning("[Script] Too many concurrent scripts")
             continuation.resume(returning: .modified(message))
             return
         }
@@ -408,7 +411,7 @@ actor MITMScriptEngine {
             deliver(outcome(forDirective: directive, original: original, updated: updated), for: run)
         } else {
             if let reason {
-                logger.warning("[MITM][JS] process(ctx) promise rejected: \(String(describing: reason))")
+                logger.warning("\(run.logPrefix): process(ctx) rejected: \(Self.describe(reason))")
             }
             deliver(.modified(original), for: run)
         }
@@ -452,7 +455,7 @@ actor MITMScriptEngine {
 
     func openStreamRun(scope: UUID?) -> ScriptRun? {
         guard liveRuns.count < Self.maxLiveRuns else {
-            logger.warning("[MITM][JS] \(Self.maxLiveRuns) scripts already hold a context; this stream runs unscripted")
+            logger.warning("[Script] Too many concurrent scripts")
             return nil
         }
         let run = makeRun(scope: scope, allowsHTTP: false, original: nil)
@@ -499,7 +502,7 @@ actor MITMScriptEngine {
             case .done: return .done(body: body)
             case .exit: return .exit
             case .respond:
-                logger.warning("[MITM][JS] Anywhere.respond ignored in streamScript")
+                logger.warning("\(run.logPrefix): Anywhere.respond unavailable in streamScript")
                 return .modified(body: body)
             }
         }
@@ -512,6 +515,15 @@ actor MITMScriptEngine {
 
     // MARK: - Compilation
 
+    private static let wrapperLineCount = 2
+
+    private static func describe(_ exception: JSValue) -> String {
+        let message = exception.toString() ?? "Uncaught exception"
+        guard let line = exception.objectForKeyedSubscript("line"), line.isNumber else { return message }
+        let sourceLine = Int(line.toInt32()) - wrapperLineCount
+        return sourceLine > 0 ? "line \(sourceLine): \(message)" : message
+    }
+
     private func compile(_ source: String, in run: ScriptRun) -> JSValue? {
         let context = run.context
         let wrapped = "(function(){\n\"use strict\";\n\(source)\nreturn process;\n})()"
@@ -521,7 +533,7 @@ actor MITMScriptEngine {
             return nil
         }
         guard let value, !value.isUndefined, !value.isNull else {
-            logger.warning("[MITM][JS] script did not define process(ctx)")
+            logger.warning("\(run.logPrefix): process(ctx) not defined")
             return nil
         }
         guard let ref = value.jsValueRef else { return nil }
@@ -531,7 +543,7 @@ actor MITMScriptEngine {
               exception == nil,
               JSObjectIsFunction(contextRef, object)
         else {
-            logger.warning("[MITM][JS] script's `process` is not a function; declare it as `function process(ctx) { ... }`")
+            logger.warning("\(run.logPrefix): process is not a function")
             return nil
         }
         return value
@@ -606,7 +618,7 @@ actor MITMScriptEngine {
     private static func headersFromValue(_ value: JSValue) -> [(name: String, value: String)]? {
         guard value.isArray else { return nil }
         guard let length = Self.validatedArrayLength(value, maxLength: 100_000) else {
-            logger.warning("[MITM][JS] dropping ctx.headers: length missing, negative, or implausibly large")
+            logger.warning("[Script] Invalid ctx.headers")
             return nil
         }
         if length == 0 { return [] }
@@ -618,7 +630,7 @@ actor MITMScriptEngine {
                   let entryLength = entry.objectForKeyedSubscript("length")?.toInt32(),
                   entryLength == 2
             else {
-                logger.warning("[MITM][JS] dropping ctx.headers entry that isn't a [name, value] pair")
+                logger.warning("[Script] Invalid ctx.headers entry")
                 continue
             }
             guard let nameElement = entry.objectAtIndexedSubscript(0),
@@ -628,21 +640,21 @@ actor MITMScriptEngine {
                   let name = nameElement.toString(),
                   let value = valueElement.toString()
             else {
-                logger.warning("[MITM][JS] dropping ctx.headers entry with null/undefined/non-stringifiable component")
+                logger.warning("[Script] Invalid ctx.headers entry")
                 continue
             }
             guard HTTPHeader.isValidName(name) else {
-                logger.warning("[MITM][JS] dropping header with invalid name: \(name)")
+                logger.warning("[Script] Invalid header name: \(name)")
                 continue
             }
             guard HTTPHeader.isValidValue(value) else {
-                logger.warning("[MITM][JS] dropping header \(name) with CR/LF/NUL in value")
+                logger.warning("[Script] Invalid header value: \(name)")
                 continue
             }
             result.append((name: name, value: value))
         }
         if result.isEmpty {
-            logger.warning("[MITM][JS] ctx.headers had no valid [name, value] pairs; reverting to original headers (use ``ctx.headers = []`` to intentionally clear)")
+            logger.warning("[Script] ctx.headers has no valid entries")
             return nil
         }
         return result
@@ -737,7 +749,7 @@ actor MITMScriptEngine {
               context.exception == nil
         else {
             context.exception = nil
-            logger.warning("[MITM][JS] failed to install the Anywhere API")
+            logger.error("\(run.logPrefix): Anywhere API installation failed")
             return
         }
     }
@@ -749,7 +761,7 @@ actor MITMScriptEngine {
         case "json":       return makeJSONNamespace(in: context)
         case "store":      return makeStoreNamespace(in: context, scope: run.scope)
         case "params":     return makeParamsNamespace(in: context, scope: run.scope)
-        case "log":        return makeLogNamespace(in: context)
+        case "log":        return makeLogNamespace(in: context, for: run)
         case "http":       return makeHTTPNamespace(in: context, for: run)
         case "textCodecs": return makeTextCodecNatives(in: context)
         default:
@@ -1299,11 +1311,11 @@ actor MITMScriptEngine {
         let addBlock: @convention(block) (JSValue, String, JSValue) -> JSValue = { body, path, value in
             let context = JSContext.current()!
             guard let resolvedValue = Self.jsonValue(from: value, in: context) else {
-                logger.warning("[MITM][JS] Anywhere.json.add: value is undefined; use delete() to remove a field. Body unchanged.")
+                logger.warning("[Script] Anywhere.json.add: Value is undefined")
                 return Self.jsonPassthrough(body, in: context)
             }
             guard let segments = MITMJSONPatch.parseJSONPath(path) else {
-                logger.warning("[MITM][JS] Anywhere.json.add: malformed path \"\(path)\"; body unchanged")
+                logger.warning("[Script] Anywhere.json.add: Invalid path: \(path)")
                 return Self.jsonPassthrough(body, in: context)
             }
             return Self.runJSONOperation(body, in: context) { root in
@@ -1314,11 +1326,11 @@ actor MITMScriptEngine {
         let replaceBlock: @convention(block) (JSValue, String, JSValue) -> JSValue = { body, path, value in
             let context = JSContext.current()!
             guard let resolvedValue = Self.jsonValue(from: value, in: context) else {
-                logger.warning("[MITM][JS] Anywhere.json.replace: value is undefined; body unchanged")
+                logger.warning("[Script] Anywhere.json.replace: Value is undefined")
                 return Self.jsonPassthrough(body, in: context)
             }
             guard let segments = MITMJSONPatch.parseJSONPath(path) else {
-                logger.warning("[MITM][JS] Anywhere.json.replace: malformed path \"\(path)\"; body unchanged")
+                logger.warning("[Script] Anywhere.json.replace: Invalid path: \(path)")
                 return Self.jsonPassthrough(body, in: context)
             }
             return Self.runJSONOperation(body, in: context) { root in
@@ -1329,7 +1341,7 @@ actor MITMScriptEngine {
         let replaceRecursiveBlock: @convention(block) (JSValue, String, JSValue) -> JSValue = { body, key, value in
             let context = JSContext.current()!
             guard let resolvedValue = Self.jsonValue(from: value, in: context) else {
-                logger.warning("[MITM][JS] Anywhere.json.replaceRecursive: value is undefined; body unchanged")
+                logger.warning("[Script] Anywhere.json.replaceRecursive: Value is undefined")
                 return Self.jsonPassthrough(body, in: context)
             }
             return Self.runJSONOperation(body, in: context) { root in
@@ -1340,7 +1352,7 @@ actor MITMScriptEngine {
         let deleteBlock: @convention(block) (JSValue, String) -> JSValue = { body, path in
             let context = JSContext.current()!
             guard let segments = MITMJSONPatch.parseJSONPath(path) else {
-                logger.warning("[MITM][JS] Anywhere.json.delete: malformed path \"\(path)\"; body unchanged")
+                logger.warning("[Script] Anywhere.json.delete: Invalid path: \(path)")
                 return Self.jsonPassthrough(body, in: context)
             }
             return Self.runJSONOperation(body, in: context) { root in
@@ -1358,7 +1370,7 @@ actor MITMScriptEngine {
         let removeWhereKeyExistsBlock: @convention(block) (JSValue, String, String) -> JSValue = { body, path, key in
             let context = JSContext.current()!
             guard let segments = MITMJSONPatch.parseJSONPath(path) else {
-                logger.warning("[MITM][JS] Anywhere.json.removeWhereKeyExists: malformed path \"\(path)\"; body unchanged")
+                logger.warning("[Script] Anywhere.json.removeWhereKeyExists: Invalid path: \(path)")
                 return Self.jsonPassthrough(body, in: context)
             }
             return Self.runJSONOperation(body, in: context) { root in
@@ -1369,7 +1381,7 @@ actor MITMScriptEngine {
         let removeWhereFieldInBlock: @convention(block) (JSValue, String, String, JSValue) -> JSValue = { body, path, field, valuesValue in
             let context = JSContext.current()!
             guard let segments = MITMJSONPatch.parseJSONPath(path) else {
-                logger.warning("[MITM][JS] Anywhere.json.removeWhereFieldIn: malformed path \"\(path)\"; body unchanged")
+                logger.warning("[Script] Anywhere.json.removeWhereFieldIn: Invalid path: \(path)")
                 return Self.jsonPassthrough(body, in: context)
             }
             let matchValues = Self.jsonArrayValues(from: valuesValue, in: context)
@@ -1396,7 +1408,7 @@ actor MITMScriptEngine {
             return makeUint8Array(in: context, from: original)
         }
         guard let out = MITMJSONPatch.serialize(root) else {
-            logger.warning("[MITM][JS] Anywhere.json: edited value is not serializable; body unchanged")
+            logger.warning("[Script] Anywhere.json: Result not serializable")
             return makeUint8Array(in: context, from: original)
         }
         return makeUint8Array(in: context, from: out)
@@ -1496,19 +1508,20 @@ actor MITMScriptEngine {
         return params
     }
 
-    nonisolated private func makeLogNamespace(in context: JSContext) -> JSValue {
+    nonisolated private func makeLogNamespace(in context: JSContext, for run: ScriptRun) -> JSValue {
         let log = JSValue(newObjectIn: context)!
+        let prefix = run.logPrefix
         let logInfo: @convention(block) (String) -> Void = { message in
-            logger.info("[MITM][JS] \(message)")
+            logger.info("\(prefix): \(message)")
         }
         let logWarning: @convention(block) (String) -> Void = { message in
-            logger.warning("[MITM][JS] \(message)")
+            logger.warning("\(prefix): \(message)")
         }
         let logError: @convention(block) (String) -> Void = { message in
-            logger.error("[MITM][JS] \(message)")
+            logger.error("\(prefix): \(message)")
         }
         let logDebug: @convention(block) (String) -> Void = { message in
-            logger.debug("[MITM][JS] \(message)")
+            logger.debug("\(prefix): \(message)")
         }
         log.setObject(logInfo, forKeyedSubscript: "info" as NSString)
         log.setObject(logWarning, forKeyedSubscript: "warning" as NSString)
@@ -1529,7 +1542,7 @@ actor MITMScriptEngine {
             if (100...599).contains(raw) {
                 status = raw
             } else {
-                logger.warning("[MITM][JS] Anywhere.respond status \(statusDouble) out of 100…599; using 200")
+                logger.warning("[Script] Anywhere.respond: Invalid status: \(statusDouble)")
                 status = 200
             }
         } else {
@@ -1692,7 +1705,7 @@ actor MITMScriptEngine {
         guard !run.isDelivered else { return }
         if MonotonicClock.now - run.startedAt > Self.invocationAbsoluteTimeout,
            let original = run.original {
-            logger.warning("[MITM][JS] process(ctx) exceeded the absolute invocation budget; reverting")
+            logger.warning("\(run.logPrefix): process(ctx) timed out")
             deliver(.modified(original), for: run)
             return
         }
@@ -1733,7 +1746,7 @@ actor MITMScriptEngine {
         if value.isArray {
             return (headersFromValue(value) ?? []).filter { entry in
                 guard !Self.forbiddenRequestHeaders.contains(entry.name.lowercased()) else {
-                    logger.warning("[MITM][JS] Anywhere.http: dropping forbidden request header: \(entry.name)")
+                    logger.warning("[Script] Anywhere.http: Forbidden header: \(entry.name)")
                     return false
                 }
                 return true
@@ -1752,15 +1765,15 @@ actor MITMScriptEngine {
                   let value = valueElement.toString()
             else { continue }
             guard HTTPHeader.isValidName(name) else {
-                logger.warning("[MITM][JS] Anywhere.http: dropping request header with invalid name: \(name)")
+                logger.warning("[Script] Anywhere.http: Invalid header name: \(name)")
                 continue
             }
             guard HTTPHeader.isValidValue(value) else {
-                logger.warning("[MITM][JS] Anywhere.http: dropping request header \(name) with CR/LF/NUL in value")
+                logger.warning("[Script] Anywhere.http: Invalid header value: \(name)")
                 continue
             }
             guard !Self.forbiddenRequestHeaders.contains(name.lowercased()) else {
-                logger.warning("[MITM][JS] Anywhere.http: dropping forbidden request header: \(name)")
+                logger.warning("[Script] Anywhere.http: Forbidden header: \(name)")
                 continue
             }
             out.append((name: name, value: value))
@@ -1853,11 +1866,11 @@ actor MITMScriptEngine {
         var iterator = string.unicodeScalars.makeIterator()
         while let highScalar = iterator.next() {
             guard let lowScalar = iterator.next() else {
-                logger.warning("[MITM][JS] Anywhere.hex.decode: odd-length input; returning empty Data")
+                logger.warning("[Script] Anywhere.hex.decode: Odd-length input")
                 return Data()
             }
             guard let high = hexNibble(highScalar), let low = hexNibble(lowScalar) else {
-                logger.warning("[MITM][JS] Anywhere.hex.decode: non-hex character in input; returning empty Data")
+                logger.warning("[Script] Anywhere.hex.decode: Invalid hex character")
                 return Data()
             }
             out.append((high << 4) | low)
@@ -2138,6 +2151,10 @@ actor MITMScriptEngine {
 
 extension MITMScriptEngine {
     static let shared = MITMScriptEngine()
+
+    static func setRuleSetNames(_ names: [UUID: String]) {
+        mitmScriptRuleSetNames.withLock { $0 = names }
+    }
 
     static func purgeRuns(activeIDs: Set<UUID>) {
         JSCConcurrencyBridge.shared.enqueue {

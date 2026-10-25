@@ -119,7 +119,7 @@ final class PhoneSession: NSObject {
                 }
             }
         } errorHandler: { @Sendable [weak self] error in
-            logger.warning("Watch request failed: \(error.localizedDescription)")
+            logger.warning("[Watch] Request failed: \(error.localizedDescription)")
             Task { @MainActor in
                 guard let self else { return }
                 self.clearPending()
@@ -186,7 +186,7 @@ final class PhoneSession: NSObject {
 extension PhoneSession: WCSessionDelegate {
     nonisolated func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: (any Error)?) {
         if let error {
-            logger.warning("Session activation failed: \(error.localizedDescription)")
+            logger.warning("[Watch] Session activation failed: \(error.localizedDescription)")
         }
         let cachedContext = session.receivedApplicationContext
         let cached = WatchBridge.Snapshot(payload: cachedContext)

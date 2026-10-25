@@ -8,8 +8,6 @@
 import Foundation
 import Synchronization
 
-nonisolated private let logger = AnywhereLogger(category: "VLESSVisionUDPStream")
-
 actor VLESSVisionUDPStream {
     nonisolated let sessionID: UInt16
     nonisolated let network: VLESSVisionUDPNetwork

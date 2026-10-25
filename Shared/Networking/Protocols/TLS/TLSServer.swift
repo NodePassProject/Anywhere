@@ -8,8 +8,6 @@
 import Foundation
 import CryptoKit
 
-nonisolated private let logger = AnywhereLogger(category: "TLSServer")
-
 nonisolated protocol TLSServerDelegate: AnyObject {
     func tlsServer(_ server: TLSServer, didProduceOutput data: Data)
 

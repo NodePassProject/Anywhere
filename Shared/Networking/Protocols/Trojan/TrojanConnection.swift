@@ -8,8 +8,6 @@
 import Foundation
 import Synchronization
 
-nonisolated private let logger = AnywhereLogger(category: "TrojanConnection")
-
 nonisolated final class TrojanConnection: ProxyConnection {
     private let inner: ProxyConnection
     private let pendingHeader: Mutex<Data?>

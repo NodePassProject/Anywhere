@@ -8,8 +8,6 @@
 import Foundation
 import Synchronization
 
-nonisolated private let logger = AnywhereLogger(category: "RFCHTTP2Multiplexer")
-
 nonisolated final class RFCHTTP2Multiplexer: Multiplexer, Sendable {
 
     // MARK: - Types

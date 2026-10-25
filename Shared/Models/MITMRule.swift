@@ -7,8 +7,6 @@
 
 import Foundation
 
-nonisolated private let logger = AnywhereLogger(category: "MITMRule")
-
 nonisolated enum MITMPhase: String, Codable, CaseIterable, Identifiable {
     case httpRequest
     case httpResponse

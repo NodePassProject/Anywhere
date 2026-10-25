@@ -68,7 +68,7 @@ nonisolated enum MITMBodyReplace {
         guard substitutionInFlight.compareExchange(
             expected: false, desired: true, ordering: .sequentiallyConsistent
         ).exchanged else {
-            logger.warning("bodyReplace: another substitution is in flight; leaving this \(text.utf8.count) B body unchanged")
+            logger.warning("[MITM] bodyReplace: Concurrent substitution limit reached")
             return .failed
         }
 
@@ -90,7 +90,7 @@ nonisolated enum MITMBodyReplace {
         case .completed(nil):
             return .unmatched
         case .timedOut:
-            logger.warning("bodyReplace: regex substitution exceeded its time budget over a \(text.utf8.count) B body; leaving the body unchanged (possible catastrophic backtracking in the pattern)")
+            logger.warning("[MITM] bodyReplace: Regex timed out: \(operation.search.pattern)")
             return .failed
         }
     }

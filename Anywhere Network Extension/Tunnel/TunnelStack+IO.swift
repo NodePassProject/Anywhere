@@ -10,8 +10,6 @@ import Synchronization
 @preconcurrency import NetworkExtension
 import AnywhereIP
 
-nonisolated private let logger = AnywhereLogger(category: "TunnelStack+IO")
-
 extension TunnelStack {
 
     // MARK: - Output Batching

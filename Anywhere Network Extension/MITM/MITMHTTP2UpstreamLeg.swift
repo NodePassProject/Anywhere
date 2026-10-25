@@ -305,7 +305,7 @@ actor MITMHTTP2UpstreamLeg {
         ensurePrefaceSent()
         guard upstreamStreamIDByClient.count < maxConcurrentStreams else {
             guard queueOrder.count < Self.maxQueuedRequests else {
-                logger.warning("h2-upstream \(host) stream \(head.clientStreamID): request queue at cap \(Self.maxQueuedRequests) (origin MAX_CONCURRENT_STREAMS=\(maxConcurrentStreams)); refusing stream")
+                logger.warning("[MITM] \(host): Upstream stream limit reached")
                 sink?.deliverResponseReset(streamID: head.clientStreamID, errorCode: Codec.ErrorCode.refusedStream)
                 return
             }
@@ -363,7 +363,7 @@ actor MITMHTTP2UpstreamLeg {
             queuedRequests[clientID]?.body.append((data, endStream))
             queuedRequests[clientID]?.bodyBytes += data.count
             if let buffered = queuedRequests[clientID]?.bodyBytes, buffered > Self.maxUpstreamBufferedBytes {
-                logger.warning("h2-upstream \(host) stream \(clientID): queued request backlog \(buffered) B over cap; resetting stream")
+                logger.warning("[MITM] \(host): Upstream buffer full")
                 dropFromQueue(clientID)
                 sink?.deliverResponseReset(streamID: clientID)
             }
@@ -377,7 +377,7 @@ actor MITMHTTP2UpstreamLeg {
         if endStream { pendingRequestBodies[clientID]?.endStream = true }
         flushRequestBody(clientID)
         if let backlog = pendingRequestBodies[clientID]?.remaining.count, backlog > Self.maxUpstreamBufferedBytes {
-            logger.warning("h2-upstream \(host) stream \(clientID): request backlog \(backlog) B over cap; resetting stream")
+            logger.warning("[MITM] \(host): Upstream buffer full")
             if let upstreamStreamID = upstreamStreamIDByClient[clientID] {
                 delegate?.upstreamLegWriteToOrigin(Codec.rstStream(streamID: upstreamStreamID, errorCode: Codec.ErrorCode.internalError))
             }
@@ -405,7 +405,6 @@ actor MITMHTTP2UpstreamLeg {
             return
         }
         if queuedRequests[clientID] != nil {
-            logger.warning("h2-upstream \(host) stream \(clientID): request trailers on a still-queued stream")
             queuedRequests[clientID]?.body.append((Data(), true))
             return
         }
@@ -555,7 +554,7 @@ actor MITMHTTP2UpstreamLeg {
         receiveBuffer = MITMByteBuffer()
         pending = nil
         refuseAllQueued()
-        logger.warning("h2-upstream \(host): \(message); tearing down")
+        logger.warning("[MITM] \(host): HTTP/2 upstream: \(message)")
         delegate?.upstreamLegFatalError(message)
     }
 
@@ -723,14 +722,14 @@ actor MITMHTTP2UpstreamLeg {
         }
 
         if let invalidOctet = HTTPHeader.firstInvalidOctet(decoded) {
-            logger.warning("h2-upstream \(host) stream \(clientID): response header rejected — \(invalidOctet.reason) on \"\(HTTPHeader.escapedForLog(invalidOctet.name))\"; resetting stream")
+            logger.warning("[MITM] \(host): HTTP/2 upstream: Invalid header: \(HTTPHeader.escapedForLog(invalidOctet.name)): \(invalidOctet.reason)")
             sink?.deliverResponseReset(streamID: clientID)
             releaseStream(clientID: clientID, resetOrigin: true)
             return false
         }
 
         guard MITMBridgeHeaders.h2ConnectionHeadersAbsent(decoded) else {
-            logger.warning("h2-upstream \(host) stream \(clientID): connection-specific header in HTTP/2 response; resetting stream")
+            logger.warning("[MITM] \(host): HTTP/2 upstream: Connection-specific header")
             sink?.deliverResponseReset(streamID: clientID)
             releaseStream(clientID: clientID, resetOrigin: true)
             return false
@@ -738,13 +737,13 @@ actor MITMHTTP2UpstreamLeg {
 
         if responseStreams[clientID] != nil {
             guard endStream else {
-                logger.warning("h2-upstream \(host) stream \(clientID): response trailer without END_STREAM; resetting stream")
+                logger.warning("[MITM] \(host): HTTP/2 upstream: Trailers without END_STREAM")
                 sink?.deliverResponseReset(streamID: clientID)
                 releaseStream(clientID: clientID, resetOrigin: true)
                 return false
             }
             guard !decoded.contains(where: { $0.name.hasPrefix(":") }) else {
-                logger.warning("h2-upstream \(host) stream \(clientID): pseudo-header in response trailer; resetting stream")
+                logger.warning("[MITM] \(host): HTTP/2 upstream: Pseudo-header in trailers")
                 sink?.deliverResponseReset(streamID: clientID)
                 releaseStream(clientID: clientID, resetOrigin: true)
                 return false
@@ -1056,7 +1055,7 @@ actor MITMHTTP2UpstreamLeg {
                     case .message(let updated):
                         var body = updated.body
                         if body.count > plaintext.count, body.count - plaintext.count > Self.maxBufferedRewriteGrowthBytes {
-                            logger.warning("h2-upstream \(leg.host) stream \(streamID): response grew over cap; using original body")
+                            logger.warning("[MITM] \(leg.host): Rewritten body too large")
                             body = plaintext
                         }
                         leg.deliverFinalResponse(

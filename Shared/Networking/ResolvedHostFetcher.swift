@@ -7,8 +7,6 @@
 
 import Foundation
 
-nonisolated private let logger = AnywhereLogger(category: "ResolvedHostFetcher")
-
 nonisolated enum ResolvedHostFetcher {
     static let deadline: Duration = .seconds(30)
     static let maxResponseBytes = 8 * 1024 * 1024

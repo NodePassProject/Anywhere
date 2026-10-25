@@ -8,8 +8,6 @@
 import Foundation
 import Synchronization
 
-nonisolated private let logger = AnywhereLogger(category: "AnyTLSMultiplexerPool")
-
 nonisolated final class AnyTLSMultiplexerPool: TransportPool {
 
     struct Extra {

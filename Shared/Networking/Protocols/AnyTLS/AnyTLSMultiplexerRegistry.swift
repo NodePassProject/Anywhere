@@ -8,8 +8,6 @@
 import Foundation
 import Synchronization
 
-nonisolated private let logger = AnywhereLogger(category: "AnyTLSMultiplexerRegistry")
-
 nonisolated final class AnyTLSMultiplexerRegistry: Sendable {
     nonisolated static let shared = AnyTLSMultiplexerRegistry()
 

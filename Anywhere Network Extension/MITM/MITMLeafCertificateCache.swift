@@ -9,8 +9,6 @@ import Foundation
 import CryptoKit
 import Synchronization
 
-nonisolated private let logger = AnywhereLogger(category: "MITMLeafCertificateCache")
-
 nonisolated final class MITMLeafCertificateCache: Sendable {
 
     // MARK: - Public Types

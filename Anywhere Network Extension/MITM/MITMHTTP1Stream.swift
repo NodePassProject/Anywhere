@@ -37,6 +37,7 @@ actor MITMHTTP1Stream {
     private static let maxSynthesizedResponseBodyBytes: Int = MITMBodyCodec.maxBufferedBodyBytes
 
     private let host: String
+    private var logPrefix: String { "[MITM] \(host): HTTP/1 \(direction == .httpRequest ? "request" : "response")" }
     private let scheme: String
     let direction: MITMPhase
 
@@ -322,7 +323,7 @@ actor MITMHTTP1Stream {
     }
 
     private func failClosedReentry(_ continuation: CheckedContinuation<Data, Never>) {
-        logger.error("HTTP/1 \(host): transform/finish re-entered while a script hop is outstanding; dropping this chunk to preserve the parked continuation (one-read-in-flight invariant violated)")
+        logger.error("\(logPrefix): Reentrant transform")
         continuation.resume(returning: Data())
     }
 
@@ -458,7 +459,7 @@ actor MITMHTTP1Stream {
         let searchFrom = max(0, headScanned - (headTerminator.count - 1))
         guard let terminator = receiveBuffer.range(of: headTerminator, from: searchFrom) else {
             if receiveBuffer.count > Self.maxHeadBytes {
-                logger.warning("HTTP/1 \(host): head exceeded \(Self.maxHeadBytes) B without CRLF CRLF; closing the connection without forwarding")
+                logger.warning("\(logPrefix): Head too large")
                 receiveBuffer.removeAll(keepingCapacity: false)
                 headScanned = 0
                 mode = .draining
@@ -471,7 +472,7 @@ actor MITMHTTP1Stream {
         headScanned = 0
         let headEnd = terminator.upperBound
         guard headEnd <= Self.maxHeadBytes else {
-            logger.warning("HTTP/1 \(host): head exceeded \(Self.maxHeadBytes) B; closing the connection without forwarding")
+            logger.warning("\(logPrefix): Head too large")
             receiveBuffer.removeAll(keepingCapacity: false)
             mode = .draining
             delegate?.http1StreamFatalClose(self)
@@ -491,7 +492,7 @@ actor MITMHTTP1Stream {
             return true
         case .smuggling:
             receiveBuffer.removeFirst(headEnd)
-            logger.warning("HTTP/1 \(host): rejecting message with a framing/smuggling violation; closing the connection without forwarding")
+            logger.warning("\(logPrefix): Invalid message framing")
             mode = .draining
             delegate?.http1StreamFatalClose(self)
             return false
@@ -587,7 +588,7 @@ actor MITMHTTP1Stream {
                     return true
                 }
                 if hasContentCodedTransferEncoding {
-                    logger.warning("HTTP/1 \(host): Transfer-Encoding content-coding not decodable on the buffered path; forwarding verbatim")
+                    logger.warning("\(logPrefix): Unsupported Transfer-Encoding for rewrite")
                 }
             }
             if direction == .httpRequest {
@@ -782,7 +783,7 @@ actor MITMHTTP1Stream {
     ) -> Bool {
         let rewrittenHeaders = rewrittenHeaders.filter { !ASCII.equalsIgnoringCase($0.name, "transfer-encoding") }
         if MITMScriptTransform.hasStreamScriptRule(in: rules, verdicts: verdicts) {
-            logger.warning("HTTP/1 \(host): Stream Script skipped for Content-Length body (chunked encoding required)")
+            logger.warning("[MITM] \(host): streamScript unsupported for Content-Length body")
         }
 
         let codec = MITMBodyCodec.plan(for: combinedHeaderValue(rewrittenHeaders, name: "content-encoding"))
@@ -803,7 +804,7 @@ actor MITMHTTP1Stream {
             return true
         }
         if buffersBody, length > MITMBodyCodec.maxBufferedBodyBytes {
-            logger.warning("HTTP/1 \(host): Content-Length \(length) exceeds cap \(MITMBodyCodec.maxBufferedBodyBytes)")
+            logger.warning("[MITM] \(host): Body too large for rewrite")
         }
         if direction == .httpRequest {
             logRequest(startLine: rewrittenStartLine)
@@ -824,13 +825,13 @@ actor MITMHTTP1Stream {
         let rewrittenHeaders = rewrittenHeaders.filter { !ASCII.equalsIgnoringCase($0.name, "content-length") }
         if MITMScriptTransform.hasStreamScriptRule(in: rules, verdicts: verdicts) {
             if responseIRSink != nil {
-                logger.warning("HTTP/1 \(host): response stream-script unsupported on the bridge; forwarding unscripted")
+                logger.warning("[MITM] \(host): streamScript unsupported on bridged response")
                 emitResponseHead(startLine: rewrittenStartLine, headers: rewrittenHeaders, bodyFollows: true, into: &output)
                 mode = .forwardingChunked(reader: ChunkedReader())
                 return true
             }
             if buffersBody {
-                logger.warning("HTTP/1 \(host): Stream Script wins over buffered body rule")
+                logger.warning("[MITM] \(host): Body rule conflicts with streamScript")
             }
             if direction == .httpRequest {
                 logRequest(startLine: rewrittenStartLine)
@@ -864,7 +865,7 @@ actor MITMHTTP1Stream {
             return true
         }
         if buffersBody, hasContentCodedTransferEncoding {
-            logger.warning("HTTP/1 \(host): Transfer-Encoding content-coding not decodable on the buffered path; forwarding verbatim")
+            logger.warning("\(logPrefix): Unsupported Transfer-Encoding for rewrite")
         }
         if direction == .httpRequest {
             logRequest(startLine: rewrittenStartLine)
@@ -959,7 +960,7 @@ actor MITMHTTP1Stream {
             return true
         case .malformed:
             if bridgeResetIfNeeded() { return false }
-            logger.warning("HTTP/1 \(host): chunked framing broke mid-body; closing the connection rather than truncating + desyncing")
+            logger.warning("\(logPrefix): Malformed chunked body")
             receiveBuffer.removeAll(keepingCapacity: false)
             mode = .draining
             delegate?.http1StreamHardClose(self)
@@ -1002,7 +1003,7 @@ actor MITMHTTP1Stream {
         switch result {
         case .needMore:
             if bodyAccumulator.count > MITMBodyCodec.maxBufferedBodyBytes {
-                logger.warning("HTTP/1 \(host): chunked body exceeded \(MITMBodyCodec.maxBufferedBodyBytes) B buffer cap; failing closed rather than truncating to a fake-complete length")
+                logger.warning("[MITM] \(host): Body too large for rewrite")
                 mode = .draining
                 delegate?.http1StreamFatalClose(self)
                 return false
@@ -1019,7 +1020,7 @@ actor MITMHTTP1Stream {
             return !parked
         case .malformed:
             if bridgeResetIfNeeded() { return false }
-            logger.warning("HTTP/1 \(host): chunked framing broke while buffering for a rewrite; failing closed")
+            logger.warning("\(logPrefix): Malformed chunked body")
             mode = .draining
             delegate?.http1StreamFatalClose(self)
             return true
@@ -1034,7 +1035,7 @@ actor MITMHTTP1Stream {
         receiveBuffer.appendPrefix(receiveBuffer.count, to: &bodyAccumulator)
         receiveBuffer.removeAll(keepingCapacity: false)
         if bodyAccumulator.count > MITMBodyCodec.maxBufferedBodyBytes {
-            logger.warning("HTTP/1 \(host): read-until-close body exceeded cap \(MITMBodyCodec.maxBufferedBodyBytes) B; bypassing Script and forwarding verbatim")
+            logger.warning("[MITM] \(host): Body too large for rewrite")
             if bridgeResetIfNeeded() { return false }
             output.append(serializeHead(startLine: pending.startLine, headers: pending.headers))
             output.append(takeBodyAccumulator())
@@ -1056,7 +1057,7 @@ actor MITMHTTP1Stream {
             case .sizeLine:
                 guard let lineEnd = receiveBuffer.firstCRLF(from: streaming.lineScanCursor) else {
                     if receiveBuffer.count > Self.maxChunkLineBytes {
-                        logger.warning("HTTP/1 \(host): chunk-size line exceeded \(Self.maxChunkLineBytes) B without CRLF; closing the connection")
+                        logger.warning("\(logPrefix): Malformed chunked body")
                         receiveBuffer.removeAll(keepingCapacity: false)
                         mode = .draining
                         delegate?.http1StreamHardClose(self)
@@ -1070,7 +1071,7 @@ actor MITMHTTP1Stream {
                 receiveBuffer.removeFirst(lineEnd + 2)
                 streaming.lineScanCursor = 0
                 guard let size = parsedSize else {
-                    logger.warning("HTTP/1 \(host): malformed chunk-size line; closing the connection")
+                    logger.warning("\(logPrefix): Malformed chunked body")
                     receiveBuffer.removeAll(keepingCapacity: false)
                     mode = .draining
                     delegate?.http1StreamHardClose(self)
@@ -1104,7 +1105,7 @@ actor MITMHTTP1Stream {
                 receiveBuffer.removeFirst(take)
                 let left = remaining - take
                 if left != 0, chunkAccumulator.count > MITMBodyCodec.maxBufferedBodyBytes {
-                    logger.warning("HTTP/1 \(host): streaming chunk exceeded cap \(MITMBodyCodec.maxBufferedBodyBytes) B; bypassing Script and forwarding remainder verbatim")
+                    logger.warning("[MITM] \(host): Chunk too large for rewrite")
                     if let held = streaming.pendingChunk {
                         streaming.pendingChunk = nil
                         if emitOrParkStreamingFrame(
@@ -1149,7 +1150,7 @@ actor MITMHTTP1Stream {
                 guard receiveBuffer[0] == 0x0D,
                       receiveBuffer[1] == 0x0A
                 else {
-                    logger.warning("HTTP/1 \(host): missing CRLF after chunk data; closing the connection")
+                    logger.warning("\(logPrefix): Malformed chunked body")
                     receiveBuffer.removeAll(keepingCapacity: false)
                     mode = .draining
                     delegate?.http1StreamHardClose(self)
@@ -1160,7 +1161,7 @@ actor MITMHTTP1Stream {
             case .trailerOrEnd:
                 guard let lineEnd = receiveBuffer.firstCRLF(from: streaming.lineScanCursor) else {
                     if receiveBuffer.count > Self.maxChunkLineBytes {
-                        logger.warning("HTTP/1 \(host): chunk trailer line exceeded \(Self.maxChunkLineBytes) B without CRLF; closing the connection")
+                        logger.warning("\(logPrefix): Malformed chunked body")
                         receiveBuffer.removeAll(keepingCapacity: false)
                         mode = .draining
                         delegate?.http1StreamHardClose(self)
@@ -1851,7 +1852,7 @@ actor MITMHTTP1Stream {
         let safeHeaders = headers.filter { entry in
             guard !Self.containsCRorLF(entry.name),
                   !Self.containsCRorLF(entry.value) else {
-                logger.warning("HTTP/1 \(host): dropping header with CR/LF from serialized head: \(entry.name)")
+                logger.warning("\(logPrefix): Invalid header: \(HTTPHeader.escapedForLog(entry.name))")
                 return false
             }
             return true
@@ -1877,10 +1878,10 @@ actor MITMHTTP1Stream {
         let reason = canonicalReasonPhrase(for: response.status)
         let startLine = "HTTP/1.1 \(response.status) \(reason)"
         var headers = response.sanitizedHeaders(lowercaseNames: false) { name in
-            logger.warning("[MITM][JS] HTTP/1 \(host): Anywhere.respond dropping invalid header: \(name)")
+            logger.warning("[Script] Anywhere.respond: Invalid header: \(name)")
         }
-        let body = response.truncatedBody(cap: Self.maxSynthesizedResponseBodyBytes) { size in
-            logger.warning("[MITM][JS] HTTP/1 \(host): Anywhere.respond body \(size) B exceeds memory cap \(Self.maxSynthesizedResponseBodyBytes) B; truncating")
+        let body = response.truncatedBody(cap: Self.maxSynthesizedResponseBodyBytes) {
+            logger.warning("[Script] Anywhere.respond: Body too large")
         }
         headers = response.withDateStamp(headers, lowercaseName: false)
         headers.append((name: "Content-Length", value: String(body.count)))
@@ -1970,7 +1971,7 @@ actor MITMHTTP1Stream {
         let contentType = HTTPHeader.firstValue(in: headers, named: "content-type")
         guard direction == .httpResponse,
               MITMScriptTransform.isStreamingMediaType(contentType) else { return }
-        logger.warning("\(host): buffered Script on a streaming response. Switch to Stream Script to rewrite frames as they arrive.")
+        logger.warning("[MITM] \(host): Buffered script on streaming response")
     }
 
     private func combinedHeaderValue(_ headers: [Header], name: String) -> String? {
@@ -2012,7 +2013,7 @@ actor MITMHTTP1Stream {
             switch resolved {
             case .transparent(let replacement):
                 guard Self.isValidRequestTarget(replacement.requestTarget) else {
-                    logger.warning("HTTP/1 \(host): rewrite produced an invalid request-target; skipping rule")
+                    logger.warning("[MITM] \(host): rewrite: Invalid request target")
                     continue
                 }
                 return .transparent(line: "\(method) \(replacement.requestTarget) \(version)",
@@ -2130,13 +2131,13 @@ actor MITMHTTP1Stream {
                 return fallback
             }
             guard Self.isValidMethodToken(method) else {
-                logger.warning("[MITM][JS] HTTP/1 \(host): dropping invalid method '\(method)' from Script")
+                logger.warning("[Script] Invalid method: \(method)")
                 return fallback
             }
             let originalTarget = parts.count >= 2 ? String(parts[1]) : "/"
             let candidateTarget = pathAndQuery(fromURL: url) ?? originalTarget
             guard Self.isValidRequestTarget(candidateTarget) else {
-                logger.warning("[MITM][JS] HTTP/1 \(host): dropping invalid request-target from Script")
+                logger.warning("[Script] Invalid request target")
                 return fallback
             }
             let version = parts.count >= 3 ? String(parts[2]) : "HTTP/1.1"

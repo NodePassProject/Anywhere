@@ -212,10 +212,7 @@ nonisolated final class MITMScriptDiskStore: Sendable {
             return (try Data(contentsOf: url), false)
         } catch {
             guard !Self.isFileNotFound(error as NSError) else { return (nil, false) }
-            logger.report(
-                "[MITM][JS] Anywhere.store(onDisk): read failed for \(url.lastPathComponent)",
-                error: AnywhereError.store(.loadFailed(.scripts, underlying: error))
-            )
+            logger.report("[Script] Anywhere.store read failed", error: error)
             return (nil, true)
         }
     }
@@ -232,7 +229,7 @@ nonisolated final class MITMScriptDiskStore: Sendable {
             try data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
             return true
         } catch {
-            logger.error("[MITM][JS] Anywhere.store(onDisk): write failed for \(scope): \(AnywhereError.describe(error))")
+            logger.report("[Script] Anywhere.store write failed", error: error)
             return false
         }
     }

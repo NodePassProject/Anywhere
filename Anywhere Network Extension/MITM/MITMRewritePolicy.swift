@@ -214,6 +214,7 @@ nonisolated final class MITMRewritePolicy: Sendable {
         newState.trie = trie.freeze()
         state.withLock { $0 = newState }
         let activeIDs = Set(ruleSets.map { $0.id })
+        MITMScriptEngine.setRuleSetNames(Dictionary(ruleSets.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first }))
         MITMScriptEngine.purgeRuns(activeIDs: activeIDs)
         MITMScriptStore.shared.purgeExcept(activeIDs: activeIDs)
         MITMParameterStore.shared.replaceAll(ruleSets.map { (scope: $0.id, values: $0.parameterValues) })
@@ -238,19 +239,19 @@ nonisolated final class MITMRewritePolicy: Sendable {
                 gate = cached
             } else {
                 guard let compiled = MITMGateRegex(pattern: rule.urlPattern) else {
-                    logger.warning("rule URL pattern failed to compile (suffix=\(set.name)): \(rule.urlPattern)")
+                    logger.warning("[MITM] \(set.name): Invalid URL pattern: \(rule.urlPattern)")
                     return nil
                 }
                 gate = compiled
             }
             newGates[rule.urlPattern] = gate
-            guard let operation = compile(rule.operation, suffix: set.name) else { return nil }
+            guard let operation = compile(rule.operation, ruleSet: set.name) else { return nil }
             return CompiledMITMRule(phase: rule.phase, gate: gate, operation: operation)
         }
 
         for suffix in suffixes {
             guard state.compiledSets.count < Int(Int16.max) else {
-                logger.warning("MITM suffix table full (\(state.compiledSets.count) entries)")
+                logger.warning("[MITM] Domain suffix table full")
                 break
             }
             let payload = CompiledMITMRuleSet(
@@ -263,7 +264,7 @@ nonisolated final class MITMRewritePolicy: Sendable {
             if trie.insert(suffix: suffix, payload: payloadID) {
                 state.setCount += 1
             } else {
-                logger.warning("duplicate domain suffix \"\(suffix)\": rule set \"\(set.name)\" overrides an earlier set's rules for it")
+                logger.warning("[MITM] \(set.name): Duplicate domain suffix: \(suffix)")
             }
         }
         return compiledRules
@@ -292,77 +293,77 @@ nonisolated final class MITMRewritePolicy: Sendable {
 
     // MARK: - Compilation
 
-    private func compile(_ operation: MITMOperation, suffix: String) -> CompiledMITMOperation? {
+    private func compile(_ operation: MITMOperation, ruleSet: String) -> CompiledMITMOperation? {
         switch operation {
         case .rewrite(let action):
-            guard let compiled = Self.compileRewrite(action, suffix: suffix) else { return nil }
+            guard let compiled = Self.compileRewrite(action, ruleSet: ruleSet) else { return nil }
             return .rewrite(compiled)
         case .headerAdd(let name, let value):
             guard HTTPHeader.isValidName(name) else {
-                logger.warning("headerAdd dropped: invalid header name \"\(name)\" (suffix=\(suffix))")
+                logger.warning("[MITM] \(ruleSet): headerAdd: Invalid header name: \(name)")
                 return nil
             }
             guard !Self.isFramingHeader(name) else {
-                logger.warning("headerAdd dropped: \"\(name)\" controls message framing and can't be set by a header rule (suffix=\(suffix))")
+                logger.warning("[MITM] \(ruleSet): headerAdd: Framing header: \(name)")
                 return nil
             }
             guard HTTPHeader.isValidValue(value) else {
-                logger.warning("headerAdd dropped: CR/LF/NUL in value for header \"\(name)\" (suffix=\(suffix))")
+                logger.warning("[MITM] \(ruleSet): headerAdd: Invalid header value: \(name)")
                 return nil
             }
             return .headerAdd(name: name, value: value)
         case .headerDelete(let name):
             guard HTTPHeader.isValidName(name) else {
-                logger.warning("headerDelete dropped: invalid header name \"\(name)\" (suffix=\(suffix))")
+                logger.warning("[MITM] \(ruleSet): headerDelete: Invalid header name: \(name)")
                 return nil
             }
             return .headerDelete(nameLower: name.lowercased())
         case .headerReplace(let name, let value):
             guard HTTPHeader.isValidName(name) else {
-                logger.warning("headerReplace dropped: invalid header name \"\(name)\" (suffix=\(suffix))")
+                logger.warning("[MITM] \(ruleSet): headerReplace: Invalid header name: \(name)")
                 return nil
             }
             guard !Self.isFramingHeader(name) else {
-                logger.warning("headerReplace dropped: \"\(name)\" controls message framing and can't be set by a header rule (suffix=\(suffix))")
+                logger.warning("[MITM] \(ruleSet): headerReplace: Framing header: \(name)")
                 return nil
             }
             guard HTTPHeader.isValidValue(value) else {
-                logger.warning("headerReplace dropped: CR/LF/NUL in value for header \"\(name)\" (suffix=\(suffix))")
+                logger.warning("[MITM] \(ruleSet): headerReplace: Invalid header value: \(name)")
                 return nil
             }
             return .headerReplace(name: name, value: value)
         case .script(let scriptBase64):
-            guard let source = decodeScript(scriptBase64, suffix: suffix, kind: "script") else {
+            guard let source = decodeScript(scriptBase64, ruleSet: ruleSet, kind: "script") else {
                 return nil
             }
             return .script(source: source)
         case .streamScript(let scriptBase64):
-            guard let source = decodeScript(scriptBase64, suffix: suffix, kind: "streamScript") else {
+            guard let source = decodeScript(scriptBase64, ruleSet: ruleSet, kind: "streamScript") else {
                 return nil
             }
             return .streamScript(source: source)
         case .bodyReplace(let search, let replacement):
             guard let compiled = MITMBodyReplace.compile(search: search, replacement: replacement) else {
-                logger.warning("bodyReplace dropped: search is not a valid regex (suffix=\(suffix))")
+                logger.warning("[MITM] \(ruleSet): bodyReplace: Invalid regex: \(search)")
                 return nil
             }
             return .bodyReplace(compiled)
         case .bodyJSON(let operation):
             guard let compiled = MITMJSONPatch.compile(operation) else {
-                logger.warning("bodyJSON dropped: malformed JSON path in \(operation.action) (suffix=\(suffix))")
+                logger.warning("[MITM] \(ruleSet): bodyJSON: Invalid path: \(operation)")
                 return nil
             }
             return .bodyJSON(compiled)
         }
     }
 
-    private func decodeScript(_ scriptBase64: String, suffix: String, kind: String) -> String? {
+    private func decodeScript(_ scriptBase64: String, ruleSet: String, kind: String) -> String? {
         guard let raw = Data(base64Encoded: scriptBase64) else {
-            logger.warning("\(kind) invalid base64 (suffix=\(suffix))")
+            logger.warning("[MITM] \(ruleSet): \(kind): Invalid base64")
             return nil
         }
         guard let source = String(data: raw, encoding: .utf8) else {
-            logger.warning("\(kind) source not valid UTF-8 (suffix=\(suffix))")
+            logger.warning("[MITM] \(ruleSet): \(kind): Invalid UTF-8")
             return nil
         }
         return source
@@ -391,7 +392,7 @@ nonisolated final class MITMRewritePolicy: Sendable {
 
     // MARK: - Rewrite compilation
 
-    private static func compileRewrite(_ action: MITMRewriteAction, suffix: String) -> CompiledRewriteAction? {
+    private static func compileRewrite(_ action: MITMRewriteAction, ruleSet: String) -> CompiledRewriteAction? {
         switch action {
         case .transparent(let url):
             let template = MITMCaptureTemplate(url)
@@ -399,11 +400,11 @@ nonisolated final class MITMRewritePolicy: Sendable {
                 return .transparent(.templated(template))
             }
             guard let parsed = parseReplacementURL(url) else {
-                logger.warning("rewrite(transparent) dropped: \"\(url)\" is not an absolute URL with a host (suffix=\(suffix))")
+                logger.warning("[MITM] \(ruleSet): rewrite: Invalid URL: \(url)")
                 return nil
             }
             guard isValidRequestTargetReplacement(parsed.requestTarget) else {
-                logger.warning("rewrite(transparent) dropped: replacement path is not wire-safe (suffix=\(suffix))")
+                logger.warning("[MITM] \(ruleSet): rewrite: Invalid request target: \(url)")
                 return nil
             }
             return .transparent(.resolved(parsed))
@@ -414,7 +415,7 @@ nonisolated final class MITMRewritePolicy: Sendable {
             }
             let trimmed = url.trimmingCharacters(in: .whitespaces)
             guard parseReplacementURL(trimmed) != nil, HTTPHeader.isValidValue(trimmed) else {
-                logger.warning("rewrite(302) dropped: \"\(url)\" is not a valid, wire-safe URL (suffix=\(suffix))")
+                logger.warning("[MITM] \(ruleSet): rewrite 302: Invalid URL: \(url)")
                 return nil
             }
             return .redirect302(.location(trimmed))
@@ -424,7 +425,7 @@ nonisolated final class MITMRewritePolicy: Sendable {
             return .reject200Gif
         case .reject200Data(let base64):
             if !base64.isEmpty, Data(base64Encoded: base64) == nil {
-                logger.warning("rewrite(reject-data) dropped: contents are not valid base64 (suffix=\(suffix))")
+                logger.warning("[MITM] \(ruleSet): rewrite reject-data: Invalid base64")
                 return nil
             }
             return .reject200Data(base64: base64)
@@ -442,10 +443,7 @@ nonisolated final class MITMRewritePolicy: Sendable {
         }
         let port: UInt16?
         if let rawPort = components.port {
-            guard let valid = UInt16(exactly: rawPort) else {
-                logger.warning("rewrite replacement URL dropped: port \(rawPort) out of range (0–65535)")
-                return nil
-            }
+            guard let valid = UInt16(exactly: rawPort) else { return nil }
             port = valid
         } else {
             port = nil
@@ -483,7 +481,7 @@ nonisolated enum MITMBinaryReader {
             do {
                 return try cursor.readSnapshot()
             } catch {
-                logger.report("binary payload decode failed", error: error)
+                logger.report(error)
                 return nil
             }
         }

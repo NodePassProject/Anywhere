@@ -8,8 +8,6 @@
 import Foundation
 import Synchronization
 
-nonisolated private let logger = AnywhereLogger(category: "HysteriaSession")
-
 nonisolated final class HysteriaSession: Sendable {
     private enum Phase: PhaseTransitionable {
         case idle, connecting, authenticating, ready, closed

@@ -8,8 +8,6 @@
 import Foundation
 import Synchronization
 
-nonisolated private let logger = AnywhereLogger(category: "HTTP3Multiplexer")
-
 nonisolated final class HTTP3Multiplexer: Multiplexer, Sendable {
 
     // MARK: - State

@@ -86,29 +86,25 @@ nonisolated enum MITMBodyCodec {
             case .gzip:
                 let (decoded, failure) = gunzip(current)
                 guard let next = decoded else {
-                    logger.warning("\(host): gzip decode failed — \(failure?.description ?? "unknown") (input \(current.count) B, head=[\(Self.headFingerprint(current))])")
+                    logger.warning("[MITM] \(host): gzip decode failed" + (failure.map { ": \($0)" } ?? ""))
                     return nil
                 }
                 current = next
             case .deflate:
                 guard let next = inflateDeflate(current) else {
-                    logger.warning("\(host): deflate decode failed (input \(current.count) B, head=[\(Self.headFingerprint(current))])")
+                    logger.warning("[MITM] \(host): deflate decode failed")
                     return nil
                 }
                 current = next
             case .brotli:
                 guard let next = streamDecode(current, algorithm: COMPRESSION_BROTLI) else {
-                    logger.warning("\(host): brotli decode failed (input \(current.count) B, head=[\(Self.headFingerprint(current))])")
+                    logger.warning("[MITM] \(host): brotli decode failed")
                     return nil
                 }
                 current = next
             }
         }
         return current
-    }
-
-    private static func headFingerprint(_ data: Data, maxBytes: Int = 4) -> String {
-        data.prefix(maxBytes).map { String(format: "%02x", $0) }.joined(separator: " ")
     }
 
     // MARK: - Single-codec encode/decode
@@ -147,29 +143,29 @@ nonisolated enum MITMBodyCodec {
         var description: String {
             switch self {
             case .firstMember(let reason): return reason.description
-            case .capExceeded:             return "output exceeded \(maxBufferedBodyBytes) B cap"
-            case .multiMember:             return "multi-member gzip unsupported; forwarding verbatim"
-            case .trailingMember(let reason): return "gzip member after the first failed (\(reason)); forwarding verbatim"
+            case .capExceeded:             return "output too large"
+            case .multiMember:             return "multi-member gzip unsupported"
+            case .trailingMember(let reason): return "trailing member: \(reason)"
             }
         }
     }
 
     private enum GzipMemberFailure: CustomStringConvertible {
-        case tooShort(available: Int)
+        case tooShort
         case badMagic(UInt8, UInt8, UInt8)
         case truncatedHeaderField(String)
-        case deflate(status: String, consumed: Int, of: Int, produced: Int)
+        case deflate(status: String)
 
         var description: String {
             switch self {
-            case .tooShort(let available):
-                return "gzip member too short (\(available) B, need ≥18)"
+            case .tooShort:
+                return "member too short"
             case .badMagic(let byte0, let byte1, let byte2):
-                return String(format: "not gzip — magic %02x %02x %02x (want 1f 8b 08)", byte0, byte1, byte2)
+                return String(format: "bad magic %02x %02x %02x", byte0, byte1, byte2)
             case .truncatedHeaderField(let field):
-                return "truncated \(field) header field"
-            case .deflate(let status, let consumed, let total, let produced):
-                return "deflate \(status) after \(consumed)/\(total) B in, \(produced) B out"
+                return "truncated \(field) field"
+            case .deflate(let status):
+                return "deflate \(status)"
             }
         }
     }
@@ -187,7 +183,6 @@ nonisolated enum MITMBodyCodec {
         while cursor < end {
             switch gunzipOneMember(data, from: cursor, producedSoFar: combined.count) {
             case .capExceeded:
-                logger.warning("gzip multi-member output would exceed cap \(maxBufferedBodyBytes) B; aborting")
                 return (nil, .capExceeded)
             case .failure(let reason):
                 return combined.isEmpty ? (nil, .firstMember(reason)) : (nil, .trailingMember(reason))
@@ -229,7 +224,7 @@ nonisolated enum MITMBodyCodec {
     ) -> GzipMemberOutcome {
         let end = data.endIndex
         let available = data.distance(from: offset, to: end)
-        guard available >= 18 else { return .failure(.tooShort(available: available)) }
+        guard available >= 18 else { return .failure(.tooShort) }
         let magicByte0 = data[offset]
         let magicByte1 = data[data.index(offset, offsetBy: 1)]
         let magicByte2 = data[data.index(offset, offsetBy: 2)]
@@ -265,8 +260,8 @@ nonisolated enum MITMBodyCodec {
         case .success(let output, let consumed):
             decoded = output
             deflateConsumed = consumed
-        case .failure(let status, let consumedInput, let producedOutput):
-            return .failure(.deflate(status: status, consumed: consumedInput, of: deflateInput.count, produced: producedOutput))
+        case .failure(let status):
+            return .failure(.deflate(status: status))
         case .capExceeded:
             return .capExceeded
         }
@@ -298,8 +293,8 @@ nonisolated enum MITMBodyCodec {
 
     private enum StreamDecodeOutcome {
         case success(decoded: Data, consumed: Int)
-        case failure(status: String, consumedInput: Int, producedOutput: Int)
-        case capExceeded(producedOutput: Int)
+        case failure(status: String)
+        case capExceeded
     }
 
     private static func streamDecode(_ data: Data, algorithm: compression_algorithm) -> Data? {
@@ -320,7 +315,7 @@ nonisolated enum MITMBodyCodec {
 
         var status = compression_stream_init(stream, COMPRESSION_STREAM_DECODE, algorithm)
         guard status == COMPRESSION_STATUS_OK else {
-            return .failure(status: "init-failed", consumedInput: 0, producedOutput: 0)
+            return .failure(status: "init-failed")
         }
         defer { compression_stream_destroy(stream) }
 
@@ -330,7 +325,7 @@ nonisolated enum MITMBodyCodec {
 
         return data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> StreamDecodeOutcome in
             guard let inputBase = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-                return .failure(status: "no-base-address", consumedInput: 0, producedOutput: 0)
+                return .failure(status: "no-base-address")
             }
             stream.pointee.src_ptr = inputBase
             stream.pointee.src_size = data.count
@@ -347,8 +342,7 @@ nonisolated enum MITMBodyCodec {
                     let written = bufferSize - stream.pointee.dst_size
                     if written > 0 {
                         if budgetUsed + output.count + written > maxBufferedBodyBytes {
-                            logger.warning("decompress output would exceed cap \(maxBufferedBodyBytes) B; aborting")
-                            return .capExceeded(producedOutput: output.count)
+                            return .capExceeded
                         }
                         output.append(buffer, count: written)
                     }
@@ -359,12 +353,12 @@ nonisolated enum MITMBodyCodec {
                     stream.pointee.dst_ptr = buffer
                     stream.pointee.dst_size = bufferSize
                     if written == 0 && stream.pointee.src_size == sourceBefore {
-                        return .failure(status: "stalled", consumedInput: data.count - stream.pointee.src_size, producedOutput: output.count)
+                        return .failure(status: "stalled")
                     }
                 case COMPRESSION_STATUS_ERROR:
-                    return .failure(status: "error", consumedInput: data.count - stream.pointee.src_size, producedOutput: output.count)
+                    return .failure(status: "error")
                 default:
-                    return .failure(status: "unexpected", consumedInput: data.count - stream.pointee.src_size, producedOutput: output.count)
+                    return .failure(status: "unexpected")
                 }
             }
         }
@@ -399,7 +393,6 @@ nonisolated enum MITMBodyCodec {
                     let written = bufferSize - stream.pointee.dst_size
                     if written > 0 {
                         if output.count + written > maxBufferedBodyBytes {
-                            logger.warning("encode output would exceed cap \(maxBufferedBodyBytes) B; aborting")
                             return nil
                         }
                         output.append(buffer, count: written)

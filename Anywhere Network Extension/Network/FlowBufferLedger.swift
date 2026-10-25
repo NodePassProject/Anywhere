@@ -15,7 +15,6 @@ nonisolated final class FlowBufferLedger<Handle: Sendable>: Sendable {
     struct Victim: Sendable {
         let id: ObjectIdentifier
         let handle: Handle
-        let bytes: Int
     }
 
     enum Admission {
@@ -121,6 +120,6 @@ nonisolated final class FlowBufferLedger<Handle: Sendable>: Sendable {
         state.entries.removeValue(forKey: victimID)
         state.evicted.insert(victimID)
         state.total -= entry.bytes
-        return Victim(id: victimID, handle: entry.handle, bytes: entry.bytes)
+        return Victim(id: victimID, handle: entry.handle)
     }
 }

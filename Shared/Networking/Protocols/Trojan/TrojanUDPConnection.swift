@@ -8,8 +8,6 @@
 import Foundation
 import Synchronization
 
-nonisolated private let logger = AnywhereLogger(category: "TrojanUDPConnection")
-
 nonisolated final class TrojanUDPConnection: ProxyConnection {
     private let inner: ProxyConnection
     private let destinationHost: String

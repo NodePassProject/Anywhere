@@ -8,8 +8,6 @@
 import Foundation
 import Synchronization
 
-nonisolated private let logger = AnywhereLogger(category: "DNSLookupCache")
-
 nonisolated final class DNSLookupCache<Key: Hashable & Sendable, Value: Sendable>: Sendable {
     typealias Lookup = @Sendable () async -> (value: Value, ttl: TimeInterval)?
 
@@ -36,14 +34,12 @@ nonisolated final class DNSLookupCache<Key: Hashable & Sendable, Value: Sendable
     }
 
     private let state = Mutex(State())
-    private let name: String
     private let capacity: Int
     private let missing: Value
     private let servesStaleOnFailure: Bool
     private let waitLimit: Duration?
     
-    init(name: String, capacity: Int, missing: Value, servesStaleOnFailure: Bool = false, waitLimit: Duration? = nil) {
-        self.name = name
+    init(capacity: Int, missing: Value, servesStaleOnFailure: Bool = false, waitLimit: Duration? = nil) {
         self.capacity = capacity
         self.missing = missing
         self.servesStaleOnFailure = servesStaleOnFailure
@@ -142,9 +138,6 @@ nonisolated final class DNSLookupCache<Key: Hashable & Sendable, Value: Sendable
     
     private func adopt(_ upstream: DNSUpstream, in state: inout State) {
         guard state.upstream != upstream else { return }
-        if state.upstream != nil {
-            logger.info("[DNS] \(name) DNS upstream changed; cache flushed")
-        }
         state.upstream = upstream
         Self.reset(&state)
     }

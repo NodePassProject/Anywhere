@@ -11,8 +11,6 @@ import CommonCrypto
 import Security
 import Synchronization
 
-nonisolated private let logger = AnywhereLogger(category: "Shadowsocks2022")
-
 // MARK: - Constants
 
 private nonisolated let headerTypeClient: UInt8 = 0

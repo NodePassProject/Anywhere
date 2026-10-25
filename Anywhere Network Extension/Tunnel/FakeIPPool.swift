@@ -8,8 +8,6 @@
 import Foundation
 import Synchronization
 
-nonisolated private let logger = AnywhereLogger(category: "FakeIPPool")
-
 nonisolated final class FakeIPPool: Sendable {
     struct Entry {
         let domain: String
@@ -52,7 +50,6 @@ nonisolated final class FakeIPPool: Sendable {
         mutating func evictLRU() -> Int {
             guard let tail = lruTail else {
                 // Unreachable (pool is full ⇒ LRU nonempty); fall back rather than crash.
-                logger.debug("[FakeIPPool] evictLRU called on empty list, falling back to offset 1")
                 return 1
             }
             let offset = tail.offset
@@ -169,14 +166,9 @@ nonisolated final class FakeIPPool: Sendable {
     // MARK: - Reject Marks
     
     func markRejected(domain: String) {
-        let marked = state.withLock { state -> Bool in
-            guard let offset = state.domainToOffset[domain],
-                  state.offsetToEntry[offset]?.shouldReject == false else { return false }
+        state.withLock { state in
+            guard let offset = state.domainToOffset[domain] else { return }
             state.offsetToEntry[offset]?.shouldReject = true
-            return true
-        }
-        if marked {
-            logger.debug("[FakeIPPool] Reject-marked \(domain)")
         }
     }
     

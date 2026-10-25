@@ -43,7 +43,6 @@ extension TunnelStack {
         }
 
         guard phase == .starting, epoch == startEpoch else {
-            logger.warning("[TunnelStack] Start aborted: phase is \(phase), epoch \(epoch)/\(startEpoch)")
             if epoch == startEpoch {
                 attachPacketFlow(nil)
                 self.configuration = nil
@@ -57,7 +56,6 @@ extension TunnelStack {
         rootTask = Task { await self.run(packetFlow: packetFlow, udpPlane: udpPlane) }
 
         transition(to: .running)
-        logger.debug("[TunnelStack] Started")
 
         CertificatePolicy.startObserving()
         return true
@@ -137,18 +135,12 @@ extension TunnelStack {
     }
     
     func applyConfiguration(_ newConfiguration: ProxyConfiguration) {
-        guard phase == .running else {
-            logger.warning("[VPN] Configuration switch ignored: phase is \(phase)")
-            return
-        }
-        guard newConfiguration != configuration else { return }
-        logger.info("[VPN] Configuration switched")
+        guard phase == .running, newConfiguration != configuration else { return }
         restartStack(configuration: newConfiguration)
     }
 
     func sleep() {
         guard phase == .running, let configuration else { return }
-        logger.info("[VPN] Device sleep")
         tearDownDataPlane(tcp: .silent)
         bringUpDataPlane(configuration: configuration)
     }
@@ -172,7 +164,7 @@ extension TunnelStack {
     
     private func bringUpDataPlane(configuration: ProxyConfiguration) {
         guard !dataPlaneUp else {
-            logger.error("[TunnelStack] Data plane already up; bring-up ignored")
+            logger.error("[TunnelStack] Data plane already up")
             return
         }
         dataPlaneUp = true
@@ -181,7 +173,6 @@ extension TunnelStack {
         liveIPStack.withLock { $0 = ipStack }
         startIPStackTick()
         submitPlaneCommand(.setMultiplexerPool(configuration.makeUDPMultiplexerPool()))
-        logger.debug("[TunnelStack] Data plane up")
     }
     
     private func tearDownDataPlane(tcp: TCPTeardown) {
@@ -211,7 +202,6 @@ extension TunnelStack {
         ipStack = nil
         tcpConnections.withLock { $0.removeAll() }
         ipStackAbortContext.store(.none, ordering: .relaxed)
-        logger.debug("[TunnelStack] Data plane down")
     }
 
     private func closeAllActiveTCP() {
@@ -243,7 +233,6 @@ extension TunnelStack {
                 configuration: configuration, revalidateMode: revalidateMode,
                 delay: delay, generation: deferredRestartGeneration
             ))
-            logger.debug("[TunnelStack] Restart throttled, deferred by \(String(format: "%.0f", delay * 1000))ms")
             return
         }
 
@@ -265,10 +254,7 @@ extension TunnelStack {
     }
 
     private func restartStackNow(configuration: ProxyConfiguration) {
-        guard phase == .running else {
-            logger.warning("[TunnelStack] Restart ignored: phase is \(phase)")
-            return
-        }
+        guard phase == .running else { return }
         deferredRestartGeneration += 1
         deferredRestartScheduled = false
         lastRestartTime = MonotonicClock.now
@@ -280,7 +266,6 @@ extension TunnelStack {
         self.configuration = configuration
         configureRuntime(for: configuration)
         bringUpDataPlane(configuration: configuration)
-        logger.debug("[TunnelStack] Restarted")
     }
 
     // MARK: - Settings Observation
@@ -315,10 +300,7 @@ extension TunnelStack {
             logger.report(AnywhereError.store(.corrupted(.configurations, detail: AnywhereError.describe(error))))
             return
         }
-        guard let active else {
-            logger.warning("[VPN] Active configuration cleared; keeping the running one")
-            return
-        }
+        guard let active else { return }
         applyConfiguration(active)
     }
 
@@ -329,7 +311,6 @@ extension TunnelStack {
         let old = settings
         let new = TunnelSettings.load()
         guard new != old else { return }
-        logger.info("[VPN] Settings changed")
         settings = new
         
         publishUDPConfig()
@@ -359,7 +340,6 @@ extension TunnelStack {
     private func handleRoutingChanged() async {
         guard phase == .running else { return }
         guard proxyMode == .rule else { return }
-        logger.info("[VPN] Routing changed")
         let compiled = await domainRouter.compileRoutingConfiguration()
         guard phase == .running, proxyMode == .rule else { return }
         domainRouter.install(compiled)
@@ -368,7 +348,6 @@ extension TunnelStack {
 
     private func handleMITMChanged() {
         guard phase == .running else { return }
-        logger.info("[VPN] MITM settings changed")
         loadMITMSetting()
         publishUDPConfig()
         submitPlaneCommand(.revalidateQUIC)

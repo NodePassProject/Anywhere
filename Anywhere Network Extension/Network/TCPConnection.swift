@@ -77,7 +77,7 @@ actor TCPConnection: MITMSessionHost {
         let old = phase
         guard Phase.transition(&phase, to: new) else {
             if new != .closed {
-                logger.error("[TCP] Invalid transition \(old) → \(new) for \(endpointDescription); ignored")
+                logger.error("[TCP] \(endpointDescription): Invalid transition: \(old) → \(new)")
             }
             return false
         }
@@ -284,14 +284,10 @@ actor TCPConnection: MITMSessionHost {
             routeTarget = .reject
             stack.requestLog.record(protocol: .tcp, host: dstHost, port: dstPort, routeTarget: .reject, ruleSetName: match.ruleSetName)
             publishRoute()
-            logger.debug("[TCP] Rejected by IP rule: \(dstHost) → \(ip):\(dstPort)")
             stack.fakeIPPool.markRejected(domain: dstHost)
             rejectSilently()
         case .proxy(let id):
-            guard let resolved = router.resolveConfiguration(action: match.action) else {
-                logger.report("[TCP] IP-rule route", error: AnywhereError.routing(.configurationMissing(host: dstHost)))
-                return
-            }
+            guard let resolved = router.resolveConfiguration(action: match.action) else { return }
             ruleMatched = true
             ruleSetName = match.ruleSetName
             routeTarget = .proxy(id)
@@ -435,10 +431,7 @@ actor TCPConnection: MITMSessionHost {
             publishRoute()
             rejectSilently()
         case .proxy(let id):
-            guard let resolved = router.resolveConfiguration(action: match.action) else {
-                logger.report("[TCP] SNI route", error: AnywhereError.routing(.configurationMissing(host: sni)))
-                return
-            }
+            guard let resolved = router.resolveConfiguration(action: match.action) else { return }
             ruleMatched = true
             ruleSetName = match.ruleSetName
             routeTarget = .proxy(id)
@@ -715,7 +708,9 @@ actor TCPConnection: MITMSessionHost {
 
     private func relayFailed(_ operation: String, error: Error) {
         guard phase != .closed else { return }
-        reportFailure(operation, error: error)
+        if !AnywhereError.isPeerClose(error) {
+            reportFailure(operation, error: error)
+        }
         abort()
     }
 
@@ -789,13 +784,13 @@ actor TCPConnection: MITMSessionHost {
         guard phase != .closed else { return }
         let victims = bufferLedger.set(flow: connectionID, handle: self, bytes: pendingData.count)
         for victim in victims {
-            Task { await victim.handle.abortForBufferPressure(bytesHeld: victim.bytes) }
+            Task { await victim.handle.abortForBufferPressure() }
         }
     }
 
-    func abortForBufferPressure(bytesHeld: Int) {
+    func abortForBufferPressure() {
         guard phase != .closed else { return }
-        logger.warning("[TCP] Global pending-buffer budget full; aborting \(endpointDescription) holding \(bytesHeld) buffered bytes")
+        logger.warning("[TCP] Pending buffer full")
         failureReporter.markReported()
         abort()
     }
@@ -818,15 +813,14 @@ actor TCPConnection: MITMSessionHost {
         }
     }
 
-    nonisolated func evictForConnectionPressure(idleFor: TimeInterval) {
+    nonisolated func evictForConnectionPressure() {
         guard connectionPressureCandidate(now: MonotonicClock.now) != nil else { return }
         connection.cancel()
-        Task { await self.finishPressureEviction(idleFor: idleFor) }
+        Task { await self.finishPressureEviction() }
     }
 
-    private func finishPressureEviction(idleFor: TimeInterval) {
+    private func finishPressureEviction() {
         guard phase != .closed else { return }
-        logger.debug("[TCP] Connection table full; evicting \(endpointDescription) idle \(Int(idleFor))s")
         failureReporter.markReported()
         abort()
     }
@@ -838,17 +832,15 @@ actor TCPConnection: MITMSessionHost {
 
     func handleError(_ error: AnywhereIP.ConnectionError) {
         switch error {
-        case .closed:
-            logger.debug("[TCP] IPStack closed connection: \(endpointDescription)")
-        case .reset:
-            logger.debug("[TCP] IPStack peer reset: \(endpointDescription)")
+        case .closed, .reset:
+            break
         case .aborted where stack?.ipStackAbortContext.load(ordering: .relaxed) == .teardown
             || stack?.dataPlaneGeneration.load(ordering: .acquiring) != stackGeneration:
-            logger.debug("[TCP] IPStack aborted connection (tunnel teardown): \(endpointDescription)")
+            break
         case .concurrentOperation, .bufferLimit:
-            logger.error("[TCP] IPStack stream contract failed: \(endpointDescription)")
+            logger.error("[TCP] \(endpointDescription): IPStack \(error)")
         case .aborted:
-            logger.warning("[TCP] IPStack aborted connection: \(endpointDescription)")
+            logger.warning("[TCP] \(endpointDescription): IPStack aborted")
         }
         failureReporter.markReported()
         finish(.stackError)
@@ -1169,10 +1161,7 @@ actor TCPConnection: MITMSessionHost {
         case .reject:
             return (.reject, match.ruleSetName)
         case .proxy:
-            guard let configuration = stack?.domainRouter.resolveConfiguration(action: match.action) else {
-                logger.report("[TCP] MITM dial route", error: AnywhereError.routing(.configurationMissing(host: host)))
-                return nil
-            }
+            guard let configuration = stack?.domainRouter.resolveConfiguration(action: match.action) else { return nil }
             return (.route(target: match.action, configuration: configuration), match.ruleSetName)
         }
     }

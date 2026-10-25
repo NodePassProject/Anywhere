@@ -8,8 +8,6 @@
 import Foundation
 import Synchronization
 
-nonisolated private let logger = AnywhereLogger(category: "OutboundConnector")
-
 nonisolated enum OutboundConnector {
     struct Dialed {
         let connection: ProxyConnection
@@ -81,7 +79,6 @@ nonisolated enum OutboundConnector {
         case .proxy(let id):
             guard let context,
                   let configuration = resolveConfiguration(for: id, context: context) else {
-                logger.warning("[OutboundConnector] No configuration resolved for \(host); dialing direct")
                 return try await dialDirect(host: host, port: port)
             }
             return try await dialProxy(configuration: configuration, host: host, port: port)

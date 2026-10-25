@@ -57,9 +57,9 @@ extension MITMScriptEngine.SynthesizedResponse {
         return headers + [(name: lowercaseName ? "date" : "Date", value: Self.imfFixdateFormatter.string(from: Date()))]
     }
 
-    func truncatedBody(cap: Int, onTruncate: (Int) -> Void) -> Data {
+    func truncatedBody(cap: Int, onTruncate: () -> Void) -> Data {
         guard body.count > cap else { return body }
-        onTruncate(body.count)
+        onTruncate()
         let end = body.startIndex + cap
         return body.subdata(in: body.startIndex..<end)
     }

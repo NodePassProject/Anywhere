@@ -10,8 +10,6 @@ import CryptoKit
 import CommonCrypto
 import Synchronization
 
-nonisolated private let logger = AnywhereLogger(category: "TLSRecordConnection")
-
 nonisolated final class TLSRecordConnection: Sendable {
 
     // MARK: Properties

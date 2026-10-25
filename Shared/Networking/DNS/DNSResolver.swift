@@ -7,11 +7,8 @@
 
 import Foundation
 
-nonisolated private let logger = AnywhereLogger(category: "DNSResolver")
-
 nonisolated final class DNSResolver: Sendable {
     static let proxies = DNSResolver(
-        name: "Proxies",
         upstream: { AWCore.getProxyDNSUpstream() },
         hosts: nil,
         fallsBackToSystem: true,
@@ -20,7 +17,6 @@ nonisolated final class DNSResolver: Sendable {
     )
     
     static let localRequests = DNSResolver(
-        name: "Local Requests",
         upstream: { AWCore.getLocalRequestDNSUpstream() },
         hosts: DNSHosts.shared,
         fallsBackToSystem: false,
@@ -44,7 +40,6 @@ nonisolated final class DNSResolver: Sendable {
     private let blockingBridge = DNSSyscallConcurrencyBridge()
     
     private init(
-        name: String,
         upstream: @escaping @Sendable () -> DNSUpstream,
         hosts: DNSHosts?,
         fallsBackToSystem: Bool,
@@ -55,7 +50,6 @@ nonisolated final class DNSResolver: Sendable {
         self.hosts = hosts
         self.fallsBackToSystem = fallsBackToSystem
         self.cache = DNSLookupCache(
-            name: name,
             capacity: Self.maxEntries,
             missing: [],
             servesStaleOnFailure: servesStaleOnFailure,
@@ -100,9 +94,7 @@ nonisolated final class DNSResolver: Sendable {
     }
 
     func flush() {
-        let count = cache.flush()
-        guard count > 0 else { return }
-        logger.info("[DNS] Cleared \(count) cached \(count == 1 ? "host" : "hosts") after network change")
+        cache.flush()
     }
 
     // MARK: - Internal
@@ -116,12 +108,8 @@ nonisolated final class DNSResolver: Sendable {
         if !upstream.isSystem {
             resolved = (try? await DNSUpstreamClient.resolve(host, via: upstream, family: family)) ?? []
             guard resolved.isEmpty, fallsBackToSystem else { return Self.cacheable(resolved) }
-            logger.warning("[DNS] Configured upstream produced nothing for \(host); falling back to system")
         }
         resolved = await blockingBridge.resolveAddresses(host, family: family)
-        if resolved.isEmpty, fallsBackToSystem {
-            logger.warning("[DNS] Resolution failed for \(host)")
-        }
         return Self.cacheable(resolved)
     }
 

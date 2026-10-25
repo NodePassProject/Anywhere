@@ -8,8 +8,6 @@
 import Foundation
 import Synchronization
 
-nonisolated private let logger = AnywhereLogger(category: "AnyTLSStream")
-
 actor AnyTLSStream {
     static let downlinkHighWaterMark = 128 * 1024
     static let downlinkLowWaterMark  = 32 * 1024

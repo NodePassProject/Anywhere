@@ -8,8 +8,6 @@
 import Foundation
 import Synchronization
 
-nonisolated private let logger = AnywhereLogger(category: "TLSStreamTransport")
-
 // MARK: - TLSStreamTransport
 
 nonisolated final class TLSStreamTransport: Sendable {

@@ -138,7 +138,7 @@ actor MITMProfileServer {
                 if message.metadata.endOfStream { return }
             }
         } catch {
-            logger.error("profile server connection error: \(error)")
+            logger.report("[MITM] Profile server connection failed", error: error)
         }
     }
 
@@ -257,7 +257,7 @@ nonisolated private final class LegacyMITMProfileListener: Sendable {
                 return
             }
             if let error {
-                logger.error("profile server connection error: \(error)")
+                logger.report("[MITM] Profile server connection failed", error: error)
                 connection.cancel()
                 return
             }

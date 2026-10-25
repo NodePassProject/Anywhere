@@ -10,8 +10,6 @@ import Synchronization
 import Network
 import AnywhereQUIC
 
-nonisolated private let logger = AnywhereLogger(category: "QUICConnection")
-
 extension QUICConnectionCore {
 
     // MARK: Close

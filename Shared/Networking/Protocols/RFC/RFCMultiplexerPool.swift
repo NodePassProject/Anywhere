@@ -8,8 +8,6 @@
 import Foundation
 import Synchronization
 
-nonisolated private let logger = AnywhereLogger(category: "RFCMultiplexerPool")
-
 nonisolated final class RFCMultiplexerPool: TransportPool {
     struct Extra {
         var sessionCounter: UInt64 = 0

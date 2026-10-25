@@ -8,8 +8,6 @@
 import Foundation
 import Synchronization
 
-nonisolated private let logger = AnywhereLogger(category: "SOCKS5Connection")
-
 // MARK: - SOCKS5 Protocol Constants
 
 nonisolated private enum SOCKS5 {

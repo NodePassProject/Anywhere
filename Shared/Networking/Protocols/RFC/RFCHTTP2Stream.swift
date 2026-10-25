@@ -8,8 +8,6 @@
 import Foundation
 import Synchronization
 
-nonisolated private let logger = AnywhereLogger(category: "RFCHTTP2Stream")
-
 nonisolated final class RFCHTTP2Stream: ProxyConnection, MultiplexerStreamSink, Sendable {
     let streamID: UInt32
     

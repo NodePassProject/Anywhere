@@ -100,7 +100,7 @@ final class WatchSessionManager: NSObject {
             try session.updateApplicationContext(payload)
             mirrored = snapshot
         } catch {
-            logger.warning("Failed to push watch context: \(error.localizedDescription)")
+            logger.report("[Watch] Context update failed", error: error)
         }
     }
 
@@ -153,7 +153,7 @@ final class WatchSessionManager: NSObject {
         let expiry = Task { @MainActor [weak self] in
             try? await Task.sleep(for: timeout)
             guard !Task.isCancelled, let self else { return }
-            logger.warning("Timed out waiting for stores before serving watch request")
+            logger.error("[Watch] Store load timed out")
             self.readyWaiters.removeValue(forKey: id)?.resume()
         }
         defer { expiry.cancel() }
@@ -168,7 +168,7 @@ final class WatchSessionManager: NSObject {
 extension WatchSessionManager: WCSessionDelegate {
     nonisolated func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: (any Error)?) {
         if let error {
-            logger.warning("Watch session activation failed: \(error.localizedDescription)")
+            logger.report("[Watch] Session activation failed", error: error)
             return
         }
         Task { @MainActor in

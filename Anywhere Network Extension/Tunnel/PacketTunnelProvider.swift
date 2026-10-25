@@ -72,10 +72,8 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
         case .proceed(let generation):
             myClaim = generation
         case .alreadyUp:
-            logger.warning("[VPN] Duplicate start ignored")
             return
         case .superseded:
-            logger.warning("[VPN] Start refused: stop in progress")
             throw AnywhereError.tunnel(.sessionUnavailable)
         }
 
@@ -90,13 +88,12 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
             try await applyTunnelSettings()
         } catch {
             let wrapped = AnywhereError.tunnel(.settingsApplyFailed(underlying: error))
-            logger.report("[VPN]", error: wrapped)
+            logger.report("[VPN] Start failed", error: wrapped)
             releaseStartClaim(myClaim)
             throw wrapped
         }
 
         guard providerState.withLock({ $0.phase == .starting && $0.claimGeneration == myClaim }) else {
-            logger.warning("[VPN] Start aborted: stopped while applying settings")
             throw AnywhereError.tunnel(.sessionUnavailable)
         }
 
@@ -193,7 +190,6 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
             try await setTunnelNetworkSettings(buildTunnelSettings(mtu: mtu))
         }
         discoveredMTU.withLock { $0 = mtu }
-        logger.info("[VPN] Tunnel MTU \(mtu)")
     }
 
     private static func interfaceMTU(forAddress address: String) -> Int? {
@@ -270,10 +266,9 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
     private func reapplyTunnelSettings() async {
         do {
             try await applyTunnelSettings()
-            logger.info("[VPN] Tunnel settings reapplied")
         } catch {
             guard !Task.isCancelled else { return }
-            logger.report("[VPN] Failed to reapply tunnel settings", error: error)
+            logger.report("[VPN] Tunnel settings apply failed", error: error)
         }
     }
 
@@ -308,7 +303,7 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
         do {
             message = try JSONDecoder().decode(TunnelMessage.self, from: messageData)
         } catch {
-            logger.report("[IPC] App message decode failed", error: AnywhereError.tunnel(.ipcFailed(underlying: error)))
+            logger.report("[IPC] Message decode failed", error: error)
             return nil
         }
 
@@ -344,7 +339,7 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
         do {
             return try JSONEncoder().encode(reply)
         } catch {
-            logger.report("[IPC] Reply encode failed", error: AnywhereError.tunnel(.ipcFailed(underlying: error)))
+            logger.report("[IPC] Reply encode failed", error: error)
             return nil
         }
     }
@@ -420,76 +415,14 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
     }
 
     private func logTunnelStop(reason: NEProviderStopReason) {
-        let message: String
-        let level: TunnelLogLevel
-
+        let failure: String
         switch reason {
-        case .userInitiated:
-            message = "[VPN] Tunnel stopped by user"
-            level = .info
-        case .providerFailed:
-            message = "[VPN] Tunnel stopped because the provider failed"
-            level = .error
-        case .noNetworkAvailable:
-            message = "[VPN] Tunnel stopped because the network became unavailable"
-            level = .warning
-        case .unrecoverableNetworkChange:
-            message = "[VPN] Tunnel stopped because the network path changed"
-            level = .warning
-        case .providerDisabled:
-            message = "[VPN] Tunnel stopped because the provider was disabled"
-            level = .warning
-        case .authenticationCanceled:
-            message = "[VPN] Tunnel stopped because authentication was canceled"
-            level = .warning
-        case .configurationFailed:
-            message = "[VPN] Tunnel stopped because configuration failed"
-            level = .error
-        case .idleTimeout:
-            message = "[VPN] Tunnel stopped after being idle"
-            level = .warning
-        case .configurationDisabled:
-            message = "[VPN] Tunnel stopped because the configuration was disabled"
-            level = .warning
-        case .configurationRemoved:
-            message = "[VPN] Tunnel stopped because the configuration was removed"
-            level = .warning
-        case .superceded:
-            message = "[VPN] Tunnel stopped because another VPN took over"
-            level = .warning
-        case .userLogout:
-            message = "[VPN] Tunnel stopped because the user logged out"
-            level = .warning
-        case .userSwitch:
-            message = "[VPN] Tunnel stopped because the active user changed"
-            level = .warning
-        case .connectionFailed:
-            message = "[VPN] Tunnel stopped because the VPN connection failed"
-            level = .warning
-        case .sleep:
-            message = "[VPN] Tunnel stopped for device sleep"
-            level = .warning
-        case .appUpdate:
-            message = "[VPN] Tunnel stopped for app update"
-            level = .info
-        case .internalError:
-            message = "[VPN] Tunnel stopped because Network Extension hit an internal error"
-            level = .error
-        case .none:
-            message = "[VPN] Tunnel stopped"
-            level = .info
-        @unknown default:
-            message = "[VPN] Tunnel stopped for an unknown reason"
-            level = .warning
+        case .providerFailed: failure = "provider failed"
+        case .configurationFailed: failure = "configuration failed"
+        case .connectionFailed: failure = "connection failed"
+        case .internalError: failure = "internal error"
+        default: return
         }
-
-        switch level {
-        case .info:
-            logger.info(message)
-        case .warning:
-            logger.warning(message)
-        case .error:
-            logger.error(message)
-        }
+        logger.error("[VPN] Tunnel stopped: \(failure)")
     }
 }

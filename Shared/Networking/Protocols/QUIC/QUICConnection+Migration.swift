@@ -55,7 +55,7 @@ extension QUICConnectionCore {
 
     func setMigration(_ new: Migration) {
         guard Migration.canTransition(from: migration, to: new) else {
-            logger.error("[QUIC] Invalid migration transition \(migration.label) → \(new.label); ignored")
+            logger.error("[QUIC] \(host): Invalid migration transition: \(migration.label) → \(new.label)")
             return
         }
         if case .proactiveProbing = new {} else {
@@ -94,10 +94,9 @@ extension QUICConnectionCore {
         do {
             try engine.migrate(to: quicPath(local: newLocal), immediately: true, now: currentTimestamp())
         } catch {
-            logger.warning("[QUIC] Reactive migration rejected (\(error)); reconnecting")
             newCarrier.close()
             migrationFailures += 1
-            close(error: AnywhereError.quic(.connectionFailed(detail: "migration rejected: \(error)")))
+            close(error: AnywhereError.quic(.connectionFailed(detail: "migration rejected: \(AnywhereError.describe(error))")))
             return
         }
 
@@ -107,7 +106,6 @@ extension QUICConnectionCore {
         localAddr = newLocal
         armActiveCarrier(newCarrier, localAddr: newLocal)
         oldCarrier?.close()
-        logger.info("[QUIC] Reactive migration initiated; validating new path")
         writeToUDP()
         rescheduleTimer()
     }
@@ -156,10 +154,8 @@ extension QUICConnectionCore {
             owner?.update { core in
                 switch core.migration {
                 case .proactiveProbing(let current, _) where !validating && current === target:
-                    logger.warning("[QUIC] Proactive migration target not ready; staying put")
                     core.abortProactiveMigration(countAsFailure: false)
                 case .proactiveValidating(let current, _) where validating && current === target:
-                    logger.warning("[QUIC] Proactive migration path validation timed out; staying put")
                     core.abortProactiveMigration(countAsFailure: true)
                 default: break
                 }
@@ -176,13 +172,11 @@ extension QUICConnectionCore {
         do {
             try engine.migrate(to: quicPath(local: migratingLocal), immediately: false, now: currentTimestamp())
         } catch {
-            logger.warning("[QUIC] Proactive migration rejected (\(error)); staying put")
             abortProactiveMigration(countAsFailure: true)
             return
         }
         setMigration(.proactiveValidating(target: target, localAddr: migratingLocal))
         scheduleProactiveDeadline(target: target, validating: true)
-        logger.info("[QUIC] Proactive migration: validating better path")
         writeToUDP()
         rescheduleTimer()
     }
@@ -216,9 +210,6 @@ extension QUICConnectionCore {
             guard pathBelongsToMigration(pathLocal, expected: migratingLocal) else { return }
             switch result {
             case .success:
-                if !target.isUsable {
-                    logger.warning("[QUIC] Migration target died during validation; adopting committed path, expecting path-down")
-                }
                 let old = carrier
                 carrier = target
                 localAddr = migratingLocal
@@ -226,9 +217,7 @@ extension QUICConnectionCore {
                 old?.close()
                 setMigration(.none)
                 migrationFailures = 0
-                logger.info("[QUIC] Migration validated; new path active")
             case .failure:
-                logger.warning("[QUIC] Migration path validation failed")
                 abortProactiveMigration(countAsFailure: true)
             case .aborted:
                 abortProactiveMigration(countAsFailure: false)
@@ -239,13 +228,10 @@ extension QUICConnectionCore {
             case .success:
                 setMigration(.none)
                 migrationFailures = 0
-                logger.info("[QUIC] Migration validated; new path active")
             case .failure:
-                logger.warning("[QUIC] Migration path validation failed")
                 setMigration(.none)
                 close(error: AnywhereError.quic(.connectionFailed(detail: "migration path validation failed")))
             case .aborted:
-                logger.warning("[QUIC] Reactive migration validation aborted; releasing migration state")
                 setMigration(.none)
             }
         }

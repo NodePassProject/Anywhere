@@ -210,7 +210,7 @@ nonisolated final class SudokuMuxClient: Multiplexer, Sendable {
                     guard let stream, !payload.isEmpty else { continue }
                     if case .overflow = stream.enqueue(payload) {
                         let error = AnywhereError.proxy(.sudoku, .connectionClosed(detail: "mux receive queue full"))
-                        sudokuLogger.warning("[Sudoku-Mux] stream \(streamID) receive queue overflow, resetting stream")
+                        sudokuLogger.warning("[Sudoku] Mux receive queue full")
                         stream.markClosed(discardQueuedData: true, error: error)
                         removeStream(id: streamID)
                         Task { [weak self] in
@@ -239,7 +239,7 @@ nonisolated final class SudokuMuxClient: Multiplexer, Sendable {
             } catch {
                 let wasClosed = state.withLock { $0.phase == .closed }
                 if !wasClosed {
-                    sudokuLogger.error("[Sudoku-Mux] reader failed: \(error.localizedDescription)")
+                    sudokuLogger.report("[Sudoku] Mux read failed", error: error)
                 }
                 close(error: error)
                 return

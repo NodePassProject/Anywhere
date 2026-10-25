@@ -8,8 +8,6 @@
 import Foundation
 import Synchronization
 
-nonisolated private let logger = AnywhereLogger(category: "XHTTPConnection")
-
 nonisolated enum XHTTPChannelRole {
     case combined
     case downloadOnly

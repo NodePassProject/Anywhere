@@ -599,8 +599,8 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
 
     private func handleGoaway(_ frame: HTTP2Frame) {
         let parsed = HTTP2Framer.parseGoaway(payload: frame.payload)
-        if let parsed {
-            logger.warning("[MITMScriptHTTP2] GOAWAY lastStreamID=\(parsed.lastStreamID) errorCode=\(parsed.errorCode)")
+        if let parsed, parsed.errorCode != 0 {
+            logger.warning("[Script] Anywhere.http: HTTP/2 GOAWAY: error \(parsed.errorCode)")
         }
 
         var shouldFailReadiness = false
@@ -754,8 +754,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
 
     private func runControlSend(_ data: Data, on transport: ProxyConnection) async {
         defer { state.withLock { $0.pendingControlSends -= 1 } }
-        do { try await transport.send(data) }
-        catch { logger.debug("[MITMScriptHTTP2] control frame send failed: \(AnywhereError.describe(error))") }
+        try? await transport.send(data)
     }
 
     private func currentTransport() throws -> ProxyConnection {
@@ -789,7 +788,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
     // MARK: - Errors / teardown
 
     private func connectionError(_ message: String) {
-        logger.warning("[MITMScriptHTTP2] \(message)")
+        logger.warning("[Script] Anywhere.http: HTTP/2: \(message)")
         handleSessionError(AnywhereError.proxy(.http2, .protocolViolation(detail: message)))
     }
 

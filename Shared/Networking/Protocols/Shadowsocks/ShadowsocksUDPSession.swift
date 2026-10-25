@@ -11,8 +11,6 @@ import CryptoKit
 import CommonCrypto
 import Security
 
-nonisolated private let logger = AnywhereLogger(category: "ShadowsocksUDPSession")
-
 actor ShadowsocksUDPSession {
 
     // MARK: - Mode

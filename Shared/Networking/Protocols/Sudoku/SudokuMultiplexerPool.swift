@@ -8,8 +8,6 @@
 import Foundation
 import Synchronization
 
-nonisolated private let logger = AnywhereLogger(category: "SudokuMultiplexerPool")
-
 // MARK: - SudokuMultiplexerRegistry
 
 nonisolated final class SudokuMultiplexerRegistry: Sendable {

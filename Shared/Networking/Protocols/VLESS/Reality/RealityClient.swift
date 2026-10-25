@@ -465,8 +465,6 @@ actor RealityClient {
                                 fullTranscript.append(hsMessage)
                                 if let decompressed = decompressCertificate(hsBody) {
                                     serverCertVerified = verifyRealityCertificate(certBody: decompressed)
-                                } else {
-                                    logger.warning("[Reality] Failed to decompress CompressedCertificate")
                                 }
                                 
                             case TLSHandshakeType.finished:
@@ -729,7 +727,7 @@ actor RealityClient {
         case 0x0001: compressionAlgorithm = COMPRESSION_ZLIB
         case 0x0002: compressionAlgorithm = COMPRESSION_BROTLI
         default:
-            logger.warning("[Reality] Unknown certificate compression algorithm: 0x\(String(format: "%04x", algorithm))")
+            logger.warning("[Reality] Unsupported certificate compression: 0x\(String(format: "%04x", algorithm))")
             return nil
         }
 
@@ -747,7 +745,7 @@ actor RealityClient {
             }
         }
         guard decodedSize == uncompressedLength else {
-            logger.warning("[Reality] Certificate decompression failed (algorithm: 0x\(String(format: "%04x", algorithm)))")
+            logger.warning("[Reality] Certificate decompression failed: 0x\(String(format: "%04x", algorithm))")
             return nil
         }
         return decompressed

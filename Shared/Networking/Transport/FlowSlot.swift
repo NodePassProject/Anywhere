@@ -20,12 +20,12 @@ nonisolated final class FlowSlot: Sendable {
 
     func release() {
         if !released.claim() {
-            logger.error("\(context) released twice — one teardown path is running redundantly.")
+            logger.error("\(context): Flow slot released twice")
         }
     }
 
     deinit {
         guard !released.isClaimed else { return }
-        logger.error("\(context) deallocated without release — teardown never ran; a cancel path has regressed.")
+        logger.error("\(context): Flow slot leaked")
     }
 }

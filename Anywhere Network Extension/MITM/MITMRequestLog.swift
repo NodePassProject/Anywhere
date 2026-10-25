@@ -78,7 +78,7 @@ nonisolated final class MITMRequestLog: Sendable {
                 guard state.isHTTP1ResponseOpen else { return }
                 let projected = state.http1OpenResponseSynthesizedAfter.count + bytes.count
                 if projected > Self.maxSynthesizedAfterBytes {
-                    logger.warning("synthAfter buffer would reach \(projected) B, over cap \(Self.maxSynthesizedAfterBytes) B; dropping \(bytes.count) B of pipelined synth response")
+                    logger.warning("[MITM] Synthesized response buffer full")
                     return
                 }
                 state.http1OpenResponseSynthesizedAfter.append(bytes)
@@ -87,7 +87,7 @@ nonisolated final class MITMRequestLog: Sendable {
             let index = state.http1Queue.count - 1
             let projected = state.http1Queue[index].synthesizedAfter.count + bytes.count
             if projected > Self.maxSynthesizedAfterBytes {
-                logger.warning("synthAfter buffer would reach \(projected) B, over cap \(Self.maxSynthesizedAfterBytes) B; dropping \(bytes.count) B of pipelined synth response")
+                logger.warning("[MITM] Synthesized response buffer full")
                 return
             }
             state.http1Queue[index].synthesizedAfter.append(bytes)

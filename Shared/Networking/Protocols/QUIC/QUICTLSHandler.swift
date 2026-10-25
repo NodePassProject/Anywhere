@@ -345,7 +345,7 @@ nonisolated final class QUICTLSHandler: QUICTLSProvider {
         case TLSHandshakeType.finished:            return processServerFinished(body)
         case TLSHandshakeType.newSessionTicket:    return processNewSessionTicket(body)
         default:
-            logger.warning("[QUIC-TLS] Unknown message type: \(msgType)")
+            logger.warning("[QUIC-TLS] Unknown handshake message: \(msgType)")
             return .success
         }
     }
@@ -585,7 +585,6 @@ nonisolated final class QUICTLSHandler: QUICTLSProvider {
                 serverCertificates: serverCertificates,
                 keyDerivation: keyDerivation
             ) {
-                logger.warning("[QUIC-TLS] CertificateVerify rejected: \(error.localizedDescription)")
                 handshakeError = error
                 return .error
             }
@@ -616,7 +615,6 @@ nonisolated final class QUICTLSHandler: QUICTLSProvider {
         }
         isAwaitingPeerVerification = false
         if let error {
-            logger.warning("[QUIC-TLS] Certificate validation failed: \(error.localizedDescription)")
             handshakeError = error
             throw error
         }

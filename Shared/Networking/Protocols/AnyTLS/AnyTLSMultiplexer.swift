@@ -396,11 +396,7 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer, Sendable {
     private func routeFrame(cmd: UInt8, sid: UInt32, payload: Data) async {
         switch cmd {
         case AnyTLSProtocol.cmdPSH:
-            let stream = state.withLock { $0.streams[sid] }
-            guard let stream else {
-                logger.warning("[AnyTLSMultiplexer] cmdPSH for unknown sid=\(sid) (\(payload.count)B) — dropping")
-                break
-            }
+            guard let stream = state.withLock({ $0.streams[sid] }) else { break }
             stream.deliverData(payload)
             await stream.awaitDownlinkCredit()
 
@@ -427,7 +423,7 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer, Sendable {
             if let v = map["v"], let parsed = UInt8(v) {
                 state.withLock { $0.peerVersion = parsed }
             } else {
-                logger.warning("[AnyTLSMultiplexer] cmdServerSettings missing or invalid v: \(map)")
+                logger.warning("[AnyTLS] Invalid server settings: \(map)")
             }
 
         case AnyTLSProtocol.cmdAlert:
@@ -438,7 +434,7 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer, Sendable {
             if let new = AnyTLSPaddingScheme.parse(payload) {
                 state.withLock { $0.padding = new }
             } else {
-                logger.warning("[AnyTLSMultiplexer] cmdUpdatePaddingScheme: failed to parse payload (\(payload.count)B)")
+                logger.warning("[AnyTLS] Invalid padding scheme")
             }
 
         case AnyTLSProtocol.cmdHeartRequest:
@@ -449,7 +445,7 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer, Sendable {
             break
 
         default:
-            logger.warning("[AnyTLSMultiplexer] unknown cmd=\(cmd) sid=\(sid) \(payload.count)B — ignoring")
+            logger.warning("[AnyTLS] Unknown command: \(cmd)")
         }
     }
 

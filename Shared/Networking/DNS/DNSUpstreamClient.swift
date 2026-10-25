@@ -36,12 +36,11 @@ nonisolated enum DNSUpstreamClient {
                 }
             }
         } catch {
-            logger.warning("[DNSUpstreamClient] Lookup for \(host) via \(describe(upstream)) failed: \(error)")
+            logger.report("[DNS] \(host) via \(describe(upstream))", error: error)
             throw error
         }
 
         guard !addresses.isEmpty else {
-            logger.warning("[DNSUpstreamClient] \(describe(upstream)) returned no address for \(host)")
             throw AnywhereError.dns(.noAddresses(host: host))
         }
         return addresses
@@ -63,7 +62,7 @@ nonisolated enum DNSUpstreamClient {
                 return try await queryRecordDoH(host, type: type, url: url, accept: accept)
             }
         } catch {
-            logger.warning("[DNSUpstreamClient] Record \(type) lookup for \(host) via \(describe(upstream)) failed: \(error)")
+            logger.report("[DNS] \(host) type \(type) via \(describe(upstream))", error: error)
             throw error
         }
     }
@@ -118,7 +117,7 @@ nonisolated enum DNSUpstreamClient {
             try await transport.send(query)
             while true {
                 let datagram = try await transport.receive()
-                if let addresses = try decode(datagram, id: id, name: name) { return addresses }
+                if let addresses = try decode(datagram, id: id) { return addresses }
             }
         }
     }
@@ -152,7 +151,7 @@ nonisolated enum DNSUpstreamClient {
             try await transport.send(query)
             while true {
                 let datagram = try await transport.receive()
-                if let records = try decodeRecords(datagram, id: id, name: name, type: type) {
+                if let records = try decodeRecords(datagram, id: id, type: type) {
                     return firstAccepted(records, accept: accept)
                 }
             }
@@ -181,7 +180,7 @@ nonisolated enum DNSUpstreamClient {
         guard status == 200 else {
             throw AnywhereError.dns(.resolutionFailed(host: name, detail: "DoH HTTP \(status)"))
         }
-        guard let addresses = try decode(data, id: id, name: name) else {
+        guard let addresses = try decode(data, id: id) else {
             throw AnywhereError.dns(.malformedResponse)
         }
         return addresses
@@ -212,7 +211,7 @@ nonisolated enum DNSUpstreamClient {
         guard status == 200 else {
             throw AnywhereError.dns(.resolutionFailed(host: name, detail: "DoH HTTP \(status)"))
         }
-        guard let records = try decodeRecords(data, id: id, name: name, type: type) else {
+        guard let records = try decodeRecords(data, id: id, type: type) else {
             throw AnywhereError.dns(.malformedResponse)
         }
         return firstAccepted(records, accept: accept)
@@ -220,13 +219,12 @@ nonisolated enum DNSUpstreamClient {
 
     // MARK: - Shared decoding
 
-    private static func decode(_ message: Data, id: UInt16, name: String) throws -> [String]? {
+    private static func decode(_ message: Data, id: UInt16) throws -> [String]? {
         do {
             return try DNSMessage.parseAddresses(message, expectedID: id)
         } catch DNSMessage.ParseFailure.identifierMismatch {
             return nil
-        } catch DNSMessage.ParseFailure.serverFailure(let rcode) {
-            logger.debug("[DNSUpstreamClient] \(name) answered with RCODE \(rcode)")
+        } catch DNSMessage.ParseFailure.serverFailure {
             return []
         } catch {
             throw AnywhereError.dns(.malformedResponse)
@@ -236,15 +234,13 @@ nonisolated enum DNSUpstreamClient {
     private static func decodeRecords(
         _ message: Data,
         id: UInt16,
-        name: String,
         type: UInt16
     ) throws -> [(rdata: Data, ttl: UInt32)]? {
         do {
             return try DNSMessage.parseRecords(message, expectedID: id, type: type)
         } catch DNSMessage.ParseFailure.identifierMismatch {
             return nil
-        } catch DNSMessage.ParseFailure.serverFailure(let rcode) {
-            logger.debug("[DNSUpstreamClient] \(name) answered with RCODE \(rcode)")
+        } catch DNSMessage.ParseFailure.serverFailure {
             return []
         } catch {
             throw AnywhereError.dns(.malformedResponse)

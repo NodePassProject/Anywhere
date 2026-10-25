@@ -334,7 +334,7 @@ fileprivate struct CameraLayerView: UIViewRepresentable {
                     session.startRunning()
                 }
             } catch {
-                logger.report("Camera configuration failed", error: error)
+                logger.report("[QR] Camera configuration failed", error: error)
             }
         }
         

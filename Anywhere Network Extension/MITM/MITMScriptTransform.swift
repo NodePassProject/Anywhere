@@ -114,7 +114,7 @@ nonisolated enum MITMScriptTransform {
                 message.body = MITMJSONPatch.applyAll(jsonOperations, to: message.body)
                 releaseNativeBodyEdit(cost)
             } else {
-                logger.warning("bodyJSON: not enough memory headroom for a \(message.body.count) B body; leaving it unchanged")
+                logger.warning("[MITM] bodyJSON: Memory budget exceeded")
             }
         }
         if !replaceOperations.isEmpty {
@@ -123,7 +123,7 @@ nonisolated enum MITMScriptTransform {
                 message.body = await MITMBodyReplace.applyAll(replaceOperations, to: message.body)
                 releaseNativeBodyEdit(cost)
             } else {
-                logger.warning("bodyReplace: not enough memory headroom for a \(message.body.count) B body; leaving it unchanged")
+                logger.warning("[MITM] bodyReplace: Memory budget exceeded")
             }
         }
         return message

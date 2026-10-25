@@ -10,8 +10,6 @@ import Synchronization
 import Darwin
 import Network
 
-nonisolated private let logger = AnywhereLogger(category: "QUICDatagramCarrier")
-
 nonisolated struct QUICDatagramEngineSink: Sendable {
     fileprivate weak var carrier: QUICDatagramCarrier?
 
@@ -58,7 +56,6 @@ nonisolated final class QUICDatagramCarrier: Sendable {
 
     fileprivate func update<T: Sendable>(_ body: (QUICDatagramCarrierCore) -> T) -> T { state.update(body) }
     var currentInterfaceType: NWInterface.InterfaceType? { state.read { $0.currentInterfaceType } }
-    var isUsable: Bool { state.read { $0.isUsable } }
     var onPathDown: (@Sendable () -> Void)? {
         get { state.read { $0.onPathDown } }
         set { update { $0.onPathDown = newValue } }
@@ -186,13 +183,6 @@ nonisolated final class QUICDatagramCarrierCore: QUICPublishingState {
     }
 
     var isReady: Bool { if case .ready = phase { true } else { false } }
-
-    var isUsable: Bool {
-        switch phase {
-        case .connecting, .ready: true
-        case .idle, .failed, .finished, .closed: false
-        }
-    }
 
     var sendingEngine: QUICDatagramEngine? { phase.engine }
 

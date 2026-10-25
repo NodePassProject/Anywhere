@@ -7,8 +7,6 @@
 
 import Foundation
 
-nonisolated private let logger = AnywhereLogger(category: "ProxyClient+RFC")
-
 extension ProxyClient {
     func connectWithRFC(_ request: ProxyRequest) async throws -> ProxyConnection {
         guard case .rfc(let rfc) = configuration.outbound else {

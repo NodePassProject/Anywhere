@@ -7,8 +7,6 @@
 
 import Foundation
 
-nonisolated private let logger = AnywhereLogger(category: "SubscriptionFetcher")
-
 nonisolated struct SubscriptionFetcher {
     struct Result {
         let configurations: [ProxyConfiguration]

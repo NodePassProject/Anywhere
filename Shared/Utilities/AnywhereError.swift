@@ -163,7 +163,6 @@ nonisolated enum AnywhereError: Error {
         case rejectedByRule(host: String)
         case dropped
         case payloadCorrupted(BinaryPayload)
-        case configurationMissing(host: String)
     }
     
     // MARK: Store
@@ -304,6 +303,10 @@ nonisolated extension AnywhereError: LocalizedError {
         case .diagnostics(let f): f.failureDescription
         case .wrapped(let context, let underlying): "\(context): \(Self.describe(underlying))"
         }
+    }
+
+    var logLine: String {
+        domainTag.isEmpty ? conciseDescription : "[\(domainTag)] \(conciseDescription)"
     }
 
     private var domainTag: String {
@@ -500,7 +503,6 @@ nonisolated extension AnywhereError.Routing {
         case .rejectedByRule(let host): "rejected by routing rule: \(host)"
         case .dropped: "dropped by routing policy"
         case .payloadCorrupted(let issue): "routing payload corrupted (\(issue.label))"
-        case .configurationMissing(let host): "configuration for routing rule not found: \(host)"
         }
     }
 }
@@ -626,16 +628,16 @@ nonisolated extension AnywhereError.Diagnostics {
 // MARK: - Classification
 
 nonisolated extension AnywhereError {
-    enum PeerClose {
-        case cascade
-        case reset
-    }
-
-    var peerClose: PeerClose? {
+    var isPeerClose: Bool {
         switch self {
-        case .transport(.posix(_, errno: EPIPE)): .cascade
-        case .transport(.posix(_, errno: ECONNRESET)): .reset
-        default: nil
+        case .transport(.posix(_, errno: EPIPE)),
+             .transport(.posix(_, errno: ECONNRESET)),
+             .quic(.closed(graceful: true)),
+             .proxy(_, .streamClosed), .proxy(_, .connectionClosed), .proxy(_, .goaway),
+             .proxy(_, .webSocketClosed(code: 1000, reason: _)):
+            true
+        default:
+            false
         }
     }
 
@@ -655,21 +657,16 @@ nonisolated extension AnywhereError {
             nil
         }
     }
-    var suggestedLogLevel: AnywhereLogger.Level {
+    var logLevel: AnywhereLogger.Level? {
         switch self {
         case .transport(.posix(_, errno: EPIPE)),
              .transport(.terminated),
              .quic(.closed(graceful: true)),
              .tls(.helloRetryRequest),
              .mitm(.needsHTTP1Fallback),
-             .routing(.dropped):
-            .debug
-        case .transport(.posix(_, errno: ECONNRESET)),
-             .routing(.rejectedByRule),
-             .proxy(_, .streamClosed), .proxy(_, .connectionClosed):
-            .info
-        case .routing(.configurationMissing):
-            .warning
+             .routing(.dropped),
+             .routing(.rejectedByRule):
+            nil
         default:
             .error
         }
@@ -693,12 +690,24 @@ nonisolated extension AnywhereError {
         default: error.localizedDescription
         }
     }
-    static func severity(of error: any Error) -> AnywhereLogger.Level {
+    static func logDescription(_ error: any Error) -> String {
         switch error {
-        case let error as AnywhereError: error.suggestedLogLevel
-        case is CancellationError: .debug
+        case let error as AnywhereError: error.errorDescription ?? error.conciseDescription
+        default: describe(error)
+        }
+    }
+
+    static func logLevel(of error: any Error) -> AnywhereLogger.Level? {
+        switch error {
+        case let error as AnywhereError: error.logLevel
+        case is CancellationError: nil
+        case let error as URLError where error.code == .cancelled: nil
         default: .error
         }
+    }
+
+    static func isPeerClose(_ error: any Error) -> Bool {
+        (error as? AnywhereError)?.isPeerClose ?? false
     }
 
     static func isTermination(_ error: any Error) -> Bool {
@@ -712,20 +721,12 @@ nonisolated extension AnywhereError {
 
 nonisolated extension AnywhereLogger {
     func report(_ message: @autoclosure () -> String, error: any Error) {
-        emit("\(message()): \(AnywhereError.describe(error))", at: AnywhereError.severity(of: error))
+        guard let level = AnywhereError.logLevel(of: error) else { return }
+        log("\(message()): \(AnywhereError.logDescription(error))", level: level)
     }
 
     func report(_ error: any Error) {
-        emit((error as? AnywhereError)?.errorDescription ?? AnywhereError.describe(error),
-             at: AnywhereError.severity(of: error))
-    }
-
-    private func emit(_ line: String, at level: Level) {
-        switch level {
-        case .debug: debug(line)
-        case .info: info(line)
-        case .warning: warning(line)
-        case .error: self.error(line)
-        }
+        guard let level = AnywhereError.logLevel(of: error) else { return }
+        log((error as? AnywhereError)?.logLine ?? AnywhereError.describe(error), level: level)
     }
 }

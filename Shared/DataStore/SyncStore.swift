@@ -124,7 +124,7 @@ nonisolated final class SyncStore: Sendable {
         do {
             return try ModelContainer(for: schema, configurations: makeConfiguration())
         } catch {
-            logger.report("Failed to open sync store", error: error)
+            logger.report("[Sync] Store open failed", error: error)
             return nil
         }
     }
@@ -178,9 +178,9 @@ nonisolated final class SyncStore: Sendable {
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             try data.write(to: file)
-            logger.error("Quarantined undecodable \(key.rawValue) payload (\(data.count) bytes) to \(file.lastPathComponent)")
+            logger.error("[Sync] Undecodable \(key.rawValue) payload: \(file.lastPathComponent)")
         } catch {
-            logger.report("Failed to quarantine undecodable \(key.rawValue) payload", error: error)
+            logger.report("[Sync] Quarantine write failed", error: error)
         }
     }
 
@@ -204,7 +204,7 @@ nonisolated final class SyncStore: Sendable {
 
     private func apply(_ key: Key, items: [SyncPayloadItem], order: [String], importedOrderStamp: Date?) {
         for item in items where item.payload.count > Self.maxSyncedPayloadBytes {
-            logger.warning("\(key.rawValue) item \(item.id) is \(item.payload.count) bytes and exceeds the sync size limit; it will not sync to other devices")
+            logger.warning("[Sync] \(key.rawValue) \(item.id): Payload too large")
         }
         let changes = store.withLock { container -> [SyncChange] in
             guard let container else { return [] }
@@ -216,7 +216,7 @@ nonisolated final class SyncStore: Sendable {
             do {
                 try context.save()
             } catch {
-                logger.report("Failed to save \(key.rawValue) items", error: error)
+                logger.report("[Sync] \(key.rawValue) save failed", error: error)
                 return []
             }
             var changes = changedIDs.map { SyncChange.save(SyncItemRef(key: key, itemID: $0)) }
@@ -250,7 +250,7 @@ nonisolated final class SyncStore: Sendable {
             do {
                 try context.save()
             } catch {
-                logger.report("Failed to reconcile sync items", error: error)
+                logger.report("[Sync] Reconcile failed", error: error)
                 return []
             }
             return deletions
@@ -418,7 +418,7 @@ nonisolated final class SyncStore: Sendable {
             do {
                 try context.save()
             } catch {
-                logger.report("Failed to apply remote sync changes", error: error)
+                logger.report("[Sync] Remote changes save failed", error: error)
                 changedKeys = []
                 reuploads = saves.map { .save($0.ref) }
             }
@@ -621,7 +621,7 @@ nonisolated enum SyncCodec {
                 let payload = try encoder.encode(item)
                 return SyncPayloadItem(id: item.id.uuidString, payload: payload, updatedAt: item.syncStamp, deletedAt: item.deletedAt)
             } catch {
-                logger.report("Failed to encode \(T.self) \(item.id)", error: error)
+                logger.report("[Sync] \(T.self) \(item.id) encode failed", error: error)
                 return nil
             }
         }

@@ -221,8 +221,6 @@ extension TLSClient {
                                 fullTranscript.append(hsMessage)
                                 if let decompressed = decompressCertificate(hsBody) {
                                     parseTLS13CertificateMessage(decompressed)
-                                } else {
-                                    logger.warning("[TLS] Failed to decompress CompressedCertificate")
                                 }
                                 
                             default:
@@ -468,7 +466,7 @@ extension TLSClient {
         case 0x0001: compressionAlgorithm = COMPRESSION_ZLIB
         case 0x0002: compressionAlgorithm = COMPRESSION_BROTLI
         default:
-            logger.warning("[TLS] Unknown certificate compression algorithm: 0x\(String(format: "%04x", algorithm))")
+            logger.warning("[TLS] Unsupported certificate compression: 0x\(String(format: "%04x", algorithm))")
             return nil
         }
 
@@ -486,7 +484,7 @@ extension TLSClient {
             }
         }
         guard decodedSize == uncompressedLength else {
-            logger.warning("[TLS] Certificate decompression failed (algorithm: 0x\(String(format: "%04x", algorithm)))")
+            logger.warning("[TLS] Certificate decompression failed: 0x\(String(format: "%04x", algorithm))")
             return nil
         }
         return decompressed

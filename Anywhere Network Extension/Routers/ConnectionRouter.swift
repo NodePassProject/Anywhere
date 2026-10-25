@@ -8,8 +8,6 @@
 import Foundation
 import Synchronization
 
-nonisolated private let logger = AnywhereLogger(category: "ConnectionRouter")
-
 nonisolated struct RouteDecision {
     enum Action {
         case route(target: RouteTarget, configuration: ProxyConfiguration?, ruleSetName: String?)
@@ -46,7 +44,7 @@ nonisolated final class ConnectionRouter: Sendable {
         self.domainRouter = domainRouter
     }
 
-    func decision(forIP ip: String, port: UInt16, proto: String) -> RouteDecision {
+    func decision(forIP ip: String) -> RouteDecision {
         guard FakeIPPool.isFakeIP(ip) else {
             guard let match = domainRouter.matchIP(ip) else {
                 return RouteDecision(host: ip, hostIsResolvedDomain: false, action: .route(target: .default, configuration: nil, ruleSetName: nil))
@@ -54,21 +52,11 @@ nonisolated final class ConnectionRouter: Sendable {
             return RouteDecision(
                 host: ip,
                 hostIsResolvedDomain: false,
-                action: markingIfRejectedIP(
-                    action(
-                        for: match,
-                        host: ip,
-                        port: port,
-                        ruleKind: "IP",
-                        proto: proto
-                    ),
-                    ip: ip
-                )
+                action: markingIfRejectedIP(action(for: match), ip: ip)
             )
         }
 
         guard let entry = fakeIPPool.lookup(ip: ip) else {
-            logger.debug("[\(proto)] Fake IP not in pool (stale): \(ip):\(port)")
             return RouteDecision(host: ip, hostIsResolvedDomain: false, action: .unreachable)
         }
         let domain = entry.domain
@@ -86,16 +74,7 @@ nonisolated final class ConnectionRouter: Sendable {
             return RouteDecision(
                 host: domain,
                 hostIsResolvedDomain: true,
-                action: markingIfRejected(
-                    action(
-                        for: match,
-                        host: domain,
-                        port: port,
-                        ruleKind: "domain",
-                        proto: proto
-                    ),
-                    domain: domain
-                )
+                action: markingIfRejected(action(for: match), domain: domain)
             )
         }
 
@@ -105,16 +84,7 @@ nonisolated final class ConnectionRouter: Sendable {
                     return RouteDecision(
                         host: domain,
                         hostIsResolvedDomain: true,
-                        action: markingIfRejected(
-                            action(
-                                for: match,
-                                host: "\(domain) → \(resolvedIP)",
-                                port: port,
-                                ruleKind: "IP",
-                                proto: proto
-                            ),
-                            domain: domain
-                        )
+                        action: markingIfRejected(action(for: match), domain: domain)
                     )
                 }
             } else {
@@ -152,24 +122,18 @@ nonisolated final class ConnectionRouter: Sendable {
     private func markIPRejected(_ ip: String) {
         var v4 = in_addr()
         var v6 = in6_addr()
-        let inserted: Bool
         if inet_pton(AF_INET, ip, &v4) == 1 {
             let key = UInt32(bigEndian: v4.s_addr)
-            inserted = rejectedIPs.withLock { set in
+            rejectedIPs.withLock { set in
                 if set.count >= Self.rejectedIPCap { set = RejectedIPs() }
-                return set.v4.insert(key).inserted
+                set.v4.insert(key)
             }
         } else if inet_pton(AF_INET6, ip, &v6) == 1 {
             let key = withUnsafeBytes(of: v6) { $0.loadUnaligned(as: SIMD16<UInt8>.self) }
-            inserted = rejectedIPs.withLock { set in
+            rejectedIPs.withLock { set in
                 if set.count >= Self.rejectedIPCap { set = RejectedIPs() }
-                return set.v6.insert(key).inserted
+                set.v6.insert(key)
             }
-        } else {
-            inserted = false
-        }
-        if inserted {
-            logger.debug("[ConnectionRouter] Reject-marked IP \(ip)")
         }
     }
 
@@ -217,31 +181,21 @@ nonisolated final class ConnectionRouter: Sendable {
 
     // MARK: - Sniffed host
 
-    func action(forSniffedHost host: String, port: UInt16, proto: String) -> RouteDecision.Action? {
+    func action(forSniffedHost host: String) -> RouteDecision.Action? {
         guard let match = domainRouter.matchDomain(host) else { return nil }
-        return action(for: match, host: host, port: port, ruleKind: "SNI", proto: proto)
+        return action(for: match)
     }
 
-    private func action(
-        for match: DomainRouter.Match,
-        host: String,
-        port: UInt16,
-        ruleKind: String,
-        proto: String
-    ) -> RouteDecision.Action {
+    private func action(for match: DomainRouter.Match) -> RouteDecision.Action {
         switch match.action {
         case .default, .defaultProxy:
             return .route(target: match.action, configuration: nil, ruleSetName: match.ruleSetName)
         case .direct:
             return .route(target: .direct, configuration: nil, ruleSetName: match.ruleSetName)
         case .reject:
-            logger.debug("[\(proto)] Rejected by \(ruleKind) rule: \(host):\(port)")
             return .reject(ruleSetName: match.ruleSetName)
         case .proxy(let id):
             let configuration = domainRouter.resolveConfiguration(action: match.action)
-            if configuration == nil {
-                logger.report("[\(proto)]", error: AnywhereError.routing(.configurationMissing(host: host)))
-            }
             return .route(target: .proxy(id), configuration: configuration, ruleSetName: match.ruleSetName)
         }
     }

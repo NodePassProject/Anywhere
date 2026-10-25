@@ -35,15 +35,16 @@ nonisolated enum LatencyTester {
                 return result
             }
             return .success(latencyMilliseconds)
-        } catch let error as AnywhereError {
-            if case .tls(.certificateValidationFailed) = error {
-                logger.error("Latency test insecure for \(configuration.name): \(error.localizedDescription)")
-                return .insecure
+        } catch is CancellationError {
+            if !Task.isCancelled {
+                logger.error("[Latency] \(configuration.name): Timed out")
             }
-            logger.error("Latency test failed for \(configuration.name): \(error.localizedDescription)")
             return .failed
         } catch {
-            logger.error("Latency test failed for \(configuration.name): \(error.localizedDescription)")
+            logger.report("[Latency] \(configuration.name)", error: error)
+            if case AnywhereError.tls(.certificateValidationFailed) = error {
+                return .insecure
+            }
             return .failed
         }
     }

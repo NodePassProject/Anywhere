@@ -54,7 +54,7 @@ extension QUICConnectionCore {
         pendingDatagrams.removeFirst(overflow)
         if !didWarnDatagramOverflow {
             didWarnDatagramOverflow = true
-            logger.warning("[QUIC] Datagram send queue overflowed (cap \(Self.maxPendingDatagrams)); dropping oldest")
+            logger.warning("[QUIC] \(host): Datagram queue full")
         }
         let overflowError = AnywhereError.quic(.connectionFailed(detail: "Datagram send queue overflowed"))
         for d in dropped { d.latch?.settle(overflowError) }

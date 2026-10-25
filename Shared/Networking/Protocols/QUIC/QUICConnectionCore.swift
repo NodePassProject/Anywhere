@@ -76,7 +76,7 @@ nonisolated final class QUICConnectionCore: QUICPublishingState {
         let old = phase
         guard Phase.transition(&phase, to: new) else {
             if new != .closed {
-                logger.error("[QUIC] Invalid transition \(old) → \(new) for \(host); ignored")
+                logger.error("[QUIC] \(host): Invalid transition: \(old) → \(new)")
             }
             return false
         }

@@ -8,8 +8,6 @@
 import Foundation
 import Synchronization
 
-nonisolated private let logger = AnywhereLogger(category: "MITMHTTP2Rewriter")
-
 nonisolated final class MITMHTTP2Rewriter: Sendable {
     let host: String
 

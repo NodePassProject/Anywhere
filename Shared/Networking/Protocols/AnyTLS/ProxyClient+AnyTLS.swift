@@ -7,8 +7,6 @@
 
 import Foundation
 
-nonisolated private let logger = AnywhereLogger(category: "ProxyClient+AnyTLS")
-
 extension ProxyClient {
     func connectWithAnyTLS(_ request: ProxyRequest) async throws -> ProxyConnection {
         guard let anytls = configuration.anytls, !anytls.password.isEmpty,

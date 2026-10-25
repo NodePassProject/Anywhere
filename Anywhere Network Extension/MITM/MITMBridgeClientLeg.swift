@@ -286,7 +286,6 @@ actor MITMBridgeClientLeg: MITMResponseSink {
         receiveBuffer = MITMByteBuffer()
         pending = nil
         sendGoAwayToClient(code: code)
-        logger.warning("bridge \(host): \(message); tearing down")
         delegate?.clientLegFatalError(message)
     }
 
@@ -447,21 +446,21 @@ actor MITMBridgeClientLeg: MITMResponseSink {
         if isNewStream { highestStreamID = streamID }
 
         guard MITMBridgeHeaders.pseudoHeadersValid(decoded, isRequest: true) else {
-            logger.warning("bridge \(host) stream \(streamID): malformed pseudo-header section; RST")
+            logger.warning("[MITM] \(host): HTTP/2 client: Malformed pseudo-headers")
             rstToClient(streamID, errorCode: Codec.ErrorCode.protocolError,
                         abortUpstream: requestStreams[streamID] != nil)
             return false
         }
 
         if let invalidOctet = HTTPHeader.firstInvalidOctet(decoded) {
-            logger.warning("bridge \(host) stream \(streamID): header rejected — \(invalidOctet.reason) on \"\(HTTPHeader.escapedForLog(invalidOctet.name))\"; RST")
+            logger.warning("[MITM] \(host): HTTP/2 client: Invalid header: \(HTTPHeader.escapedForLog(invalidOctet.name)): \(invalidOctet.reason)")
             rstToClient(streamID, errorCode: Codec.ErrorCode.protocolError,
                         abortUpstream: requestStreams[streamID] != nil)
             return false
         }
 
         guard MITMBridgeHeaders.h2ConnectionHeadersAbsent(decoded) else {
-            logger.warning("bridge \(host) stream \(streamID): connection-specific header in HTTP/2; RST")
+            logger.warning("[MITM] \(host): HTTP/2 client: Connection-specific header")
             rstToClient(streamID, errorCode: Codec.ErrorCode.protocolError,
                         abortUpstream: requestStreams[streamID] != nil)
             return false
@@ -469,17 +468,17 @@ actor MITMBridgeClientLeg: MITMResponseSink {
 
         if HTTPHeader.firstValue(in: decoded, named: ":method") == nil {
             guard requestStreams[streamID] != nil else {
-                logger.warning("bridge \(host) stream \(streamID): request HEADERS missing :method; RST")
+                logger.warning("[MITM] \(host): HTTP/2 client: Missing :method")
                 rstToClient(streamID, errorCode: Codec.ErrorCode.protocolError, abortUpstream: false)
                 return false
             }
             guard endStream else {
-                logger.warning("bridge \(host) stream \(streamID): trailer HEADERS without END_STREAM; RST")
+                logger.warning("[MITM] \(host): HTTP/2 client: Trailers without END_STREAM")
                 rstToClient(streamID, errorCode: Codec.ErrorCode.protocolError, abortUpstream: true)
                 return false
             }
             guard !decoded.contains(where: { $0.name.hasPrefix(":") }) else {
-                logger.warning("bridge \(host) stream \(streamID): pseudo-header in request trailer; RST")
+                logger.warning("[MITM] \(host): HTTP/2 client: Pseudo-header in trailers")
                 rstToClient(streamID, errorCode: Codec.ErrorCode.protocolError, abortUpstream: true)
                 return false
             }
@@ -498,19 +497,18 @@ actor MITMBridgeClientLeg: MITMResponseSink {
         streamMethods[streamID] = method.uppercased()
 
         if method.uppercased() == "CONNECT" {
-            logger.warning("bridge \(host) stream \(streamID): CONNECT can't bridge; RST HTTP_1_1_REQUIRED")
             rstToClient(streamID, errorCode: Codec.ErrorCode.http11Required, abortUpstream: false)
             return false
         }
 
         guard MITMBridgeHeaders.requestPseudoHeadersComplete(decoded) else {
-            logger.warning("bridge \(host) stream \(streamID): request missing/inconsistent required pseudo-header; RST")
+            logger.warning("[MITM] \(host): HTTP/2 client: Incomplete pseudo-headers")
             rstToClient(streamID, errorCode: Codec.ErrorCode.protocolError, abortUpstream: false)
             return false
         }
 
         if requestStreams.count + paceStates.count >= Self.maxTrackedStreams {
-            logger.warning("bridge \(host) stream \(streamID): tracked-stream cap reached; REFUSED_STREAM")
+            logger.warning("[MITM] \(host): Bridge stream limit reached")
             rstToClient(streamID, errorCode: Codec.ErrorCode.refusedStream, abortUpstream: false)
             return false
         }
@@ -556,7 +554,7 @@ actor MITMBridgeClientLeg: MITMResponseSink {
         }
 
         if rewriter.hasStreamScriptRule(phase: .httpRequest, verdicts: gates.post) {
-            logger.warning("bridge \(host) stream \(streamID): request stream-script not supported on the bridge; forwarding body unscripted")
+            logger.warning("[MITM] \(host): streamScript unsupported on bridged request")
         }
 
         let hasBufferedRule = rewriter.hasBufferedBodyRule(phase: .httpRequest, verdicts: gates.post)
@@ -671,7 +669,7 @@ actor MITMBridgeClientLeg: MITMResponseSink {
         guard HTTPHeader.isValidName(method),
               HTTPHeader.isValidValue(path), !path.utf8.contains(0x20),
               HTTPHeader.isValidValue(authority) else {
-            logger.warning("bridge \(host): refusing request with malformed pseudo-header")
+            logger.warning("[MITM] \(host): HTTP/2 client: Malformed pseudo-headers")
             return nil
         }
         return MITMRequestHead(
@@ -725,13 +723,13 @@ actor MITMBridgeClientLeg: MITMResponseSink {
             }
             if let remaining {
                 guard body.count <= remaining else {
-                    logger.warning("bridge \(host) stream \(id): request body exceeds Content-Length; resetting")
+                    logger.warning("[MITM] \(host): HTTP/2 client: Body exceeds Content-Length")
                     rstToClient(id, errorCode: Codec.ErrorCode.protocolError, abortUpstream: true)
                     return false
                 }
                 let left = remaining - body.count
                 guard !(endStream && left != 0) else {
-                    logger.warning("bridge \(host) stream \(id): request body shorter than Content-Length; resetting")
+                    logger.warning("[MITM] \(host): HTTP/2 client: Body shorter than Content-Length")
                     rstToClient(id, errorCode: Codec.ErrorCode.protocolError, abortUpstream: true)
                     return false
                 }
@@ -775,7 +773,7 @@ actor MITMBridgeClientLeg: MITMResponseSink {
         switch requestStreams[streamID] {
         case .streaming(let remaining):
             if let remaining, remaining != 0 {
-                logger.warning("bridge \(host) stream \(streamID): request ended before Content-Length; resetting (RFC 9113 §8.1.2.6)")
+                logger.warning("[MITM] \(host): HTTP/2 client: Body shorter than Content-Length")
                 rstToClient(streamID, errorCode: Codec.ErrorCode.protocolError, abortUpstream: true)
                 return false
             }
@@ -794,7 +792,7 @@ actor MITMBridgeClientLeg: MITMResponseSink {
     }
 
     private func abandonBufferedToChunked(streamID: UInt32, buffer: BufferedRequest) -> Bool {
-        logger.warning("bridge \(host) stream \(streamID): request body over buffer cap; streaming remainder chunked")
+        logger.warning("[MITM] \(host): Body too large for rewrite")
         guard let head = makeRequestHead(
             streamID: streamID,
             rewritten: buffer.rewrittenHeaders,
@@ -944,11 +942,11 @@ actor MITMBridgeClientLeg: MITMResponseSink {
     private func answerWithSynthesizedResponse(streamID: UInt32, response: MITMScriptEngine.SynthesizedResponse) {
         requestStreams[streamID] = .answeredWithSynthesizedResponse
         let sanitized = response.sanitizedHeaders(lowercaseNames: true) { name in
-            logger.warning("[MITM][JS] bridge \(host): Anywhere.respond dropping invalid header: \(name)")
+            logger.warning("[Script] Anywhere.respond: Invalid header: \(name)")
         }
         let headers = response.withDateStamp(sanitized, lowercaseName: true)
-        let body = response.truncatedBody(cap: MITMBodyCodec.maxBufferedBodyBytes) { size in
-            logger.warning("[MITM][JS] bridge \(host): Anywhere.respond body \(size) B over cap; truncating")
+        let body = response.truncatedBody(cap: MITMBodyCodec.maxBufferedBodyBytes) {
+            logger.warning("[Script] Anywhere.respond: Body too large")
         }
         deliverResponseHead(streamID: streamID, status: response.status, headers: headers, endStream: body.isEmpty)
         if !body.isEmpty { deliverResponseData(streamID: streamID, body, endStream: true) }
@@ -1063,14 +1061,14 @@ actor MITMBridgeClientLeg: MITMResponseSink {
         flushResponse(streamID)
         guard let backlog = paceStates[streamID]?.pending.count, backlog > 0 else { return }
         if backlog > Self.maxClientBufferedBytes {
-            logger.warning("bridge \(host) stream \(streamID): client-bound backlog \(backlog) B over cap; resetting stream")
+            logger.warning("[MITM] \(host): Downstream buffer full")
             rstToClient(streamID, errorCode: Codec.ErrorCode.internalError, abortUpstream: true)
             return
         }
         let total = paceStates.values.reduce(0) { $0 + $1.pending.count }
         if total > Self.maxClientBufferedBytesTotal,
            let victim = paceStates.max(by: { $0.value.pending.count < $1.value.pending.count })?.key {
-            logger.warning("bridge \(host): client-bound backlog \(total) B across streams over cap; resetting largest stream \(victim)")
+            logger.warning("[MITM] \(host): Downstream buffer full")
             rstToClient(victim, errorCode: Codec.ErrorCode.internalError, abortUpstream: true)
         }
     }

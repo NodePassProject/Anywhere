@@ -246,14 +246,11 @@ actor TunnelStack {
     func transition(to new: TunnelPhase) -> Bool {
         let old = phase
         guard TunnelPhase.transition(&phase, to: new) else {
-            if new == .starting {
-                logger.debug("[Lifecycle] Start claim declined; phase is \(old)")
-            } else {
-                logger.error("[Lifecycle] Invalid transition \(old) → \(new); ignored")
+            if new != .starting {
+                logger.error("[TunnelStack] Invalid transition: \(old) → \(new)")
             }
             return false
         }
-        logger.debug("[Lifecycle] \(old) → \(new)")
         publishedPhase.store(new, ordering: .relaxed)
         return true
     }
@@ -307,6 +304,9 @@ actor TunnelStack {
     nonisolated func appendLog(_ message: String, level: TunnelLogLevel) {
         let now = CFAbsoluteTimeGetCurrent()
         logEntries.withLock { entries in
+            if let index = entries.lastIndex(where: { $0.level == level && $0.message == message }) {
+                entries.remove(at: index)
+            }
             entries.append(TunnelLogEntry(timestamp: now, level: level, message: message))
             Self.compactLogs(&entries, now: now)
         }
@@ -433,7 +433,7 @@ actor TunnelStack {
 
     nonisolated let tcpBufferLedger = TCPBufferLedger(budget: TunnelConstants.tcpGlobalBufferBudget)
 
-    nonisolated let tcpPressureLog = Mutex(PressureEventThrottle(label: "TCP", cap: TunnelLimits.tcpMaxConnections))
+    nonisolated let tcpPressureLog = Mutex(PressureEventThrottle(message: "[TCP] Connection table full"))
     nonisolated let tcpConnections = Mutex(TCPConnectionTable())
 
     nonisolated func removeTCPConnection(_ id: ObjectIdentifier) {
@@ -553,7 +553,7 @@ actor TunnelStack {
             _mitmLeafCache.withLock { $0 = nil }
         }
         guard mitmCertificateStore.isCATrusted() else {
-            logger.warning("[VPN] MITM is enabled but the root certificate is not installed or trusted; MITM stays off")
+            logger.error("[MITM] Root certificate not trusted")
             _mitmEnabled.store(false, ordering: .relaxed)
             mitmPolicy.reset()
             return

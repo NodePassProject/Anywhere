@@ -115,6 +115,7 @@ actor UDPFlow {
     private var pendingData: [Data] = []
     private let ledger: UDPBufferLedger
     private var didWarnBufferDrop = false
+    private var didWarnSendFailure = false
 
     private enum Job: Sendable {
         case send(Data)
@@ -159,18 +160,10 @@ actor UDPFlow {
         failureReporter.report(operation: operation, endpoint: "\(flowKey)", error: error)
     }
 
-    nonisolated private func logTransientSendFailure(_ error: Error) {
-        TransportErrorLogger.logTransientSend(
-            endpoint: "\(flowKey)",
-            error: error,
-            logger: logger,
-            prefix: "[UDP]"
-        )
-    }
-
     private func noteTransientSendFailure(_ error: Error) {
-        guard phase != .closed, !AnywhereError.isTermination(error) else { return }
-        logTransientSendFailure(error)
+        guard phase != .closed, !didWarnSendFailure, let level = AnywhereError.logLevel(of: error) else { return }
+        didWarnSendFailure = true
+        logger.log("[UDP] \(flowKey): Send failed: \(AnywhereError.logDescription(error))", level: min(level, .warning))
     }
 
     private func handleProxySendError(_ error: Error, connection: ProxyConnection) async {
@@ -179,7 +172,7 @@ actor UDPFlow {
             reportFailure("Send", error: error)
             await closeAndRemove()
         } else {
-            logTransientSendFailure(error)
+            noteTransientSendFailure(error)
         }
     }
 
@@ -264,14 +257,14 @@ actor UDPFlow {
             return true
         case .selfEvicted(let victims):
             evictOthers(victims)
-            logger.warning("[UDP] Global uplink budget full and \(flowKey) holds the largest backlog; evicting flow")
+            logger.warning("[UDP] Uplink buffer full")
             close()
             Task { [plane] in await plane?.remove(self) }
             return false
         case .dropped:
             if !didWarnBufferDrop {
                 didWarnBufferDrop = true
-                logger.warning("[UDP] Dropping datagrams for \(flowKey); global uplink budget exhausted")
+                logger.warning("[UDP] Uplink buffer full")
             }
             return false
         }
@@ -438,9 +431,7 @@ actor UDPFlow {
             }
 
         case .failure(let error):
-            if case AnywhereError.routing(.dropped) = error {} else {
-                reportFailure("Connect", error: error)
-            }
+            reportFailure("Connect", error: error)
             await closeAndRemove()
         }
     }
@@ -545,9 +536,7 @@ actor UDPFlow {
             }
 
         case .failure(let error):
-            if case AnywhereError.routing(.dropped) = error {} else {
-                reportFailure("Connect", error: error)
-            }
+            reportFailure("Connect", error: error)
             await closeAndRemove()
         }
     }
@@ -569,7 +558,7 @@ actor UDPFlow {
 
     private func receiveClosed(operation: String, error: Error?) async {
         guard phase != .closed else { return }
-        if let error {
+        if let error, !AnywhereError.isPeerClose(error) {
             reportFailure(operation, error: error)
         }
         await closeAndRemove()

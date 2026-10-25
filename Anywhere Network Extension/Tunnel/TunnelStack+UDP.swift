@@ -8,8 +8,6 @@
 import Foundation
 import AnywhereIP
 
-nonisolated private let logger = AnywhereLogger(category: "TunnelStack+UDP")
-
 extension TunnelStack {
     static func isSTUNMessage(_ payload: Data) -> Bool {
         guard payload.count >= 20 else { return false }

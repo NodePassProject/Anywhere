@@ -15,7 +15,7 @@ nonisolated final class ECHResolver: Sendable {
     static let negativeTTL: TimeInterval = 30
     static let queryTimeout: TimeInterval = 5
 
-    private let cache = DNSLookupCache<String, Data?>(name: "ECH", capacity: DNSResolver.maxEntries, missing: nil)
+    private let cache = DNSLookupCache<String, Data?>(capacity: DNSResolver.maxEntries, missing: nil)
     private let blockingBridge = DNSSyscallConcurrencyBridge()
 
     private init() {}

@@ -72,12 +72,11 @@ extension TunnelStack {
             tcpPressureLog.withLock { $0.noteDropped(now: now, logger: logger) }
             return false
         }
-        victim.connection.evictForConnectionPressure(idleFor: victim.idleFor)
-        tcpPressureLog.withLock { $0.noteEvicted(now: now, logger: logger) }
+        victim.evictForConnectionPressure()
         return true
     }
 
-    nonisolated private func findPressureVictim(now: TimeInterval) -> (connection: TCPConnection, idleFor: TimeInterval)? {
+    nonisolated private func findPressureVictim(now: TimeInterval) -> TCPConnection? {
         var establishing: (connection: TCPConnection, idleFor: TimeInterval)?
         var established: (connection: TCPConnection, idleFor: TimeInterval)?
         for delegate in tcpConnections.withLock({ Array($0.connections.values) }) {
@@ -89,17 +88,16 @@ extension TunnelStack {
                 if idleFor > (established?.idleFor ?? -1) { established = (delegate, idleFor) }
             }
         }
-        return establishing ?? established
+        return (establishing ?? established)?.connection
     }
 
     private func accept(_ pending: PendingConnection, generation: UInt64) -> TCPConnection? {
         guard dataPlaneUp, dataPlaneGeneration.load(ordering: .acquiring) == generation, let defaultConfiguration = configuration else {
-            logger.debug("[TunnelStack] tcp_accept: guard failed")
             pending.reject(); return nil
         }
         let dstIPString = pending.destination.address.description
         let dstPort = pending.destination.port
-        let decision = connectionRouter.decision(forIP: dstIPString, port: dstPort, proto: "TCP")
+        let decision = connectionRouter.decision(forIP: dstIPString)
 
         var connectionConfiguration = defaultConfiguration
         var routeTarget: RouteTarget = .default
@@ -120,11 +118,8 @@ extension TunnelStack {
                 routeTarget: .reject,
                 ruleSetName: matchedRuleSet
             )
-            let reason = decision.hostIsResolvedDomain ? "fake-IP domain rule" : "IP rule"
-            logger.debug("[TCP] Rejected by \(reason) (going dark): \(decision.host):\(dstPort)")
             pending.reject(reset: false); return nil
         case .unreachable:
-            logger.debug("[TCP] Aborted (stale fake-IP): \(dstIPString):\(dstPort)")
             pending.reject(); return nil
         }
 

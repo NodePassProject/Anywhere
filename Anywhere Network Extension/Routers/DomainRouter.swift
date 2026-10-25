@@ -123,20 +123,22 @@ nonisolated final class DomainRouter: Sendable {
 
     private static func makeRoutingState() -> RoutingState {
         var state = RoutingState()
-        guard let data = AWCore.getRoutingData() else {
-            logger.debug("[DomainRouter] No routing data available")
-            return state
-        }
+        guard let data = AWCore.getRoutingData() else { return state }
 
         do {
-            try data.withUnsafeBytes { raw in
+            let unresolvedEntries = try data.withUnsafeBytes { raw -> [Int] in
                 let base = raw.bindMemory(to: UInt8.self)
                 var reader = RoutingBinaryReader(bytes: base, data: data)
                 try reader.run(state: &state)
                 state.matcher.finalize(base: base)
+                return reader.unresolvedEntries
+            }
+            for index in unresolvedEntries {
+                let name = index < state.ruleSetNames.count ? state.ruleSetNames[index] : ""
+                logger.warning("[Routing] \(name.isEmpty ? "#\(index)" : name): Proxy not found")
             }
         } catch {
-            logger.report("[DomainRouter] Routing payload parse failed", error: error)
+            logger.report(error)
             return RoutingState()
         }
         
@@ -153,6 +155,7 @@ nonisolated final class DomainRouter: Sendable {
         
         private var version: RoutingBinaryFormat.Version = .v2
         private var legacyDefaultTargetId: UUID?
+        private(set) var unresolvedEntries: [Int] = []
 
         init(bytes: UnsafeBufferPointer<UInt8>, data: Data) {
             self.bytes = bytes
@@ -201,6 +204,9 @@ nonisolated final class DomainRouter: Sendable {
         private mutating func readEntry(state: inout RoutingState, entryIndex: UInt16) throws(AnywhereError) {
             let tier = try readTier()
             let action = try readAction(configurations: state.configurationMap)
+            if case .proxy(let id) = action, state.configurationMap[id] == nil {
+                unresolvedEntries.append(Int(entryIndex))
+            }
             let payload = RulePayload(action: action, entryIndex: entryIndex)
 
             var remainingRules = try u32()

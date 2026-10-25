@@ -77,7 +77,7 @@ actor CloudSync {
                 do {
                     try await engine.fetchChanges()
                 } catch {
-                    logger.report("Initial sync fetch failed", error: error)
+                    logger.report("[Sync] Initial fetch failed", error: error)
                 }
             }
         } else {
@@ -116,16 +116,10 @@ actor CloudSync {
 
     private func handleAccountChange(_ event: CKSyncEngine.Event.AccountChange) {
         switch event.changeType {
-        case .signIn:
-            logger.info("iCloud account signed in; uploading local data")
-            store.clearAllSystemFields()
-            requeueAllItems()
-        case .switchAccounts:
-            logger.info("iCloud account switched; merging local data into the active account")
+        case .signIn, .switchAccounts:
             store.clearAllSystemFields()
             requeueAllItems()
         case .signOut:
-            logger.info("iCloud account signed out")
             store.clearAllSystemFields()
         @unknown default:
             break
@@ -137,12 +131,10 @@ actor CloudSync {
         guard !deletions.isEmpty else { return }
         store.clearAllSystemFields()
         if deletions.contains(where: { $0.reason == .purged }) {
-            logger.error("Sync zone was purged from iCloud; disabling iCloud Sync")
             AWCore.setICloudSyncEnabled(false)
             syncEnabledDidChange()
             return
         }
-        logger.info("Sync zone was deleted remotely; re-uploading local data")
         requeueAllItems()
     }
 
@@ -151,7 +143,7 @@ actor CloudSync {
         var deletes: [SyncItemRef] = []
         for modification in event.modifications {
             guard let item = Self.remoteItem(from: modification.record) else {
-                logger.error("Ignoring unreadable record \(modification.record.recordID.recordName)")
+                logger.error("[Sync] Unreadable record: \(modification.record.recordID.recordName)")
                 continue
             }
             saves.append(item)
@@ -191,21 +183,30 @@ actor CloudSync {
                 fieldUpdates.append((ref, nil))
                 engine.state.add(pendingRecordZoneChanges: [.saveRecord(recordID)])
             case .quotaExceeded:
-                logger.error("iCloud storage is full; will retry \(recordID.recordName)")
+                logger.error("[Sync] iCloud quota exceeded")
                 engine.state.add(pendingRecordZoneChanges: [.saveRecord(recordID)])
-            case .networkFailure, .networkUnavailable, .zoneBusy, .serviceUnavailable,
-                 .notAuthenticated, .accountTemporarilyUnavailable, .serverResponseLost, .changeTokenExpired:
-                break
             default:
-                logger.error("Failed to save record \(recordID.recordName): \(failure.error.localizedDescription)")
+                if !Self.isTransient(failure.error) {
+                    logger.report("[Sync] \(recordID.recordName) save failed", error: failure.error)
+                }
             }
         }
         store.storeSystemFields(fieldUpdates)
-        if !event.failedRecordDeletes.isEmpty {
-            logger.error("Failed to delete \(event.failedRecordDeletes.count) records")
+        for (recordID, error) in event.failedRecordDeletes where !Self.isTransient(error) {
+            logger.report("[Sync] \(recordID.recordName) delete failed", error: error)
         }
         guard !conflicts.isEmpty else { return }
         scheduleReload(store.applyRemote(saves: conflicts, deletes: []))
+    }
+
+    private static func isTransient(_ error: CKError) -> Bool {
+        switch error.code {
+        case .networkFailure, .networkUnavailable, .zoneBusy, .serviceUnavailable,
+             .notAuthenticated, .accountTemporarilyUnavailable, .serverResponseLost, .changeTokenExpired:
+            true
+        default:
+            false
+        }
     }
 
     // MARK: - Reload coalescing
@@ -296,7 +297,7 @@ actor CloudSync {
         do {
             try JSONEncoder().encode(state).write(to: url, options: .atomic)
         } catch {
-            logger.report("Failed to persist sync engine state", error: error)
+            logger.report("[Sync] Engine state save failed", error: error)
         }
     }
 
@@ -349,7 +350,6 @@ extension CloudSync: CKSyncEngineDelegate {
                 return nil
             }
             guard snapshot.payload.count <= SyncStore.maxSyncedPayloadBytes else {
-                logger.error("Skipping oversized \(ref.key.rawValue) payload (\(snapshot.payload.count) bytes) for \(ref.itemID)")
                 syncEngine.state.remove(pendingRecordZoneChanges: [.saveRecord(recordID)])
                 return nil
             }

@@ -8,8 +8,6 @@
 import Foundation
 import Synchronization
 
-nonisolated private let logger = AnywhereLogger(category: "HysteriaUDPConnection")
-
 actor HysteriaUDPConnection {
 
     private let session: HysteriaSession

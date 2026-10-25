@@ -30,7 +30,7 @@ actor UDPPlane {
     
     nonisolated private let bufferLedger = UDPBufferLedger(budget: TunnelConstants.udpGlobalBufferBudget)
 
-    private var udpPressureLog = PressureEventThrottle(label: "UDP", cap: TunnelLimits.udpMaxFlows)
+    private var udpPressureLog = PressureEventThrottle(message: "[UDP] Flow table full")
 
     private struct PendingDatagrams {
         var datagrams: [InboundDatagram] = []
@@ -137,7 +137,7 @@ actor UDPPlane {
         guard pendingResolutions.count < TunnelLimits.udpMaxPendingResolutions else {
             if !pendingResolutionCapWarned {
                 pendingResolutionCapWarned = true
-                logger.warning("[UDP] pending-resolution table full (\(TunnelLimits.udpMaxPendingResolutions)); new flows dial on the default outbound")
+                logger.warning("[UDP] Pending-resolution table full")
             }
             return false
         }
@@ -155,7 +155,6 @@ actor UDPPlane {
         guard let pending = pendingResolutions.removeValue(forKey: flowKey) else { return }
         if pendingResolutionCapWarned, pendingResolutions.count <= TunnelLimits.udpMaxPendingResolutions / 2 {
             pendingResolutionCapWarned = false
-            logger.info("[UDP] pending-resolution table drained; waiting on IP-rule lookups again")
         }
         for datagram in pending.datagrams {
             guard stack.publishedPhase.load(ordering: .relaxed) == .running else { return }
@@ -214,7 +213,7 @@ actor UDPPlane {
 
         guard let defaultConfiguration = udpConfig.configuration else { return }
 
-        let decision = stack.connectionRouter.decision(forIP: dstAddress.description, port: dstPort, proto: "UDP")
+        let decision = stack.connectionRouter.decision(forIP: dstAddress.description)
 
         let dstHost = decision.host
 
@@ -253,7 +252,7 @@ actor UDPPlane {
         }
 
         if let sniffedServerName,
-           let action = stack.connectionRouter.action(forSniffedHost: sniffedServerName, port: dstPort, proto: "UDP") {
+           let action = stack.connectionRouter.action(forSniffedHost: sniffedServerName) {
             switch action {
             case .route(let target, let configuration, let matchedRuleSet):
                 routeTarget = target
@@ -346,7 +345,7 @@ actor UDPPlane {
             guard pendingSniffs.count < TunnelLimits.udpMaxPendingSniffs else {
                 if !pendingSniffCapWarned {
                     pendingSniffCapWarned = true
-                    logger.warning("[UDP] pending-sniff table full (\(TunnelLimits.udpMaxPendingSniffs))")
+                    logger.warning("[UDP] Pending-sniff table full")
                 }
                 return .finished(serverName: nil)
             }
@@ -381,7 +380,6 @@ actor UDPPlane {
             return .consumed
         case .found(let serverName):
             notePendingSniffDrained()
-            logger.debug("[UDP] QUIC SNI \(serverName) for \(flowKey)")
             return await releaseHeldDatagrams(pending.datagrams, then: datagram, serverName: serverName)
         case .notQUIC, .unavailable:
             notePendingSniffDrained()
@@ -408,7 +406,6 @@ actor UDPPlane {
         guard let pending = pendingSniffs[flowKey], pending.generation == generation else { return }
         pendingSniffs.removeValue(forKey: flowKey)
         notePendingSniffDrained()
-        logger.debug("[UDP] QUIC sniff deadline passed for \(flowKey)")
         for datagram in pending.datagrams {
             guard stack.publishedPhase.load(ordering: .relaxed) == .running else { return }
             await handleInboundUDP(datagram, sniff: .done(serverName: nil))
@@ -440,7 +437,7 @@ actor UDPPlane {
         for victim in victims {
             guard let flow = flows[victim.handle], ObjectIdentifier(flow) == victim.id else { continue }
             flows.removeValue(forKey: victim.handle)
-            logger.warning("[UDP] Global uplink budget full; evicting \(victim.handle) holding \(victim.bytes) buffered bytes")
+            logger.warning("[UDP] Uplink buffer full")
             Task { await flow.close() }
         }
     }
@@ -467,8 +464,6 @@ actor UDPPlane {
             udpPressureLog.noteDropped(now: now, logger: logger)
             return false
         }
-        logger.debug("[UDP] Flow table full; evicting \(victim.key) idle \(Int(victim.idleFor))s")
-        udpPressureLog.noteEvicted(now: now, logger: logger)
         Task { await flow.close() }
         return true
     }
@@ -566,7 +561,6 @@ actor UDPPlane {
                     routeTarget: .reject,
                     ruleSetName: ruleMatch.ruleSetName
                 )
-                logger.debug("[DNS] Rejected by domain rule: \(domain)")
             }
             guard qtype == 1 || qtype == 28 else {
                 return sendNODATA(answering: datagram, qtype: qtype)
@@ -586,7 +580,7 @@ actor UDPPlane {
 
         guard qtype == 1 else {
             if destination == .anywhereResolver {
-                if await forwardToUpstreamResolver(datagram, domain: domain, qtype: qtype) {
+                if await forwardToUpstreamResolver(datagram) {
                     return true
                 }
                 return sendNODATA(answering: datagram, qtype: qtype)
@@ -604,7 +598,7 @@ actor UDPPlane {
         )
     }
 
-    private func forwardToUpstreamResolver(_ datagram: InboundDatagram, domain: String, qtype: UInt16) async -> Bool {
+    private func forwardToUpstreamResolver(_ datagram: InboundDatagram) async -> Bool {
         let udpConfig = stack.udpConfig()
         guard let defaultConfiguration = udpConfig.configuration else { return false }
 
@@ -623,7 +617,7 @@ actor UDPPlane {
             flows.removeValue(forKey: flowKey)
         }
 
-        let decision = stack.connectionRouter.decision(forIP: upstream, port: dstPort, proto: "UDP")
+        let decision = stack.connectionRouter.decision(forIP: upstream)
 
         var flowConfiguration = defaultConfiguration
         var routeTarget: RouteTarget = .default
@@ -663,7 +657,6 @@ actor UDPPlane {
             ruleSetName: ruleSetName
         )
         insert(flow)
-        logger.debug("[DNS] Forwarding qtype \(qtype) for \(domain) → \(upstream):\(dstPort) via \(flowConfiguration.name)")
         await flow.handleReceivedData([payload])
         return true
     }

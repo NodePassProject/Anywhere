@@ -8,8 +8,6 @@
 import Foundation
 import Synchronization
 
-nonisolated private let logger = AnywhereLogger(category: "ShadowsocksConnection")
-
 // MARK: - ShadowsocksConnection
 
 nonisolated final class ShadowsocksConnection: ProxyConnection {

@@ -32,7 +32,7 @@ nonisolated enum MITMHTTP1Serializer {
                 continue
             }
             guard HTTPHeader.isValidName(name), HTTPHeader.isValidValue(value) else {
-                logger.warning("HTTP/1 bridge \(host): dropping invalid request header \(name)")
+                logger.warning("[MITM] \(host): Invalid request header: \(HTTPHeader.escapedForLog(name))")
                 continue
             }
             safe.append((name: name, value: value))

@@ -19,13 +19,13 @@ nonisolated final class RoutingRulesDatabase: Sendable {
 
     private init() {
         guard let url = AnywhereRules.databaseURL else {
-            logger.error("[RoutingRulesDatabase] Rules.db not found in AnywhereRules bundle")
+            logger.error("[Routing] Rules.db not found")
             self.databaseHandle = Mutex(nil)
             return
         }
         var handle: OpaquePointer?
         if sqlite3_open_v2("\(url.absoluteString)?immutable=1", &handle, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI | SQLITE_OPEN_FULLMUTEX, nil) != SQLITE_OK {
-            logger.error("[RoutingRulesDatabase] Failed to open Rules.db")
+            logger.error("[Routing] Rules.db open failed")
             handle = nil
         }
         self.databaseHandle = Mutex(handle)

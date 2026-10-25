@@ -8,8 +8,6 @@
 import Foundation
 import Synchronization
 
-nonisolated private let logger = AnywhereLogger(category: "RFCMultiplexerRegistry")
-
 nonisolated final class RFCMultiplexerRegistry: Sendable {
     nonisolated static let shared = RFCMultiplexerRegistry()
     
