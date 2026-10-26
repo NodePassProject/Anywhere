@@ -28,7 +28,7 @@ nonisolated enum NowhereMorph {
         var counter: UInt64 = 0
     }
 
-    private static let preludeState = Mutex(PreludeState())
+    private static let preludeState = Mutex(PreludeState(identity: nil, counter: 0))
 
     struct Keys: Hashable, Sendable {
         let tcpClientToServer: Data
