@@ -13,6 +13,7 @@ private enum ProxyType: String {
 }
 
 struct ProxiesView: View {
+    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dismiss) private var dismiss
     @Environment(Operations.self) private var operations
     @Environment(ProxySelection.self) private var proxySelection
@@ -346,16 +347,7 @@ struct ProxiesView: View {
     }
     
     // MARK: - Expansion
-    
-    private func expansionBinding(for id: UUID) -> Binding<Bool> {
-        Binding(
-            get: { expandedContainerId == id },
-            set: { expanded in
-                expandedContainerId = expanded ? id : nil
-            }
-        )
-    }
-    
+
     private func unfoldSelectedProxyContainer() {
         if let chainId = proxySelection.selectedChainId {
             if let group = groupStore.group(containing: chainId, kind: .chains) {
@@ -374,30 +366,208 @@ struct ProxiesView: View {
     
     @ViewBuilder
     private func groupView(_ group: ProxyGroup, @ViewBuilder content: () -> some View) -> some View {
-        GroupView(
-            group: group,
-            memberCount: group.kind == .servers ? serverMembers(of: group).count : chainMembers(of: group).count,
-            isExpanded: expansionBinding(for: group.id),
-            onEdit: { groupToEdit = group },
-            onDelete: { operations.groups.delete(group) },
-            content: content
-        )
+        let isExpanded = expandedContainerId == group.id
+        let iconSize: CGFloat = isExpanded ? 36 : 18
+        VStack(spacing: 0) {
+            Button {
+                withAnimation {
+                    expandedContainerId = isExpanded ? nil : group.id
+                }
+            } label: {
+                HStack(spacing: isExpanded ? 20 : 10) {
+                    Image(systemName: "folder")
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: iconSize, height: iconSize)
+                        .foregroundStyle(.secondary)
+                    Text(group.name)
+                        .font(.body.weight(.medium))
+                    Spacer()
+                    TagBadge(text: (group.kind == .servers ? serverMembers(of: group).count : chainMembers(of: group).count).description, color: .accentColor)
+                }
+                .padding()
+                .background {
+                    RoundedRectangle(cornerRadius: 24)
+                        .fill(Color(isExpanded ? .systemGroupedBackground : .secondarySystemGroupedBackground))
+                }
+                .contentShape(RoundedRectangle(cornerRadius: 24))
+                .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 24))
+                .swipeActions {
+                    Button(role: .destructive) {
+                        operations.groups.delete(group)
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
+                    Button {
+                        groupToEdit = group
+                    } label: {
+                        Label("Edit", systemImage: "pencil")
+                    }
+                    .tint(.orange)
+                }
+                .contextMenu {
+                    Section {
+                        Button {
+                            groupToEdit = group
+                        } label: {
+                            Label("Edit", systemImage: "pencil")
+                        }
+                        Button(role: .destructive) {
+                            operations.groups.delete(group)
+                        } label: {
+                            Label("Delete", systemImage: "trash")
+                        }
+                    }
+                }
+                .padding(.horizontal, isExpanded ? 0 : 12)
+            }
+            .buttonStyle(.plain)
+
+            if isExpanded {
+                LazyVStack(spacing: 10) {
+                    content()
+                }
+                .padding(.top, 12)
+            }
+        }
+        .padding(.horizontal, isExpanded ? 7 : 0)
+        .padding(.vertical, isExpanded ? 12 : 0)
+        .background {
+            RoundedRectangle(cornerRadius: 24)
+                .fill(Color(isExpanded ? .systemGroupedBackground : .clear))
+                .shadow(color: .primary.opacity(isExpanded ? 0.2 : 0), radius: 6)
+                .padding(.horizontal, isExpanded ? 0 : 12)
+        }
+        .padding(.horizontal, isExpanded ? 5 : 0)
+        .padding(.vertical, isExpanded ? 12 : 0)
+        .geometryGroup()
     }
     
     // MARK: - Subscriptions
     
     @ViewBuilder
     private func subscriptionView(_ subscription: Subscription, @ViewBuilder content: () -> some View) -> some View {
-        SubscriptionView(
-            subscription: subscription,
-            configurationCount: configurationStore.configurations(for: subscription).count,
-            isExpanded: expansionBinding(for: subscription.id),
-            isUpdating: updatingSubscriptionIds.contains(subscription.id),
-            onEdit: { subscriptionToEdit = subscription },
-            onUpdate: { updateSubscription(subscription) },
-            onDelete: { operations.subscriptions.delete(subscription) },
-            content: content
-        )
+        let isExpanded = expandedContainerId == subscription.id
+        let iconSize: CGFloat = isExpanded ? 36 : 18
+        let iconData: Data? = switch colorScheme {
+        case .dark: subscription.iconDark ?? subscription.iconLight
+        default: subscription.iconLight ?? subscription.iconDark
+        }
+        VStack(spacing: 0) {
+            Button {
+                withAnimation {
+                    expandedContainerId = isExpanded ? nil : subscription.id
+                }
+            } label: {
+                HStack(spacing: isExpanded ? 20 : 10) {
+                    if let iconData, let image = SubscriptionIconCache.image(for: iconData) {
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: iconSize, height: iconSize)
+                    } else {
+                        Image(systemName: "globe")
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: iconSize, height: iconSize)
+                            .foregroundStyle(.secondary)
+                    }
+                    VStack(alignment: .leading, spacing: 5) {
+                        HStack(spacing: 10) {
+                            Text(subscription.name)
+                                .font(.body.weight(.medium))
+                                .lineLimit(1)
+                            if updatingSubscriptionIds.contains(subscription.id) {
+                                ProgressView()
+                                    .controlSize(.small)
+                            }
+                            Spacer()
+                            TagBadge(text: configurationStore.configurations(for: subscription).count.description, color: .accentColor)
+                        }
+                        if isExpanded {
+                            SubscriptionUsageView(subscription: subscription)
+                        }
+                    }
+                }
+                .padding()
+                .background {
+                    RoundedRectangle(cornerRadius: 24)
+                        .fill(Color(isExpanded ? .systemGroupedBackground : .secondarySystemGroupedBackground))
+                }
+                .contentShape(RoundedRectangle(cornerRadius: 24))
+                .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 24))
+                .swipeActions {
+                    Button(role: .destructive) {
+                        operations.subscriptions.delete(subscription)
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
+                    Button {
+                        updateSubscription(subscription)
+                    } label: {
+                        Label("Update", systemImage: "arrow.clockwise")
+                    }
+                    .tint(.blue)
+                    Button {
+                        subscriptionToEdit = subscription
+                    } label: {
+                        Label("Edit", systemImage: "pencil")
+                    }
+                    .tint(.orange)
+                }
+                .contextMenu {
+                    Section {
+                        Button {
+                            UIPasteboard.general.string = subscription.url
+                        } label: {
+                            Label("Copy Link", systemImage: "doc.on.doc")
+                        }
+                        if let url = URL(string: subscription.url) {
+                            ShareLink(item: url, preview: SharePreview(subscription.name)) {
+                                Label("Share", systemImage: "square.and.arrow.up")
+                            }
+                        }
+                    }
+                    Section {
+                        Button {
+                            subscriptionToEdit = subscription
+                        } label: {
+                            Label("Edit", systemImage: "pencil")
+                        }
+                        Button {
+                            updateSubscription(subscription)
+                        } label: {
+                            Label("Update", systemImage: "arrow.clockwise")
+                        }
+                        Button(role: .destructive) {
+                            operations.subscriptions.delete(subscription)
+                        } label: {
+                            Label("Delete", systemImage: "trash")
+                        }
+                    }
+                }
+                .padding(.horizontal, isExpanded ? 0 : 12)
+            }
+            .buttonStyle(.plain)
+
+            if isExpanded {
+                LazyVStack(spacing: 10) {
+                    content()
+                }
+                .padding(.top, 12)
+            }
+        }
+        .padding(.horizontal, isExpanded ? 7 : 0)
+        .padding(.vertical, isExpanded ? 12 : 0)
+        .background {
+            RoundedRectangle(cornerRadius: 24)
+                .fill(Color(isExpanded ? .systemGroupedBackground : .clear))
+                .shadow(color: .primary.opacity(isExpanded ? 0.2 : 0), radius: 6)
+                .padding(.horizontal, isExpanded ? 0 : 12)
+        }
+        .padding(.horizontal, isExpanded ? 5 : 0)
+        .padding(.vertical, isExpanded ? 12 : 0)
+        .geometryGroup()
     }
     
     private func updateSubscription(_ subscription: Subscription) {
@@ -688,6 +858,113 @@ struct ProxiesView: View {
                 Label("Edit", systemImage: "pencil")
             }
             .tint(.orange)
+        }
+    }
+}
+
+private enum SubscriptionIconCache {
+    static let cache = NSCache<NSData, UIImage>()
+
+    static func image(for data: Data) -> UIImage? {
+        let key = data as NSData
+        if let cached = cache.object(forKey: key) {
+            return cached
+        }
+        guard let image = UIImage(data: data) else { return nil }
+        cache.setObject(image, forKey: key)
+        return image
+    }
+}
+
+private struct SubscriptionUsageView: View {
+    let subscription: Subscription
+
+    private var totalBytes: Int64? {
+        guard let total = subscription.total, total > 0 else { return nil }
+        return total
+    }
+
+    private var usedBytes: Int64? {
+        guard subscription.upload != nil || subscription.download != nil else { return nil }
+        return (subscription.upload ?? 0) + (subscription.download ?? 0)
+    }
+
+    private var usedFraction: Double? {
+        guard let usedBytes, let totalBytes else { return nil }
+        return Double(usedBytes) / Double(totalBytes)
+    }
+
+    var body: some View {
+        if usageDescription != nil || subscription.expire != nil {
+            VStack(alignment: .leading, spacing: 5) {
+                if let usedFraction, let usageDescription {
+                    HStack(spacing: 5) {
+                        UsageRing(fraction: usedFraction)
+                        Text(usageDescription)
+                    }
+                }
+                if let expire = subscription.expire {
+                    Text(expireDescription(expire))
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    private struct UsageRing: View {
+        let fraction: Double
+
+        var body: some View {
+            ZStack {
+                Circle()
+                    .inset(by: 1)
+                    .stroke(.quaternary, lineWidth: 2)
+                Circle()
+                    .inset(by: 1)
+                    .trim(from: 0, to: max(0.03, min(fraction, 1)))
+                    .stroke(usageWarningColor(for: fraction), style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+            }
+            .frame(width: 12, height: 12)
+            .animation(.snappy(duration: 0.3, extraBounce: 0), value: fraction)
+        }
+
+        private func usageWarningColor(for fraction: Double) -> Color {
+            if fraction >= 0.95 {
+                .red
+            } else if fraction >= 0.8 {
+                .orange
+            } else {
+                .blue
+            }
+        }
+    }
+
+    private var usageDescription: String? {
+        switch (usedBytes, totalBytes) {
+        case let (used?, total?):
+            String(localized: "\(Formatting.formatBytes(used)) of \(Formatting.formatBytes(total)) used")
+        case let (used?, nil):
+            String(localized: "\(Formatting.formatBytes(used)) used")
+        case let (nil, total?):
+            String(localized: "\(Formatting.formatBytes(total)) total")
+        case (nil, nil):
+            nil
+        }
+    }
+
+    private func expireDescription(_ expire: Date) -> String {
+        let calendar = Calendar.current
+        let days = calendar.dateComponents(
+            [.day],
+            from: calendar.startOfDay(for: .now),
+            to: calendar.startOfDay(for: expire)
+        ).day ?? 0
+        if expire < .now {
+            return String(localized: "Expired")
+        } else {
+            return String(localized: "Expires in \(days) day(s)")
         }
     }
 }
