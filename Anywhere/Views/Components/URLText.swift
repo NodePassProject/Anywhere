@@ -12,7 +12,7 @@ struct URLText: UIViewRepresentable {
 
     func makeUIView(context: Context) -> UILabel {
         let label = UILabel()
-        label.font = .monospacedSystemFont(ofSize: 14, weight: .regular)
+        label.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         label.textColor = .secondaryLabel
         label.numberOfLines = 3
         label.lineBreakMode = .byTruncatingMiddle

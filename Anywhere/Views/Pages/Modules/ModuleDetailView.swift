@@ -32,6 +32,7 @@ struct ModuleDetailView: View {
                             .font(.headline)
                         if let description = module.description, !description.isEmpty {
                             Text(description)
+                                .font(.system(size: 14))
                                 .foregroundStyle(.secondary)
                         }
                     }
