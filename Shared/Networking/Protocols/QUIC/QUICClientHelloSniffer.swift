@@ -34,17 +34,26 @@ nonisolated struct QUICClientHelloSniffer {
 
     static func looksLikeClientInitial(_ datagram: Data) -> Bool {
         datagram.count >= Self.minimumInitialDatagramSize && QUICInitialPeek.hasSupportedLongHeader(datagram)
+            || GQUICClientHello.looksLikeClientHello(datagram)
     }
 
     mutating func feed(_ datagram: Data) -> State {
         guard state == .needMore else { return state }
         datagramsFed += 1
-        do {
-            let peek = try QUICInitialPeek.parse(datagram)
-            feed(fragments: peek.cryptoFragments.map { (offset: $0.offset, data: $0.data) })
-        } catch {
-            if datagramsFed == 1 {
-                state = error == .notInitial ? .notQUIC : .unavailable
+        if GQUICClientHello.hasPublicHeader(datagram) {
+            if let fragments = GQUICClientHello.cryptoStreamFragments(datagram) {
+                feed(fragments: fragments)
+            } else if datagramsFed == 1 {
+                state = .unavailable
+            }
+        } else {
+            do {
+                let peek = try QUICInitialPeek.parse(datagram)
+                feed(fragments: peek.cryptoFragments.map { (offset: $0.offset, data: $0.data) })
+            } catch {
+                if datagramsFed == 1 {
+                    state = error == .notInitial ? .notQUIC : .unavailable
+                }
             }
         }
         if state == .needMore, datagramsFed >= datagramLimit {
@@ -99,6 +108,13 @@ nonisolated struct QUICClientHelloSniffer {
     private func parse() -> State {
         let available = contiguousLength
         guard available >= 4 else { return .needMore }
+        if GQUICClientHello.isMessageStart(buffer) {
+            switch GQUICClientHello.serverName(in: buffer, available: available, limit: bufferLimit) {
+            case .needMore: return .needMore
+            case .unavailable: return .unavailable
+            case .found(let serverName): return .found(serverName: serverName)
+            }
+        }
         guard buffer[0] == TLSHandshakeType.clientHello else { return .unavailable }
         let messageLength = 4 + (Int(buffer[1]) << 16 | Int(buffer[2]) << 8 | Int(buffer[3]))
         guard messageLength <= bufferLimit else { return .unavailable }

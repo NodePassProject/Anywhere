@@ -12,4 +12,5 @@ nonisolated enum TunnelLimits {
     static let udpMaxFlows = 128
     static let udpMaxPendingResolutions = 64
     static let udpMaxPendingSniffs = 64
+    static let udpMaxQUICBlocks = 256
 }

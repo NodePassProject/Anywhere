@@ -220,6 +220,7 @@
 				Networking/Protocols/Nowhere/NowhereTCPConnection.swift,
 				Networking/Protocols/Nowhere/NowhereUDPConnection.swift,
 				"Networking/Protocols/Nowhere/ProxyClient+Nowhere.swift",
+				Networking/Protocols/QUIC/GQUICClientHello.swift,
 				Networking/Protocols/QUIC/QUICClientHelloSniffer.swift,
 				Networking/Protocols/QUIC/QUICConnection.swift,
 				"Networking/Protocols/QUIC/QUICConnection+Close.swift",

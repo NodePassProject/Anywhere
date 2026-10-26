@@ -21,6 +21,7 @@ actor UDPFlow {
     nonisolated let flowKey: TunnelStack.UDPFlowKey
     nonisolated let dstHost: String
     nonisolated let sniffedHost: String?
+    nonisolated let isQUIC: Bool
     nonisolated var dstPort: UInt16 { flowKey.destination.port }
     nonisolated let configuration: ProxyConfiguration
 
@@ -133,6 +134,7 @@ actor UDPFlow {
         flowKey: TunnelStack.UDPFlowKey,
         dstHost: String,
         sniffedHost: String? = nil,
+        isQUIC: Bool = false,
         configuration: ProxyConfiguration,
         routeTarget: RouteTarget,
         ruleSetName: String?
@@ -143,6 +145,7 @@ actor UDPFlow {
         self.flowKey = flowKey
         self.dstHost = dstHost
         self.sniffedHost = sniffedHost
+        self.isQUIC = isQUIC
         self.configuration = configuration
         self.routeTarget = routeTarget
         self.activityRecord = stack.udpActivity.open(

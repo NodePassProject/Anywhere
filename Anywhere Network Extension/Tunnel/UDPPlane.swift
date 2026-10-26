@@ -48,6 +48,18 @@ actor UDPPlane {
     private var sniffGeneration: UInt64 = 0
     private var pendingSniffCapWarned = false
 
+    private struct QUICBlock {
+        enum Cause {
+            case policy
+            case mitm(host: String)
+            case proxied(RouteTarget)
+            case rejected
+        }
+        let cause: Cause
+        var deadline: TimeInterval
+    }
+    private var quicBlocks: [TunnelStack.UDPFlowKey: QUICBlock] = [:]
+
     private enum SniffStage {
         case pending
         case done(serverName: String?)
@@ -188,8 +200,11 @@ actor UDPPlane {
             return
         }
 
-        if dstPort == 443 && udpConfig.quicPolicy.blocksAllQUIC {
-            stack.sendICMPPortUnreachable(rejecting: datagram)
+        let isQUIC = Self.isQUIC(payload, port: dstPort)
+        let flowKey = TunnelStack.UDPFlowKey(datagram)
+
+        if isQUIC && udpConfig.quicPolicy.blocksAllQUIC {
+            blockQUIC(datagram, flowKey: flowKey, cause: .policy)
             return
         }
 
@@ -198,13 +213,16 @@ actor UDPPlane {
             return
         }
 
-        let flowKey = TunnelStack.UDPFlowKey(datagram)
         if let flow = flows[flowKey] {
             if !flow.isClosed {
                 await flow.handleReceivedData([payload])
                 return
             }
             flows.removeValue(forKey: flowKey)
+        }
+
+        if replyToBlockedQUIC(datagram, flowKey: flowKey) {
+            return
         }
 
         if stack.isRejectMarked(dstAddress) {
@@ -259,6 +277,7 @@ actor UDPPlane {
                 ruleSetName = matchedRuleSet
                 flowConfiguration = configuration ?? defaultConfiguration
             case .reject(let matchedRuleSet):
+                recordQUICBlock(flowKey, cause: .rejected)
                 stack.requestLog.record(protocol: .udp, host: sniffedServerName, port: dstPort, routeTarget: .reject, ruleSetName: matchedRuleSet)
                 return
             case .unreachable:
@@ -269,8 +288,8 @@ actor UDPPlane {
 
         let policyHost = sniffedServerName ?? dstHost
 
-        if dstPort == 443, blocksQUIC(to: policyHost, udpConfig: udpConfig) {
-            stack.sendICMPPortUnreachable(rejecting: datagram)
+        if isQUIC, blocksQUIC(to: policyHost, udpConfig: udpConfig) {
+            blockQUIC(datagram, flowKey: flowKey, cause: .mitm(host: policyHost))
             return
         }
 
@@ -279,8 +298,8 @@ actor UDPPlane {
             return
         }
 
-        if dstPort == 443, blocksQUIC(routedTo: routeTarget, udpConfig: udpConfig) {
-            stack.sendICMPPortUnreachable(rejecting: datagram)
+        if isQUIC, blocksQUIC(routedTo: routeTarget, udpConfig: udpConfig) {
+            blockQUIC(datagram, flowKey: flowKey, cause: .proxied(routeTarget))
             return
         }
 
@@ -295,6 +314,7 @@ actor UDPPlane {
             flowKey: flowKey,
             dstHost: dstHost,
             sniffedHost: sniffedServerName,
+            isQUIC: isQUIC,
             configuration: flowConfiguration,
             routeTarget: routeTarget,
             ruleSetName: ruleSetName
@@ -319,12 +339,69 @@ actor UDPPlane {
 
     private func revalidateQUIC() {
         let udpConfig = stack.udpConfig()
-        for (key, flow) in flows where key.destination.port == 443 {
-            guard blocksQUIC(to: flow.sniffedHost ?? flow.dstHost, udpConfig: udpConfig)
-                    || blocksQUIC(routedTo: flow.routeTarget, udpConfig: udpConfig) else { continue }
+        for (key, block) in quicBlocks where !stillBlocks(block.cause, udpConfig: udpConfig) {
+            quicBlocks.removeValue(forKey: key)
+        }
+        for (key, flow) in flows where flow.isQUIC {
+            let host = flow.sniffedHost ?? flow.dstHost
+            let cause: QUICBlock.Cause
+            if udpConfig.quicPolicy.blocksAllQUIC {
+                cause = .policy
+            } else if blocksQUIC(to: host, udpConfig: udpConfig) {
+                cause = .mitm(host: host)
+            } else if blocksQUIC(routedTo: flow.routeTarget, udpConfig: udpConfig) {
+                cause = .proxied(flow.routeTarget)
+            } else {
+                continue
+            }
             flows.removeValue(forKey: key)
+            recordQUICBlock(key, cause: cause)
             Task { await flow.close() }
         }
+    }
+
+    private func stillBlocks(_ cause: QUICBlock.Cause, udpConfig: TunnelStack.UDPConfig) -> Bool {
+        switch cause {
+        case .policy: return udpConfig.quicPolicy.blocksAllQUIC
+        case .mitm(let host): return blocksQUIC(to: host, udpConfig: udpConfig)
+        case .proxied(let routeTarget): return blocksQUIC(routedTo: routeTarget, udpConfig: udpConfig)
+        case .rejected: return true
+        }
+    }
+
+    private static func isQUIC(_ payload: Data, port: UInt16) -> Bool {
+        port == 443 || QUICClientHelloSniffer.looksLikeClientInitial(payload)
+    }
+
+    private func blockQUIC(_ datagram: InboundDatagram, flowKey: TunnelStack.UDPFlowKey, cause: QUICBlock.Cause) {
+        recordQUICBlock(flowKey, cause: cause)
+        stack.sendICMPPortUnreachable(rejecting: datagram)
+    }
+
+    private func recordQUICBlock(_ flowKey: TunnelStack.UDPFlowKey, cause: QUICBlock.Cause) {
+        if quicBlocks[flowKey] == nil, quicBlocks.count >= TunnelLimits.udpMaxQUICBlocks,
+           let oldest = quicBlocks.min(by: { $0.value.deadline < $1.value.deadline })?.key {
+            quicBlocks.removeValue(forKey: oldest)
+        }
+        let deadline = MonotonicClock.now + TunnelConstants.udpQUICBlockIdleTimeout
+        quicBlocks[flowKey] = QUICBlock(cause: cause, deadline: deadline)
+        if cleanupDeadline.map({ deadline < $0 }) ?? true {
+            stack.scheduleUDPCleanup(at: deadline)
+        }
+    }
+
+    private func replyToBlockedQUIC(_ datagram: InboundDatagram, flowKey: TunnelStack.UDPFlowKey) -> Bool {
+        guard var block = quicBlocks[flowKey] else { return false }
+        let now = MonotonicClock.now
+        guard now <= block.deadline else {
+            quicBlocks.removeValue(forKey: flowKey)
+            return false
+        }
+        block.deadline = now + TunnelConstants.udpQUICBlockIdleTimeout
+        quicBlocks[flowKey] = block
+        if case .rejected = block.cause { return true }
+        stack.sendICMPPortUnreachable(rejecting: datagram)
+        return true
     }
 
     // MARK: - QUIC SNI sniffing
@@ -480,6 +557,13 @@ actor UDPPlane {
                 flows.removeValue(forKey: key)
             } else if next.map({ deadline < $0 }) ?? true {
                 next = deadline
+            }
+        }
+        for (key, block) in quicBlocks {
+            if now > block.deadline {
+                quicBlocks.removeValue(forKey: key)
+            } else if next.map({ block.deadline < $0 }) ?? true {
+                next = block.deadline
             }
         }
         cleanupDeadline = next
@@ -707,6 +791,7 @@ actor UDPPlane {
         pendingResolutionCapWarned = false
         pendingSniffs.removeAll()
         pendingSniffCapWarned = false
+        quicBlocks.removeAll()
         let all = Array(flows.values)
         flows.removeAll()
         for flow in all {

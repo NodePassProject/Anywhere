@@ -47,6 +47,7 @@ nonisolated enum TunnelConstants {
     static let udpPendingResolutionMaxBytes = 32 * 1024
     static let udpIdleTimeoutUnreplied: TimeInterval = 30
     static let udpIdleTimeoutStream: TimeInterval = 120
+    static let udpQUICBlockIdleTimeout: TimeInterval = 30
     static let udpStreamMinReplies = 4
     static let udpIntakeBacklog = 256
 

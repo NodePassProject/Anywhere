@@ -58,10 +58,7 @@ A destination is classified at several points:
    DNS Leak** disables this fallback.
 5. **TLS SNI.** A sniffed SNI re-runs domain matching and can change the route
    of a connection that was accepted by IP. TCP reads it from the ClientHello
-   record while the connection is being established; QUIC reads it from the
-   client's Initial packets, whose keys any on-path observer can derive, and
-   holds a flow's first datagrams until the ClientHello is complete or a short
-   deadline passes.
+   record; QUIC reads it from the client's Initial packets.
 
 So domain rules always take precedence for a connection with a known host; IP
 rules apply to literal-IP traffic and, as a fallback, to unmatched domains.
