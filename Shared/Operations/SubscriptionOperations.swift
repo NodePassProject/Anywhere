@@ -15,7 +15,7 @@ struct SubscriptionOperations {
 
     func add(_ subscription: Subscription, result: SubscriptionFetcher.Result) {
         store.add(subscription)
-        let stableIDs = Self.stableIDs(of: result, in: subscription.id)
+        let stableIDs = AJSONParser.stableIDs(for: result.stableKeys, in: subscription.id)
         let tagged = result.configurations.map { configuration in
             ProxyConfiguration(
                 id: stableIDs[configuration.id] ?? configuration.id, name: configuration.name,
@@ -49,7 +49,7 @@ struct SubscriptionOperations {
 
         guard let current = store.subscriptions.first(where: { $0.id == subscriptionId }) else { return }
 
-        let stableIDs = Self.stableIDs(of: result, in: subscriptionId)
+        let stableIDs = AJSONParser.stableIDs(for: result.stableKeys, in: subscriptionId)
         let claimedIDs = Set(stableIDs.values)
 
         let oldConfigurations = configurationStore.configurations(for: current)
@@ -83,9 +83,5 @@ struct SubscriptionOperations {
         configurationStore.replaceConfigurations(for: subscriptionId, with: newConfigurations)
         store.applyRefreshResult(result, to: subscriptionId)
         reaction.run()
-    }
-
-    private static func stableIDs(of result: SubscriptionFetcher.Result, in subscriptionId: UUID) -> [UUID: UUID] {
-        result.stableKeys.mapValues { UUID(namespace: subscriptionId, name: $0) }
     }
 }

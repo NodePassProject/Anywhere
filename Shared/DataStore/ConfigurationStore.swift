@@ -89,6 +89,26 @@ class ConfigurationStore {
         }
     }
 
+    func upsert(_ incoming: [ProxyConfiguration]) {
+        guard !incoming.isEmpty else { return }
+        for configuration in incoming {
+            if let index = configurations.firstIndex(where: { $0.id == configuration.id }) {
+                let existing = configurations[index]
+                guard existing.subscriptionId != configuration.subscriptionId || !existing.contentEquals(configuration) else { continue }
+                var stamped = configuration
+                stamped.updatedAt = SyncStamp.after(existing)
+                configurations[index] = stamped
+            } else {
+                let tombstone = tombstones.first { $0.id == configuration.id }
+                tombstones.removeAll { $0.id == configuration.id }
+                var stamped = configuration
+                stamped.updatedAt = SyncStamp.after(tombstone)
+                configurations.append(stamped)
+            }
+        }
+        save()
+    }
+
     func delete(_ configuration: ProxyConfiguration) {
         configurations.removeAll { $0.id == configuration.id }
         recordTombstones([configuration])

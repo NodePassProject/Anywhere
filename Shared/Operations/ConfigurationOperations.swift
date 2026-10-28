@@ -22,6 +22,20 @@ struct ConfigurationOperations {
         reaction.run()
     }
 
+    func importStandalone(_ document: AJSONParser.ParseResult) -> [ProxyConfiguration] {
+        let stableIDs = AJSONParser.stableIDs(for: document.stableKeys, in: AJSONParser.fileNamespace)
+        let imported = document.configurations.map { configuration in
+            ProxyConfiguration(
+                id: stableIDs[configuration.id] ?? configuration.id, name: configuration.name,
+                serverAddress: configuration.serverAddress, serverPort: configuration.serverPort,
+                outbound: configuration.outbound
+            )
+        }
+        store.upsert(imported)
+        reaction.run()
+        return imported
+    }
+
     func delete(_ configuration: ProxyConfiguration) {
         store.delete(configuration)
         reaction.run()

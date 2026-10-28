@@ -11,6 +11,12 @@ nonisolated enum AJSONParser {
     static let version = 1
     static let formatHeaderValue = "ajson/\(version)"
 
+    static let fileNamespace = UUID(uuidString: "F1C69133-42AF-4891-ACB0-ED5F5004817A")!
+
+    static func stableIDs(for stableKeys: [UUID: String], in namespace: UUID) -> [UUID: UUID] {
+        stableKeys.mapValues { UUID(namespace: namespace, name: $0) }
+    }
+
     struct ParseResult {
         let configurations: [ProxyConfiguration]
         let stableKeys: [UUID: String]

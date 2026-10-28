@@ -6,18 +6,23 @@
 //
 
 import SwiftUI
+import UniformTypeIdentifiers
+
+nonisolated private let fileImportAllowedContentTypes: [UTType] = [UTType(filenameExtension: "ajson") ?? .data]
 
 fileprivate enum Method: String, CaseIterable, Identifiable {
     var id: String { self.rawValue }
 
     case qrCode = "qrCode"
     case link = "link"
+    case file = "file"
     case manual = "manual"
 
     var image: String {
         switch self {
         case .qrCode: "qrcode.viewfinder"
         case .link: "link"
+        case .file: "folder"
         case .manual: "hand.point.up.left"
         }
     }
@@ -26,6 +31,7 @@ fileprivate enum Method: String, CaseIterable, Identifiable {
         switch self {
         case .qrCode: String(localized: "QR Code")
         case .link: String(localized: "Link")
+        case .file: String(localized: "File")
         case .manual: String(localized: "Manual")
         }
     }
@@ -39,6 +45,7 @@ struct AddProxyView: View {
 
     @State private var selectedMethod: Method?
     @State private var showingQRScanner = false
+    @State private var showingFileImporter = false
     @State private var linkURL = ""
     @State private var isLoading = false
     @State private var showingError = false
@@ -81,6 +88,12 @@ struct AddProxyView: View {
         }
         .qrScanner(isScanning: $showingQRScanner) { code in
             importFromString(code)
+        }
+        .fileImporter(
+            isPresented: $showingFileImporter,
+            allowedContentTypes: fileImportAllowedContentTypes
+        ) { result in
+            importFromFile(result)
         }
         .alert("Import Failed", isPresented: $showingError) {
             Button("OK", role: .cancel) { }
@@ -243,6 +256,8 @@ struct AddProxyView: View {
             showingQRScanner = true
         case .link:
             importFromString(linkURL)
+        case .file:
+            showingFileImporter = true
         case .manual:
             showingManualAddSheet = true
             dismiss()
@@ -275,6 +290,34 @@ struct AddProxyView: View {
                 return
             }
             fetchSubscription(url: trimmedURL)
+        }
+    }
+
+    private func importFromFile(_ result: Result<URL, Error>) {
+        do {
+            let url = try result.get()
+            guard url.pathExtension.lowercased() == "ajson" else {
+                errorMessage = String(localized: "Invalid AJSON File.")
+                showingError = true
+                return
+            }
+            let accessing = url.startAccessingSecurityScopedResource()
+            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+            guard let body = String(data: try Data(contentsOf: url), encoding: .utf8) else {
+                errorMessage = String(localized: "Invalid AJSON File.")
+                showingError = true
+                return
+            }
+            let document = try AJSONParser.parse(body)
+            guard !document.configurations.isEmpty else {
+                throw AnywhereError.subscription(.noConfigurations)
+            }
+            let imported = operations.configurations.importStandalone(document)
+            if let first = imported.first { operations.selection.selectIfNone(first) }
+            dismiss()
+        } catch {
+            errorMessage = error.localizedDescription
+            showingError = true
         }
     }
 
