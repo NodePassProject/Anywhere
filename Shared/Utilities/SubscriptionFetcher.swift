@@ -10,6 +10,7 @@ import Foundation
 nonisolated struct SubscriptionFetcher {
     struct Result {
         let configurations: [ProxyConfiguration]
+        let stableKeys: [UUID: String]
         let name: String?
         let upload: Int64?
         let download: Int64?
@@ -26,6 +27,7 @@ nonisolated struct SubscriptionFetcher {
 
         var request = URLRequest(url: url)
         request.setValue("Anywhere", forHTTPHeaderField: "User-Agent")
+        request.setValue(AJSONParser.formatHeaderValue, forHTTPHeaderField: "X-Anywhere-Format")
         if AWCore.getRemnawaveHWIDEnabled() {
             request.setValue(AWCore.getRemnawaveHWID(), forHTTPHeaderField: "x-hwid")
         }
@@ -57,6 +59,24 @@ nonisolated struct SubscriptionFetcher {
         let iconLight = parseIcon(from: httpResponse, field: "aw-icon-light")
         let iconDark = parseIcon(from: httpResponse, field: "aw-icon-dark")
 
+        if let rawString = String(data: data, encoding: .utf8), AJSONParser.looksLikeDocument(rawString) {
+            let document = try AJSONParser.parse(rawString)
+            guard !document.configurations.isEmpty else {
+                throw AnywhereError.subscription(.noConfigurations)
+            }
+            return Result(
+                configurations: document.configurations,
+                stableKeys: document.stableKeys,
+                name: document.name ?? profileTitle,
+                upload: document.upload ?? userInfo.upload,
+                download: document.download ?? userInfo.download,
+                total: document.total ?? userInfo.total,
+                expire: document.expire ?? userInfo.expire,
+                iconLight: document.iconLight ?? iconLight,
+                iconDark: document.iconDark ?? iconDark
+            )
+        }
+
         let bodyString: String
         if let decoded = Data(base64Encoded: data, options: .ignoreUnknownCharacters),
            let decodedString = String(data: decoded, encoding: .utf8),
@@ -75,6 +95,7 @@ nonisolated struct SubscriptionFetcher {
             }
             return Result(
                 configurations: result.configurations,
+                stableKeys: [:],
                 name: profileTitle,
                 upload: userInfo.upload,
                 download: userInfo.download,
@@ -97,6 +118,7 @@ nonisolated struct SubscriptionFetcher {
 
         return Result(
             configurations: configurations,
+            stableKeys: [:],
             name: profileTitle,
             upload: userInfo.upload,
             download: userInfo.download,
@@ -181,8 +203,6 @@ nonisolated struct SubscriptionFetcher {
         return (upload, download, total, expire)
     }
 }
-
-// MARK: - URLSession delegate that accepts self-signed certificates
 
 nonisolated private final class InsecureSessionDelegate: NSObject, URLSessionDelegate {
     func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge) async -> (URLSession.AuthChallengeDisposition, URLCredential?) {

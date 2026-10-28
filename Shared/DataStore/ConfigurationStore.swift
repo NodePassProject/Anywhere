@@ -33,17 +33,16 @@ class ConfigurationStore {
             await saveTask?.value
             guard epoch == mutationEpoch else { continue }
             let outcome = await Task.detached(priority: .userInitiated) {
-                [syncStore] () -> (items: [Data], live: [ProxyConfiguration], tombstones: [ProxyConfiguration], legacyIDs: Set<UUID>) in
+                [syncStore] () -> (items: [Data], live: [ProxyConfiguration], tombstones: [ProxyConfiguration]) in
                 let items = syncStore.loadItems(.configurations)
                 let split = Self.decodeSplit(from: items)
-                return (items, split.live, split.tombstones, split.legacyIDs)
+                return (items, split.live, split.tombstones)
             }.value
             guard epoch == mutationEpoch else { continue }
             loadedItems = outcome.items
             configurations = outcome.live
             tombstones = outcome.tombstones
             isLoaded = true
-            migrateLegacyPayloads(ids: outcome.legacyIDs)
             return
         }
     }
@@ -55,18 +54,17 @@ class ConfigurationStore {
             await saveTask?.value
             guard epoch == mutationEpoch else { continue }
             let outcome = await Task.detached(priority: .utility) {
-                [syncStore] () -> (items: [Data], live: [ProxyConfiguration], tombstones: [ProxyConfiguration], legacyIDs: Set<UUID>)? in
+                [syncStore] () -> (items: [Data], live: [ProxyConfiguration], tombstones: [ProxyConfiguration])? in
                 let items = syncStore.loadItems(.configurations)
                 guard items != previous else { return nil }
                 let split = Self.decodeSplit(from: items)
-                return (items, split.live, split.tombstones, split.legacyIDs)
+                return (items, split.live, split.tombstones)
             }.value
             guard let outcome else { return }
             guard epoch == mutationEpoch else { continue }
             loadedItems = outcome.items
             configurations = outcome.live
             tombstones = outcome.tombstones
-            migrateLegacyPayloads(ids: outcome.legacyIDs)
             return
         }
     }
@@ -157,26 +155,9 @@ class ConfigurationStore {
     
     nonisolated private static func decodeSplit(
         from items: [Data]
-    ) -> (live: [ProxyConfiguration], tombstones: [ProxyConfiguration], legacyIDs: Set<UUID>) {
+    ) -> (live: [ProxyConfiguration], tombstones: [ProxyConfiguration]) {
         let split = Tombstone.split(SyncCodec.decodeItems(ProxyConfiguration.self, key: .configurations, payloads: items))
-        return (split.live, split.tombstones, ProxyConfiguration.legacyPayloadIDs(in: items))
-    }
-
-    // MARK: Remove in future build
-    
-    private func migrateLegacyPayloads(ids: Set<UUID>) {
-        guard !ids.isEmpty else { return }
-        var migrated = false
-        for index in configurations.indices where ids.contains(configurations[index].id) {
-            configurations[index].updatedAt = SyncStamp.after(configurations[index])
-            migrated = true
-        }
-        for index in tombstones.indices where ids.contains(tombstones[index].id) {
-            tombstones[index].updatedAt = SyncStamp.after(tombstones[index])
-            migrated = true
-        }
-        guard migrated else { return }
-        save()
+        return (split.live, split.tombstones)
     }
     
     private func recordTombstones(_ removed: [ProxyConfiguration]) {

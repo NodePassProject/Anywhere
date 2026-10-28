@@ -254,7 +254,7 @@ class TVAddProxyViewController: UITableViewController {
                         iconLight: fetchedSubscription.iconLight,
                         iconDark: fetchedSubscription.iconDark
                     )
-                    operations.subscriptions.add(subscription, configurations: fetchedSubscription.configurations)
+                    operations.subscriptions.add(subscription, result: fetchedSubscription)
                     dismiss(animated: true)
                 } catch {
                     showError(error.localizedDescription)

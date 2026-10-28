@@ -294,7 +294,7 @@ struct AddProxyView: View {
                     iconLight: result.iconLight,
                     iconDark: result.iconDark
                 )
-                operations.subscriptions.add(subscription, configurations: result.configurations)
+                operations.subscriptions.add(subscription, result: result)
                 dismiss()
             } catch {
                 errorMessage = error.localizedDescription

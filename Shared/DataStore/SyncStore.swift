@@ -13,21 +13,6 @@ import SwiftData
 nonisolated private let logger = AnywhereLogger(category: "SyncStore")
 
 @Model
-nonisolated final class JSONBlob {
-    var key: String = ""
-    @Attribute(.externalStorage) var data: Data = Data()
-    var updatedAt: Date = Date()
-    var deviceID: String = ""
-
-    init(key: String, data: Data, updatedAt: Date = .now, deviceID: String = "") {
-        self.key = key
-        self.data = data
-        self.updatedAt = updatedAt
-        self.deviceID = deviceID
-    }
-}
-
-@Model
 nonisolated final class SyncItem {
     var collection: String = ""
     var itemID: String = ""
@@ -97,17 +82,14 @@ nonisolated final class SyncStore: Sendable {
 
     private static let orderItemID = "#order"
 
-    private let persistsImportState: Bool
-    private let importFingerprints = Mutex<[Key: [String]]>([:])
     private let changeObserver = Mutex<ChangeObserver?>(nil)
 
-    private init(container: ModelContainer?, persistsImportState: Bool) {
-        self.persistsImportState = persistsImportState
+    private init(container: ModelContainer?) {
         store = Mutex(container)
     }
 
     private convenience init() {
-        self.init(container: Self.makeContainer(), persistsImportState: true)
+        self.init(container: Self.makeContainer())
     }
 
     static func ephemeral() -> SyncStore {
@@ -115,10 +97,10 @@ nonisolated final class SyncStore: Sendable {
             .appendingPathComponent("SyncStore-\(UUID().uuidString).store")
         let config = ModelConfiguration(url: url, cloudKitDatabase: .none)
         let container = try? ModelContainer(for: Self.schema, configurations: config)
-        return SyncStore(container: container, persistsImportState: false)
+        return SyncStore(container: container)
     }
 
-    private static let schema = Schema([JSONBlob.self, SyncItem.self])
+    private static let schema = Schema([SyncItem.self])
 
     private static func makeContainer() -> ModelContainer? {
         do {
@@ -195,14 +177,6 @@ nonisolated final class SyncStore: Sendable {
     }
 
     func save(_ key: Key, items: [SyncPayloadItem], order: [String]) {
-        apply(key, items: items, order: order, importedOrderStamp: nil)
-    }
-
-    func applyImported(_ key: Key, items: [SyncPayloadItem], order: [String], orderStamp: Date) {
-        apply(key, items: items, order: order, importedOrderStamp: orderStamp)
-    }
-
-    private func apply(_ key: Key, items: [SyncPayloadItem], order: [String], importedOrderStamp: Date?) {
         for item in items where item.payload.count > Self.maxSyncedPayloadBytes {
             logger.warning("[Sync] \(key.rawValue) \(item.id): Payload too large")
         }
@@ -211,7 +185,7 @@ nonisolated final class SyncStore: Sendable {
             let context = ModelContext(container)
             let rows = Self.fetchItems(key, in: context)
             let changedIDs = Self.upsert(key, items: items, rows: rows, in: context)
-            let orderChanged = Self.updateOrder(key, order, importedStamp: importedOrderStamp, rows: rows, in: context)
+            let orderChanged = Self.updateOrder(key, order, rows: rows, in: context)
             guard !changedIDs.isEmpty || orderChanged else { return [] }
             do {
                 try context.save()
@@ -506,18 +480,13 @@ nonisolated final class SyncStore: Sendable {
         return changed
     }
 
-    private static func updateOrder(_ key: Key, _ order: [String], importedStamp: Date?, rows: [SyncItem], in context: ModelContext) -> Bool {
+    private static func updateOrder(_ key: Key, _ order: [String], rows: [SyncItem], in context: ModelContext) -> Bool {
         let row = winners(of: rows.filter { $0.itemID == orderItemID })[orderItemID]
         let payload = (try? JSONEncoder().encode(order)) ?? Data("[]".utf8)
         if let row {
-            if let importedStamp {
-                guard importedStamp > row.updatedAt else { return false }
-                row.updatedAt = importedStamp
-            } else {
-                guard row.payload != payload else { return false }
-                row.updatedAt = SyncStamp.after(row.updatedAt)
-            }
-            if row.payload != payload { row.payload = payload }
+            guard row.payload != payload else { return false }
+            row.updatedAt = SyncStamp.after(row.updatedAt)
+            row.payload = payload
             return true
         }
         guard !order.isEmpty else { return false }
@@ -526,7 +495,7 @@ nonisolated final class SyncStore: Sendable {
                 collection: key.rawValue,
                 itemID: Self.orderItemID,
                 payload: payload,
-                updatedAt: importedStamp ?? .now
+                updatedAt: .now
             )
         )
         return true
@@ -547,66 +516,6 @@ nonisolated final class SyncStore: Sendable {
                 return a.itemID < b.itemID
             }
         }
-    }
-
-    // MARK: - Legacy blobs
-
-    struct LegacyBlobRow: Sendable {
-        let data: Data
-        let updatedAt: Date
-        let deviceID: String
-    }
-
-    func legacyBlobRows(_ key: Key) -> [LegacyBlobRow] {
-        store.withLock { container in
-            guard let container else { return [] }
-            let context = ModelContext(container)
-            return Self.fetchBlobs(key, in: context)
-                .map { LegacyBlobRow(data: $0.data, updatedAt: $0.updatedAt, deviceID: $0.deviceID) }
-        }
-    }
-
-    func legacyBlobFingerprint(_ key: Key) -> [String] {
-        store.withLock { container in
-            guard let container else { return [] }
-            let context = ModelContext(container)
-            let raw = key.rawValue
-            var descriptor = FetchDescriptor<JSONBlob>(predicate: #Predicate { $0.key == raw })
-            descriptor.propertiesToFetch = [\.updatedAt, \.deviceID]
-            let rows = (try? context.fetch(descriptor)) ?? []
-            return rows.map { "\($0.deviceID)#\($0.updatedAt.timeIntervalSinceReferenceDate)" }.sorted()
-        }
-    }
-
-    static func legacyFingerprint(of rows: [LegacyBlobRow]) -> [String] {
-        rows.map { "\($0.deviceID)#\($0.updatedAt.timeIntervalSinceReferenceDate)" }.sorted()
-    }
-
-    func lastImportFingerprint(_ key: Key) -> [String]? {
-        if persistsImportState {
-            return UserDefaults(suiteName: AWCore.Identifier.appGroupSuite)?
-                .stringArray(forKey: Self.importFingerprintDefaultsKey(key))
-        }
-        return importFingerprints.withLock { $0[key] }
-    }
-
-    func setLastImportFingerprint(_ key: Key, _ fingerprint: [String]) {
-        if persistsImportState {
-            UserDefaults(suiteName: AWCore.Identifier.appGroupSuite)?
-                .set(fingerprint, forKey: Self.importFingerprintDefaultsKey(key))
-        } else {
-            importFingerprints.withLock { $0[key] = fingerprint }
-        }
-    }
-
-    private static func importFingerprintDefaultsKey(_ key: Key) -> String {
-        "SyncStore.importedBlobFingerprint.\(key.rawValue)"
-    }
-
-    private static func fetchBlobs(_ key: Key, in context: ModelContext) -> [JSONBlob] {
-        let raw = key.rawValue
-        let predicate = #Predicate<JSONBlob> { $0.key == raw }
-        return (try? context.fetch(FetchDescriptor<JSONBlob>(predicate: predicate))) ?? []
     }
 }
 

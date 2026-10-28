@@ -36,8 +36,6 @@ final class AppContainer {
 
     init(syncStore: SyncStore = .shared, tunnelProvider: TunnelProviding? = nil) {
         self.syncStore = syncStore
-        
-        LegacyBlobBridge.importAll(into: syncStore)
 
         tunnel = TunnelController(provider: tunnelProvider ?? LiveTunnelProvider())
         configurationStore = ConfigurationStore(syncStore: syncStore)

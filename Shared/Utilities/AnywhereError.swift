@@ -72,10 +72,11 @@ nonisolated enum AnywhereError: Error {
     // MARK: Parse
 
     enum Parse: Sendable, Equatable {
-        case yaml(detail: String)
-        case clashConfigMissingProxies
         case invalidURL(String)
         case proxyURI(ProxyURI)
+        case ajson(detail: String)
+        case yaml(detail: String)
+        case clashConfigMissingProxies
 
         enum ProxyURI: Sendable, Equatable {
             case unsupportedScheme(String?)
@@ -571,10 +572,11 @@ nonisolated extension AnywhereError.Store {
 nonisolated extension AnywhereError.Parse {
     var failureDescription: String {
         switch self {
-        case .yaml(let detail): "YAML: \(detail)"
-        case .clashConfigMissingProxies: "missing 'proxies' key"
         case .invalidURL(let string): "invalid URL: \(string)"
         case .proxyURI(let f): f.failureDescription
+        case .ajson(let detail): "AJSON: \(detail)"
+        case .yaml(let detail): "YAML: \(detail)"
+        case .clashConfigMissingProxies: "missing 'proxies' key"
         }
     }
 }

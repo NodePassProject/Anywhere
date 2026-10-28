@@ -185,45 +185,23 @@ nonisolated struct SudokuConfiguration: Codable, Hashable {
         case paddingMin
         case paddingMax
         case asciiMode
-        case table
-        case customTable
         case customTables
         case enablePureDownlink
         case multiplex
         case httpMask
     }
 
-    private struct LegacyHTTPMaskConfiguration: Decodable {
-        let multiplex: String?
-    }
-
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-
-        let legacyCustomTable = try container.decodeIfPresent(String.self, forKey: .customTable)
-            ?? container.decodeIfPresent(String.self, forKey: .table)
-            ?? ""
-        let decodedCustomTables = try container.decodeIfPresent([String].self, forKey: .customTables)
-        let legacyMultiplex = try container.decodeIfPresent(LegacyHTTPMaskConfiguration.self, forKey: .httpMask)?
-            .multiplex?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let topLevelMultiplex = try container.decodeIfPresent(String.self, forKey: .multiplex)
-        let multiplexValue = legacyMultiplex.flatMap { $0.isEmpty ? nil : $0 } ?? topLevelMultiplex ?? ""
-        let multiplex = SudokuMultiplex(normalized: multiplexValue)
-
         self.init(
             key: try container.decode(String.self, forKey: .key),
             aeadMethod: try container.decodeIfPresent(SudokuAEADMethod.self, forKey: .aeadMethod) ?? .chacha20Poly1305,
             paddingMin: try container.decodeIfPresent(Int.self, forKey: .paddingMin) ?? 5,
             paddingMax: try container.decodeIfPresent(Int.self, forKey: .paddingMax) ?? 15,
             asciiMode: try container.decodeIfPresent(SudokuASCIIMode.self, forKey: .asciiMode) ?? .preferEntropy,
-            customTables: Self.normalizeCustomTables(
-                decodedCustomTables ?? [],
-                legacy: legacyCustomTable,
-                legacyFallback: true
-            ),
+            customTables: try container.decodeIfPresent([String].self, forKey: .customTables) ?? [],
             enablePureDownlink: try container.decodeIfPresent(Bool.self, forKey: .enablePureDownlink) ?? true,
-            multiplex: multiplex,
+            multiplex: try container.decodeIfPresent(SudokuMultiplex.self, forKey: .multiplex) ?? .off,
             httpMask: try container.decodeIfPresent(SudokuHTTPMaskConfiguration.self, forKey: .httpMask) ?? .init()
         )
     }

@@ -13,11 +13,12 @@ struct SubscriptionOperations {
     let configurationStore: ConfigurationStore
     let reaction: StoreMutationReaction
 
-    func add(_ subscription: Subscription, configurations: [ProxyConfiguration]) {
+    func add(_ subscription: Subscription, result: SubscriptionFetcher.Result) {
         store.add(subscription)
-        let tagged = configurations.map { configuration in
+        let stableIDs = Self.stableIDs(of: result, in: subscription.id)
+        let tagged = result.configurations.map { configuration in
             ProxyConfiguration(
-                id: configuration.id, name: configuration.name,
+                id: stableIDs[configuration.id] ?? configuration.id, name: configuration.name,
                 serverAddress: configuration.serverAddress, serverPort: configuration.serverPort,
                 subscriptionId: subscription.id,
                 outbound: configuration.outbound
@@ -48,9 +49,12 @@ struct SubscriptionOperations {
 
         guard let current = store.subscriptions.first(where: { $0.id == subscriptionId }) else { return }
 
+        let stableIDs = Self.stableIDs(of: result, in: subscriptionId)
+        let claimedIDs = Set(stableIDs.values)
+
         let oldConfigurations = configurationStore.configurations(for: current)
         var oldByName: [String: [ProxyConfiguration]] = [:]
-        for old in oldConfigurations {
+        for old in oldConfigurations where !claimedIDs.contains(old.id) {
             oldByName[old.name, default: []].append(old)
         }
         var oldNameCursor: [String: Int] = [:]
@@ -60,7 +64,9 @@ struct SubscriptionOperations {
             let name = configuration.name
             let cursor = oldNameCursor[name, default: 0]
             let id: UUID
-            if let group = oldByName[name], cursor < group.count {
+            if let stableID = stableIDs[configuration.id] {
+                id = stableID
+            } else if let group = oldByName[name], cursor < group.count {
                 id = group[cursor].id
                 oldNameCursor[name] = cursor + 1
             } else {
@@ -77,5 +83,9 @@ struct SubscriptionOperations {
         configurationStore.replaceConfigurations(for: subscriptionId, with: newConfigurations)
         store.applyRefreshResult(result, to: subscriptionId)
         reaction.run()
+    }
+
+    private static func stableIDs(of result: SubscriptionFetcher.Result, in subscriptionId: UUID) -> [UUID: UUID] {
+        result.stableKeys.mapValues { UUID(namespace: subscriptionId, name: $0) }
     }
 }

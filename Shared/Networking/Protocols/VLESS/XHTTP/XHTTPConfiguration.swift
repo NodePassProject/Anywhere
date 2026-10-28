@@ -217,13 +217,8 @@ nonisolated struct XHTTPConfiguration: Codable, Equatable, Hashable {
         self.xmux = xmux
     }
     
-    private enum LegacyCodingKeys: String, CodingKey {
-        case sessionPlacement, sessionKey
-    }
-
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        let legacy = try decoder.container(keyedBy: LegacyCodingKeys.self)
         host = try c.decode(String.self, forKey: .host)
         path = try c.decode(String.self, forKey: .path)
         mode = try c.decode(XHTTPMode.self, forKey: .mode)
@@ -239,12 +234,8 @@ nonisolated struct XHTTPConfiguration: Codable, Equatable, Hashable {
         xPaddingPlacement = try c.decodeIfPresent(XHTTPPlacement.self, forKey: .xPaddingPlacement) ?? .queryInHeader
         xPaddingMethod = try c.decodeIfPresent(XHTTPPaddingMethod.self, forKey: .xPaddingMethod) ?? .repeatX
         uplinkHTTPMethod = try c.decodeIfPresent(String.self, forKey: .uplinkHTTPMethod) ?? "POST"
-        sessionIDPlacement = try c.decodeIfPresent(XHTTPPlacement.self, forKey: .sessionIDPlacement)
-            ?? legacy.decodeIfPresent(XHTTPPlacement.self, forKey: .sessionPlacement)
-            ?? .path
-        sessionIDKey = try c.decodeIfPresent(String.self, forKey: .sessionIDKey)
-            ?? legacy.decodeIfPresent(String.self, forKey: .sessionKey)
-            ?? ""
+        sessionIDPlacement = try c.decodeIfPresent(XHTTPPlacement.self, forKey: .sessionIDPlacement) ?? .path
+        sessionIDKey = try c.decodeIfPresent(String.self, forKey: .sessionIDKey) ?? ""
         seqPlacement = try c.decodeIfPresent(XHTTPPlacement.self, forKey: .seqPlacement) ?? .path
         seqKey = try c.decodeIfPresent(String.self, forKey: .seqKey) ?? ""
         sessionIDTable = try c.decodeIfPresent(String.self, forKey: .sessionIDTable) ?? ""
@@ -386,11 +377,11 @@ nonisolated struct XHTTPConfiguration: Codable, Equatable, Hashable {
         return build(host: host, path: path, mode: mode, extra: extra, downloadSettings: downloadSettings)
     }
     
-    static func parse(fromJSON json: [String: Any], serverAddress: String, tlsServerName: String? = nil, realityServerName: String? = nil) -> XHTTPConfiguration {
+    static func parse(fromJSON json: [String: Any], serverAddress: String, tlsServerName: String? = nil, realityServerName: String? = nil, downloadSettings: XHTTPDownloadSettings? = nil) -> XHTTPConfiguration {
         let host = (json["host"] as? String) ?? tlsServerName ?? realityServerName ?? serverAddress
         let path = (json["path"] as? String) ?? "/"
         let mode = XHTTPMode(rawValue: (json["mode"] as? String) ?? "auto") ?? .auto
-        return build(host: host, path: path, mode: mode, extra: json, downloadSettings: nil)
+        return build(host: host, path: path, mode: mode, extra: json, downloadSettings: downloadSettings)
     }
     
     static func parseDownloadSettings(from json: [String: Any]?, parentExtra: [String: Any] = [:]) -> XHTTPDownloadSettings? {

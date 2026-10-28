@@ -347,17 +347,7 @@ nonisolated struct ProxyConfiguration: Identifiable, Hashable, Codable, Sendable
         serverPort = try container.decode(UInt16.self, forKey: .serverPort)
         resolvedIP = try container.decodeIfPresent(String.self, forKey: .resolvedIP)
         subscriptionId = try container.decodeIfPresent(UUID.self, forKey: .subscriptionId)
-
-        if let outbound = try container.decodeIfPresent(Outbound.self, forKey: .outbound) {
-            self.outbound = outbound
-        } else {
-            self.outbound = try Outbound(
-                legacyFrom: decoder,
-                serverAddress: serverAddress,
-                serverPort: serverPort
-            )
-        }
-
+        outbound = try container.decode(Outbound.self, forKey: .outbound)
         chain = try container.decodeIfPresent([ProxyConfiguration].self, forKey: .chain)
         deletedAt = try container.decodeIfPresent(Date.self, forKey: .deletedAt)
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? deletedAt ?? .distantPast

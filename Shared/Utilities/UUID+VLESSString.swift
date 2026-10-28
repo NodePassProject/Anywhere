@@ -26,9 +26,15 @@ nonisolated extension UUID {
 
         guard length >= 1, length <= 30 else { return nil }
 
+        self = UUID(namespace: Self.null, name: vlessString)
+    }
+
+    private static let null = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+
+    init(namespace: UUID, name: String) {
         var hasher = Insecure.SHA1()
-        hasher.update(data: Data(count: 16))
-        hasher.update(data: Data(vlessString.utf8))
+        withUnsafeBytes(of: namespace.uuid) { hasher.update(bufferPointer: $0) }
+        hasher.update(data: Data(name.utf8))
         var bytes = Array(hasher.finalize().prefix(16))
         bytes[6] = (bytes[6] & 0x0f) | (5 << 4)
         bytes[8] = (bytes[8] & 0x3f) | 0x80
