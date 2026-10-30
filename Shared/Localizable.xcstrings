@@ -2728,6 +2728,58 @@
     "AnyTLS" : {
       "shouldTranslate" : false
     },
+    "AnyTLS (not recommended)" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "AnyTLS (غير موصى به)"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "AnyTLS (not recommended)"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "AnyTLS (no recomendado)"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "AnyTLS (توصیه نمی‌شود)"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "AnyTLS (не рекомендуется)"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "AnyTLS (önerilmez)"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "AnyTLS (không khuyến nghị)"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "AnyTLS（不推荐）"
+          }
+        }
+      }
+    },
     "Anywhere" : {
       "shouldTranslate" : false
     },
