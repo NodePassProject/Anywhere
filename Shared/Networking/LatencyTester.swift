@@ -53,6 +53,7 @@ nonisolated enum LatencyTester {
 
     private static func resolvedConfiguration(_ configuration: ProxyConfiguration) async -> ProxyConfiguration {
         guard let chain = configuration.chain, let entry = chain.first else {
+            guard !configuration.isDirect else { return configuration }
             return configuration.withResolvedIP(
                 await DNSResolver.proxies.resolveHost(configuration.serverAddress, forceFresh: true)
             )
@@ -65,7 +66,9 @@ nonisolated enum LatencyTester {
 
     private static func performTest(_ configuration: ProxyConfiguration) async throws -> Int {
         let entry = configuration.chain?.first ?? configuration
-        _ = await DNSResolver.proxies.resolveAll(entry.serverAddress)
+        if !entry.isDirect {
+            _ = await DNSResolver.proxies.resolveAll(entry.serverAddress)
+        }
 
         let client = ProxyClient(configuration: configuration, useResolvedAddressForDirectDial: true)
 

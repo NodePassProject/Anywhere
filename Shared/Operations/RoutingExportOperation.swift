@@ -77,7 +77,7 @@ struct RoutingExportOperation {
         var resolvedIPsByAddress: [String: String] = [:]
         for configuration in resolvedTargets.values where configuration.chain?.isEmpty ?? true {
             let address = configuration.serverAddress
-            guard resolvedIPsByAddress[address] == nil else { continue }
+            guard !address.isEmpty, resolvedIPsByAddress[address] == nil else { continue }
             if let ip = await DNSResolver.proxies.resolveHost(address) {
                 resolvedIPsByAddress[address] = ip
             }

@@ -46,6 +46,7 @@ nonisolated enum ClashProxyParser {
         case "ss":        return parseShadowsocksProxy(node)
         case "socks5":    return parseSOCKS5Proxy(node)
         case "http":      return parseRFCProxy(node)
+        case "direct":    return parseDirectProxy(node)
         default:          return nil
         }
     }
@@ -370,6 +371,18 @@ nonisolated enum ClashProxyParser {
                     password: node.string(forKey: "password")
                 )
             )
+        )
+    }
+
+    // MARK: - Direct
+
+    private static func parseDirectProxy(_ node: YAML.Node) -> ProxyConfiguration? {
+        guard let name = node.string(forKey: "name") else { return nil }
+        return ProxyConfiguration(
+            name: name,
+            serverAddress: "",
+            serverPort: 0,
+            outbound: .direct(DirectConfiguration())
         )
     }
 

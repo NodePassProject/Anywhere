@@ -384,6 +384,8 @@ nonisolated final class ProxyClient: Sendable {
             return try await connectWithRFC(request)
         case .shadowsocks:
             return try await connectWithShadowsocks(request)
+        case .direct:
+            return try await connectWithDirect(request)
         }
     }
     
@@ -423,6 +425,7 @@ nonisolated extension OutboundProtocol {
         case .shadowsocks: .shadowsocks
         case .socks5: .socks5
         case .rfc: .rfc
+        case .direct: .direct
         }
     }
 }

@@ -99,9 +99,9 @@ Each element of `proxies` takes one of three forms.
 | Key        | Type    | Meaning |
 | ---------- | ------- | ------- |
 | `name`     | string  | **Required**, non-empty. Display name. |
-| `server`   | string  | **Required.** Host name or IP address; brackets around an IPv6 address are removed. |
-| `port`     | integer | **Required**, 1–65535. |
-| `protocol` | string  | **Required.** One of `nowhere`, `vless`, `hysteria`, `sudoku`, `trojan`, `anytls`, `shadowsocks`, `socks5`, `rfc`. |
+| `server`   | string  | **Required** except for `direct`. Host name or IP address; brackets around an IPv6 address are removed. |
+| `port`     | integer | **Required** except for `direct`. 1–65535. |
+| `protocol` | string  | **Required.** One of `nowhere`, `vless`, `hysteria`, `sudoku`, `trojan`, `anytls`, `shadowsocks`, `socks5`, `rfc`, `direct`. |
 | `id`       | string  | Stable key, unique in the document. See [Stable identities](#stable-identities). |
 | `use`      | string  | Name of a template to start from. See [Templates](#templates). |
 
@@ -110,7 +110,7 @@ The remaining keys depend on `protocol`; see [Protocols](#protocols).
 **A share link,** written as a plain string. It is read exactly like a line of
 a link-list subscription: `nowhere://`, `vless://`, `hysteria2://`, `hy2://`,
 `sudoku://`, `trojan://`, `anytls://`, `ss://`, `socks5://`, `socks://`,
-`rfc://`, and `http(s)://` for an HTTP proxy.
+`rfc://`, and `direct://`.
 
 ```jsonc
 "ss://YWVzLTEyOC1nY206c2VjcmV0@ss.example.com:8388#Plain"
@@ -197,6 +197,7 @@ is checked strictly.
 | `shadowsocks` | `method` | `password` (empty) | — |
 | `socks5`      | — | `username`; `password` | — |
 | `rfc`         | — | `username` (no `:`); `password` | `none`, `tls`; default `tls` |
+| `direct`      | — | — | — |
 
 Protocol notes:
 
@@ -217,6 +218,8 @@ Protocol notes:
   `2022-blake3-aes-256-gcm`, `2022-blake3-chacha20-poly1305`, or `none`.
 - **RFC** is an HTTP `CONNECT` proxy. With TLS and no `alpn`, it offers `h2`
   and `http/1.1`.
+- **Direct** has no server. Requests assigned to it leave the device directly,
+  as if routed `DIRECT`.
 
 ---
 

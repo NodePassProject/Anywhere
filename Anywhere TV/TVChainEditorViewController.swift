@@ -278,7 +278,7 @@ class TVChainEditorViewController: UITableViewController {
 
     private func presentProxyPicker() {
         let picker = TVProxyPickerViewController(
-            configurations: container.configurationStore.configurations,
+            configurations: container.configurationStore.configurations.filter { !$0.isDirect },
             excludedIds: Set(selectedProxyIds)
         ) { [weak self] selected in
             self?.selectedProxyIds.append(selected.id)

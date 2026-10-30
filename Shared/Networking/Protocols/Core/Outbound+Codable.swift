@@ -10,7 +10,7 @@ import Foundation
 nonisolated extension Outbound: Codable {
     private enum CodingKeys: String, CodingKey {
         case `protocol`
-        case nowhere, vless, hysteria, sudoku, trojan, anytls, shadowsocks, socks5, rfc
+        case nowhere, vless, hysteria, sudoku, trojan, anytls, shadowsocks, socks5, rfc, direct
     }
 
     init(from decoder: Decoder) throws {
@@ -35,6 +35,8 @@ nonisolated extension Outbound: Codable {
             self = .socks5(try container.decode(SOCKS5Configuration.self, forKey: .socks5))
         case .rfc:
             self = .rfc(try container.decode(RFCConfiguration.self, forKey: .rfc))
+        case .direct:
+            self = .direct(try container.decodeIfPresent(DirectConfiguration.self, forKey: .direct) ?? DirectConfiguration())
         }
     }
 
@@ -61,6 +63,8 @@ nonisolated extension Outbound: Codable {
             try container.encode(configuration, forKey: .socks5)
         case .rfc(let configuration):
             try container.encode(configuration, forKey: .rfc)
+        case .direct(let configuration):
+            try container.encode(configuration, forKey: .direct)
         }
     }
 }

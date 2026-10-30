@@ -34,12 +34,12 @@ struct ChainEditorView: View {
     private var pickerSections: [MultiSelectPickerView.ItemSection] {
         let excluded = Set(selectedProxyIds)
         var sections: [MultiSelectPickerView.ItemSection] = []
-        let standalone = configStore.configurations.filter { $0.subscriptionId == nil && !excluded.contains($0.id) }
+        let standalone = configStore.configurations.filter { $0.subscriptionId == nil && !excluded.contains($0.id) && !$0.isDirect }
         if !standalone.isEmpty {
             sections.append(MultiSelectPickerView.ItemSection(id: "standalone", header: nil, items: standalone.map(pickerItem)))
         }
         for subscription in subscriptionStore.subscriptions {
-            let configurations = configStore.configurations(for: subscription).filter { !excluded.contains($0.id) }
+            let configurations = configStore.configurations(for: subscription).filter { !excluded.contains($0.id) && !$0.isDirect }
             if !configurations.isEmpty {
                 sections.append(MultiSelectPickerView.ItemSection(id: subscription.id.uuidString, header: subscription.name, items: configurations.map(pickerItem)))
             }

@@ -120,7 +120,7 @@ final class TunnelController {
         }
 
         let resolved: ProxyConfiguration
-        if configuration.chain?.isEmpty == false {
+        if configuration.chain?.isEmpty == false || configuration.isDirect {
             resolved = configuration
         } else {
             let resolvedIP = await DNSResolver.proxies.resolveHost(configuration.serverAddress, forceFresh: refreshingIP)

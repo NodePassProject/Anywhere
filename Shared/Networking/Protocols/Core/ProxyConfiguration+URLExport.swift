@@ -38,6 +38,8 @@ extension ProxyConfiguration {
             return toSOCKS5URLString()
         case .rfc:
             return toRFCURLString()
+        case .direct:
+            return toDirectURLString()
         }
     }
 
@@ -266,6 +268,11 @@ extension ProxyConfiguration {
         
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
         return "ss://\(encoded)@\(bracketedServerAddress):\(serverPort)/#\(fragment)"
+    }
+
+    private func toDirectURLString() -> String {
+        let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
+        return "direct://#\(fragment)"
     }
 
     private func toSOCKS5URLString() -> String {

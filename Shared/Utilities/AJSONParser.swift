@@ -156,15 +156,27 @@ nonisolated enum AJSONParser {
         var name = try proxy.requiredString("name")
         DeviceCensorship.deCensor(&name)
 
-        var server = try proxy.requiredString("server").trimmingCharacters(in: .whitespaces)
-        if server.hasPrefix("["), server.hasSuffix("]") {
-            server = String(server.dropFirst().dropLast())
+        guard let outboundProtocol = OutboundProtocol(rawValue: try proxy.requiredString("protocol")) else {
+            throw Invalid()
         }
-        guard !server.isEmpty,
-              let rawPort = try proxy.int("port"),
-              let port = UInt16(exactly: rawPort), port > 0,
-              let outboundProtocol = OutboundProtocol(rawValue: try proxy.requiredString("protocol"))
-        else { throw Invalid() }
+
+        let server: String
+        let port: UInt16
+        if outboundProtocol == .direct {
+            server = ""
+            port = 0
+        } else {
+            var trimmed = try proxy.requiredString("server").trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("["), trimmed.hasSuffix("]") {
+                trimmed = String(trimmed.dropFirst().dropLast())
+            }
+            guard !trimmed.isEmpty,
+                  let rawPort = try proxy.int("port"),
+                  let validPort = UInt16(exactly: rawPort), validPort > 0
+            else { throw Invalid() }
+            server = trimmed
+            port = validPort
+        }
 
         let outbound: Outbound
         switch outboundProtocol {
@@ -177,6 +189,7 @@ nonisolated enum AJSONParser {
         case .shadowsocks:  outbound = .shadowsocks(try parseShadowsocks(proxy))
         case .socks5:       outbound = .socks5(try parseSOCKS5(proxy))
         case .rfc:          outbound = .rfc(try parseRFC(proxy, server: server))
+        case .direct:       outbound = .direct(DirectConfiguration())
         }
 
         return ProxyConfiguration(name: name, serverAddress: server, serverPort: port, outbound: outbound)
@@ -402,33 +415,39 @@ nonisolated enum AJSONParser {
         case "ws":
             let heartbeatPeriod = try transport.int("heartbeatPeriod") ?? 0
             guard let heartbeat = UInt32(exactly: heartbeatPeriod) else { throw Invalid() }
-            return .ws(WebSocketConfiguration(
-                host: try transport.nonEmptyString("host") ?? server,
-                path: try transport.nonEmptyString("path") ?? "/",
-                headers: try transport.stringMap("headers") ?? [:],
-                maxEarlyData: try transport.int("maxEarlyData") ?? 0,
-                earlyDataHeaderName: try transport.nonEmptyString("earlyDataHeaderName") ?? "Sec-WebSocket-Protocol",
-                heartbeatPeriod: heartbeat
-            ))
+            return .ws(
+                WebSocketConfiguration(
+                    host: try transport.nonEmptyString("host") ?? server,
+                    path: try transport.nonEmptyString("path") ?? "/",
+                    headers: try transport.stringMap("headers") ?? [:],
+                    maxEarlyData: try transport.int("maxEarlyData") ?? 0,
+                    earlyDataHeaderName: try transport.nonEmptyString("earlyDataHeaderName") ?? "Sec-WebSocket-Protocol",
+                    heartbeatPeriod: heartbeat
+                )
+            )
 
         case "httpupgrade":
-            return .httpUpgrade(HTTPUpgradeConfiguration(
-                host: try transport.nonEmptyString("host") ?? server,
-                path: try transport.nonEmptyString("path") ?? "/",
-                headers: try transport.stringMap("headers") ?? [:]
-            ))
+            return .httpUpgrade(
+                HTTPUpgradeConfiguration(
+                    host: try transport.nonEmptyString("host") ?? server,
+                    path: try transport.nonEmptyString("path") ?? "/",
+                    headers: try transport.stringMap("headers") ?? [:]
+                )
+            )
 
         case "grpc":
-            return .grpc(GRPCConfiguration(
-                serviceName: try transport.string("serviceName") ?? "",
-                authority: try transport.string("authority") ?? "",
-                multiMode: try transport.bool("multiMode") ?? false,
-                userAgent: try transport.string("userAgent") ?? "",
-                initialWindowsSize: try transport.int("initialWindowsSize") ?? 0,
-                idleTimeout: try transport.int("idleTimeout") ?? 0,
-                healthCheckTimeout: try transport.int("healthCheckTimeout") ?? 0,
-                permitWithoutStream: try transport.bool("permitWithoutStream") ?? false
-            ))
+            return .grpc(
+                GRPCConfiguration(
+                    serviceName: try transport.string("serviceName") ?? "",
+                    authority: try transport.string("authority") ?? "",
+                    multiMode: try transport.bool("multiMode") ?? false,
+                    userAgent: try transport.string("userAgent") ?? "",
+                    initialWindowsSize: try transport.int("initialWindowsSize") ?? 0,
+                    idleTimeout: try transport.int("idleTimeout") ?? 0,
+                    healthCheckTimeout: try transport.int("healthCheckTimeout") ?? 0,
+                    permitWithoutStream: try transport.bool("permitWithoutStream") ?? false
+                )
+            )
 
         case "xhttp":
             let _: XHTTPMode? = try transport.enumeration("mode")
@@ -440,16 +459,18 @@ nonisolated enum AJSONParser {
             if case .tls(let tls) = security { tlsServerName = tls.serverName } else { tlsServerName = nil }
             let realityServerName: String?
             if case .reality(let reality) = security { realityServerName = reality.serverName } else { realityServerName = nil }
-            return .xhttp(XHTTPConfiguration.parse(
-                fromJSON: json,
-                serverAddress: server,
-                tlsServerName: tlsServerName,
-                realityServerName: realityServerName,
-                downloadSettings: XHTTPConfiguration.parseDownloadSettings(
-                    from: json["downloadSettings"] as? [String: Any],
-                    parentExtra: parentExtra
+            return .xhttp(
+                XHTTPConfiguration.parse(
+                    fromJSON: json,
+                    serverAddress: server,
+                    tlsServerName: tlsServerName,
+                    realityServerName: realityServerName,
+                    downloadSettings: XHTTPConfiguration.parseDownloadSettings(
+                        from: json["downloadSettings"] as? [String: Any],
+                        parentExtra: parentExtra
+                    )
                 )
-            ))
+            )
 
         default:
             throw Invalid()
@@ -524,7 +545,6 @@ nonisolated private struct Fields {
         return value
     }
 
-    /// A layer written either as its type name (`"tls"`) or as an object with a `type` key.
     func layer(_ key: String) throws -> (type: String, fields: Fields)? {
         guard let value = lookup(key) else { return nil }
         if let type = value as? String { return (type, Fields([:])) }

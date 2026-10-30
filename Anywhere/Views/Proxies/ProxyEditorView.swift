@@ -133,9 +133,12 @@ struct ProxyEditorView: View {
     private var isSOCKS5: Bool { selectedProtocol == .socks5 }
     private var isRFC: Bool { selectedProtocol == .rfc }
     private var isRFCTLS: Bool { rfcSecurity == "tls" }
+    private var isDirect: Bool { selectedProtocol == .direct }
     
     private var isValid: Bool {
-        guard !name.isEmpty, !serverAddress.isEmpty else { return false }
+        guard !name.isEmpty else { return false }
+        if isDirect { return true }
+        guard !serverAddress.isEmpty else { return false }
         if isNowhere {
             return !nowhereKey.isEmpty && validNowherePort(serverPort) != nil
         }
@@ -211,12 +214,15 @@ struct ProxyEditorView: View {
                         Text(String("Shadowsocks")).tag(OutboundProtocol.shadowsocks)
                         Text(String("SOCKS5")).tag(OutboundProtocol.socks5)
                         Text(String("RFC")).tag(OutboundProtocol.rfc)
+                        Text(String("Direct")).tag(OutboundProtocol.direct)
                     } label: {
                         TextWithColorfulIcon(title: "Protocol", systemName: "arrow.down.left.arrow.up.right.circle.fill", foregroundStyle: .white, backgroundStyle: .orange.gradient)
                     }
                 }
                 
-                serverSettings
+                if !isDirect {
+                    serverSettings
+                }
                 
                 networkSettings
                 
@@ -1173,6 +1179,8 @@ struct ProxyEditorView: View {
                 rfcECHConfig = tls.echConfig ?? ""
                 rfcFingerprint = tls.fingerprint
             }
+        case .direct:
+            break
         }
     }
     
@@ -1222,9 +1230,15 @@ struct ProxyEditorView: View {
     }
     
     private func save() {
-        guard let port = UInt16(serverPort), !isNowhere || port != 0 else { return }
+        let port: UInt16
+        if isDirect {
+            port = 0
+        } else {
+            guard let parsedPort = UInt16(serverPort), !isNowhere || parsedPort != 0 else { return }
+            port = parsedPort
+        }
         let parsedUUID: UUID
-        if isNowhere || isHysteria || isTrojan || isAnyTLS || isShadowsocks || isSOCKS5 || isSudoku || isRFC {
+        if isNowhere || isHysteria || isTrojan || isAnyTLS || isShadowsocks || isSOCKS5 || isSudoku || isRFC || isDirect {
             parsedUUID = self.configuration?.id ?? UUID()
         } else {
             guard let uuid = UUID(vlessString: vlessUUID) else { return }
@@ -1403,6 +1417,8 @@ struct ProxyEditorView: View {
                     password: socks5Password.isEmpty ? nil : socks5Password
                 )
             )
+        case .direct:
+            outbound = .direct(DirectConfiguration())
         case .rfc:
             let securityLayer: GenericSecurityLayer
             if isRFCTLS {
@@ -1431,7 +1447,7 @@ struct ProxyEditorView: View {
         let configuration = ProxyConfiguration(
             id: self.configuration?.id ?? UUID(),
             name: name,
-            serverAddress: bareAddress,
+            serverAddress: isDirect ? "" : bareAddress,
             serverPort: port,
             subscriptionId: self.configuration?.subscriptionId,
             outbound: outbound

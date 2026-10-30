@@ -17,6 +17,7 @@ nonisolated enum OutboundProtocol: String, Codable, CaseIterable {
     case shadowsocks
     case socks5
     case rfc
+    case direct
 
     enum InitialDataPolicy: Equatable {
         case none
@@ -34,7 +35,7 @@ nonisolated enum OutboundProtocol: String, Codable, CaseIterable {
         switch self {
         case .nowhere, .vless, .sudoku:
             return .unbounded
-        case .hysteria, .trojan, .anytls, .shadowsocks, .socks5, .rfc:
+        case .hysteria, .trojan, .anytls, .shadowsocks, .socks5, .rfc, .direct:
             return .none
         }
     }
@@ -45,7 +46,7 @@ nonisolated enum OutboundProtocol: String, Codable, CaseIterable {
             return .udp
         case .vless, .trojan, .anytls, .socks5:
             return .tcp
-        case .shadowsocks:
+        case .shadowsocks, .direct:
             return downstream
         case .sudoku, .rfc:
             return downstream == .tcp ? .tcp : nil
@@ -72,6 +73,8 @@ nonisolated enum OutboundProtocol: String, Codable, CaseIterable {
             "SOCKS5"
         case .rfc:
             "RFC"
+        case .direct:
+            "Direct"
         }
     }
 }
@@ -88,6 +91,7 @@ nonisolated enum Outbound: Hashable, Sendable {
     case shadowsocks(ShadowsocksConfiguration)
     case socks5(SOCKS5Configuration)
     case rfc(RFCConfiguration)
+    case direct(DirectConfiguration)
 
     var outboundProtocol: OutboundProtocol {
         switch self {
@@ -100,6 +104,7 @@ nonisolated enum Outbound: Hashable, Sendable {
         case .shadowsocks:  .shadowsocks
         case .socks5:       .socks5
         case .rfc:          .rfc
+        case .direct:       .direct
         }
     }
 }
@@ -169,6 +174,8 @@ nonisolated struct ProxyConfiguration: Identifiable, Hashable, Codable, Sendable
     var connectAddress: String { resolvedIP ?? serverAddress }
 
     var outboundProtocol: OutboundProtocol { outbound.outboundProtocol }
+
+    var isDirect: Bool { outboundProtocol == .direct }
     
     var genericSecurityLayer: GenericSecurityLayer {
         switch outbound {
@@ -194,6 +201,7 @@ nonisolated struct ProxyConfiguration: Identifiable, Hashable, Codable, Sendable
         case .shadowsocks:      tag = nil
         case .socks5:           tag = nil
         case .rfc:              tag = "TCP"
+        case .direct:           tag = nil
         }
         return tag
     }
@@ -256,14 +264,14 @@ nonisolated struct ProxyConfiguration: Identifiable, Hashable, Codable, Sendable
             true
         case .vless(let configuration):
             configuration.isXHTTPOverHTTP3
-        case .sudoku, .trojan, .anytls, .shadowsocks, .socks5, .rfc:
+        case .sudoku, .trojan, .anytls, .shadowsocks, .socks5, .rfc, .direct:
             false
         }
     }
 
     var dialsOwnChain: Bool {
         switch outbound {
-        case .anytls, .rfc, .sudoku, .hysteria:
+        case .anytls, .rfc, .sudoku, .hysteria, .direct:
             true
         case .nowhere:
             isQUICTransport

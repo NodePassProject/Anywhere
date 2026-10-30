@@ -8,7 +8,7 @@
 import Foundation
 
 nonisolated extension ProxyConfiguration {
-    static let parsableURLPrefixes = ["nowhere://", "vless://", "hysteria2://", "hy2://", "trojan://", "anytls://", "ss://", "socks5://", "socks://", "sudoku://", "rfc://"]
+    static let parsableURLPrefixes = ["nowhere://", "vless://", "hysteria2://", "hy2://", "trojan://", "anytls://", "ss://", "socks5://", "socks://", "sudoku://", "rfc://", "direct://"]
     static let subscriptionOnlyURLPrefixes = ["https://", "http://"]
     static let subscriptionEntryPrefixes = parsableURLPrefixes + subscriptionOnlyURLPrefixes
 
@@ -55,7 +55,10 @@ nonisolated extension ProxyConfiguration {
         if url.hasPrefix("rfc://") {
             return try parseRFC(url: url)
         }
-        throw AnywhereError.parse(.invalidURL("URL must start with nowhere://, vless://, hysteria2://, sudoku://, trojan://, anytls://, ss://, socks5://, or rfc://"))
+        if url.hasPrefix("direct://") {
+            return try parseDirect(url: url)
+        }
+        throw AnywhereError.parse(.invalidURL("URL must start with nowhere://, vless://, hysteria2://, sudoku://, trojan://, anytls://, ss://, socks5://, rfc://, or direct://"))
     }
 
     // MARK: - Per-Scheme Parsers
@@ -403,7 +406,18 @@ nonisolated extension ProxyConfiguration {
         let password = String(decodedString[decodedString.index(after: colonIndex)...])
         return (method, password)
     }
-    
+
+    private static func parseDirect(url: String) throws -> ProxyConfiguration {
+        var remaining = String(url.dropFirst("direct://".count))
+        let fragmentName = extractFragment(&remaining)
+        return ProxyConfiguration(
+            name: fragmentName ?? "Direct",
+            serverAddress: "",
+            serverPort: 0,
+            outbound: .direct(DirectConfiguration())
+        )
+    }
+
     private static func parseSOCKS5(url: String) throws -> ProxyConfiguration {
         let urlWithoutScheme: String
         if url.hasPrefix("socks5://") {

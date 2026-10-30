@@ -19,7 +19,7 @@ nonisolated enum TransportReclaim {
             case .anytls:   AnyTLSMultiplexerRegistry.shared.reclaim()
             case .sudoku:   SudokuMultiplexerRegistry.shared.reclaim()
             case .rfc:      RFCMultiplexerRegistry.shared.reclaim()
-            case .trojan, .shadowsocks, .socks5:
+            case .trojan, .shadowsocks, .socks5, .direct:
                 break
             }
         }

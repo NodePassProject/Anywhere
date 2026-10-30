@@ -134,6 +134,7 @@ class TVProxyEditorViewController: UITableViewController {
     private var isSOCKS5: Bool { selectedProtocol == .socks5 }
     private var isRFC: Bool { selectedProtocol == .rfc }
     private var isRFCTLS: Bool { rfcSecurity == "tls" }
+    private var isDirect: Bool { selectedProtocol == .direct }
 
     // MARK: - Form Structure
 
@@ -197,6 +198,7 @@ class TVProxyEditorViewController: UITableViewController {
             ("Shadowsocks", "shadowsocks"),
             ("SOCKS5", "socks5"),
             ("RFC", "rfc"),
+            ("Direct", "direct"),
         ]
         sections.append((String(localized: "Protocol"), [
             .selection(label: String(localized: "Protocol"), value: selectedProtocol.name, options: protocolOptions, key: .outboundProtocol),
@@ -260,7 +262,9 @@ class TVProxyEditorViewController: UITableViewController {
             serverRows.append(.text(label: String(localized: "Username"), value: rfcUsername, placeholder: String(localized: "Username"), key: .rfcUsername))
             serverRows.append(.text(label: String(localized: "Password"), value: rfcPassword, placeholder: String(localized: "Password"), key: .rfcPassword, secure: true))
         }
-        sections.append((String(localized: "Server"), serverRows))
+        if !isDirect {
+            sections.append((String(localized: "Server"), serverRows))
+        }
 
         if isNowhere {
             var transportRows: [RowType] = [
@@ -552,7 +556,9 @@ class TVProxyEditorViewController: UITableViewController {
     }
 
     private var isValid: Bool {
-        guard !name.isEmpty, !serverAddress.isEmpty else { return false }
+        guard !name.isEmpty else { return false }
+        if isDirect { return true }
+        guard !serverAddress.isEmpty else { return false }
         if isNowhere {
             return !nowhereKey.isEmpty && validNowherePort(serverPort) != nil
         }
@@ -997,6 +1003,8 @@ class TVProxyEditorViewController: UITableViewController {
                 rfcECH = tls.echConfig ?? ""
                 rfcFingerprint = tls.fingerprint
             }
+        case .direct:
+            break
         }
     }
 
@@ -1051,9 +1059,15 @@ class TVProxyEditorViewController: UITableViewController {
     }
 
     private func save() {
-        guard let port = UInt16(serverPort), !isNowhere || port != 0 else { return }
+        let port: UInt16
+        if isDirect {
+            port = 0
+        } else {
+            guard let parsedPort = UInt16(serverPort), !isNowhere || parsedPort != 0 else { return }
+            port = parsedPort
+        }
         let parsedUUID: UUID
-        if isNowhere || isHysteria || isTrojan || isAnyTLS || isShadowsocks || isSOCKS5 || isSudoku || isRFC {
+        if isNowhere || isHysteria || isTrojan || isAnyTLS || isShadowsocks || isSOCKS5 || isSudoku || isRFC || isDirect {
             parsedUUID = existingConfiguration?.id ?? UUID()
         } else {
             guard let parsed = UUID(uuidString: vlessUUID) else { return }
@@ -1228,6 +1242,8 @@ class TVProxyEditorViewController: UITableViewController {
                     password: socks5Password.isEmpty ? nil : socks5Password
                 )
             )
+        case .direct:
+            outbound = .direct(DirectConfiguration())
         case .rfc:
             let securityLayer: GenericSecurityLayer
             if isRFCTLS {
@@ -1258,7 +1274,7 @@ class TVProxyEditorViewController: UITableViewController {
         let configuration = ProxyConfiguration(
             id: existingConfiguration?.id ?? UUID(),
             name: name,
-            serverAddress: bareAddress,
+            serverAddress: isDirect ? "" : bareAddress,
             serverPort: port,
             subscriptionId: existingConfiguration?.subscriptionId,
             outbound: outbound
