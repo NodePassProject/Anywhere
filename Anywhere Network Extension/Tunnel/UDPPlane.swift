@@ -189,7 +189,7 @@ actor UDPPlane {
             if let destination = TunnelStack.dnsDestination(
                 for: dstAddress.description, exempting: udpConfig.interceptExemptDNSServers
             ) {
-                if await handleDNSQuery(datagram, destination: destination) {
+                if await handleDNSQuery(datagram, destination: destination, udpConfig: udpConfig) {
                     return
                 }
             }
@@ -615,9 +615,13 @@ actor UDPPlane {
         for session in all { session.cancel() }
     }
 
-    // MARK: - DNS interception (fake-IP)
+    // MARK: - DNS interception (synthetic address)
 
-    private func handleDNSQuery(_ datagram: InboundDatagram, destination: TunnelStack.DNSDestination) async -> Bool {
+    private func handleDNSQuery(
+        _ datagram: InboundDatagram,
+        destination: TunnelStack.DNSDestination,
+        udpConfig: TunnelStack.UDPConfig
+    ) async -> Bool {
         let payload = datagram.payload
         guard let parsed = payload.withUnsafeBytes({ ptr -> (domain: String, qtype: UInt16)? in
             guard let base = ptr.bindMemory(to: UInt8.self).baseAddress else { return nil }
@@ -672,13 +676,23 @@ actor UDPPlane {
             return false
         }
 
-        let offset = stack.fakeIPPool.allocate(domain: domain, verdict: ruleMatch, verdictVersion: rulesVersion)
-        let ipv4 = FakeIPPool.ipv4Bytes(offset: offset)
+        if udpConfig.syntheticAddressExcludedDomains.contains(domain) {
+            if destination == .anywhereResolver {
+                if await forwardToUpstreamResolver(datagram) {
+                    return true
+                }
+                return sendNODATA(answering: datagram, qtype: qtype)
+            }
+            return false
+        }
+
+        let offset = stack.syntheticAddressPool.allocate(domain: domain, verdict: ruleMatch, verdictVersion: rulesVersion)
+        let ipv4 = SyntheticAddressPool.ipv4Bytes(offset: offset)
         return sendAddressAnswer(
             answering: datagram,
             ip: [ipv4.0, ipv4.1, ipv4.2, ipv4.3],
             qtype: qtype,
-            ttl: TunnelConstants.dnsFakeIPAnswerTTL
+            ttl: TunnelConstants.dnsSyntheticAddressAnswerTTL
         )
     }
 

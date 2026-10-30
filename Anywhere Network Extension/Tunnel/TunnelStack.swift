@@ -339,6 +339,7 @@ actor TunnelStack {
         let blockWebRTC: Bool
         let mitmEnabled: Bool
         let interceptExemptDNSServers: Set<String>
+        let syntheticAddressExcludedDomains: DomainSuffixSet
 
         init(
             configuration: ProxyConfiguration?,
@@ -348,7 +349,8 @@ actor TunnelStack {
             quicPolicy: QUICPolicy,
             blockWebRTC: Bool,
             mitmEnabled: Bool,
-            interceptExemptDNSServers: Set<String>
+            interceptExemptDNSServers: Set<String>,
+            syntheticAddressExcludedDomains: DomainSuffixSet
         ) {
             self.configuration = configuration
             self.configurationID = configurationID
@@ -358,6 +360,7 @@ actor TunnelStack {
             self.blockWebRTC = blockWebRTC
             self.mitmEnabled = mitmEnabled
             self.interceptExemptDNSServers = interceptExemptDNSServers
+            self.syntheticAddressExcludedDomains = syntheticAddressExcludedDomains
         }
     }
     private let _udpConfig = Mutex(
@@ -369,7 +372,8 @@ actor TunnelStack {
             quicPolicy: .blocked,
             blockWebRTC: true,
             mitmEnabled: false,
-            interceptExemptDNSServers: []
+            interceptExemptDNSServers: [],
+            syntheticAddressExcludedDomains: DomainSuffixSet([])
         )
     )
 
@@ -388,7 +392,8 @@ actor TunnelStack {
             quicPolicy: settings.quicPolicy,
             blockWebRTC: settings.blockWebRTC,
             mitmEnabled: mitmEnabled,
-            interceptExemptDNSServers: settings.interceptExemptDNSServers
+            interceptExemptDNSServers: settings.interceptExemptDNSServers,
+            syntheticAddressExcludedDomains: DomainSuffixSet(settings.syntheticAddressExcludedDomainSuffixes)
         )
         _udpConfig.withLock { $0 = snapshot }
     }
@@ -440,16 +445,16 @@ actor TunnelStack {
         tcpConnections.withLock { $0.remove(id) }
     }
 
-    nonisolated let fakeIPPool: FakeIPPool
+    nonisolated let syntheticAddressPool: SyntheticAddressPool
 
     nonisolated let connectionRouter: ConnectionRouter
 
     init() {
-        let fakeIPPool = FakeIPPool()
+        let syntheticAddressPool = SyntheticAddressPool()
         let domainRouter = DomainRouter()
-        self.fakeIPPool = fakeIPPool
+        self.syntheticAddressPool = syntheticAddressPool
         self.domainRouter = domainRouter
-        self.connectionRouter = ConnectionRouter(fakeIPPool: fakeIPPool, domainRouter: domainRouter)
+        self.connectionRouter = ConnectionRouter(syntheticAddressPool: syntheticAddressPool, domainRouter: domainRouter)
         let (commandStream, commandContinuation) = AsyncStream.makeStream(of: UDPPlaneCommand.self)
         self.planeCommands = commandStream
         self.planeCommandContinuation = commandContinuation

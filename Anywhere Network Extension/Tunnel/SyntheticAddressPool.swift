@@ -1,5 +1,5 @@
 //
-//  FakeIPPool.swift
+//  SyntheticAddressPool.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 3/1/26.
@@ -8,7 +8,7 @@
 import Foundation
 import Synchronization
 
-nonisolated final class FakeIPPool: Sendable {
+nonisolated final class SyntheticAddressPool: Sendable {
     struct Entry {
         let domain: String
         var shouldReject = false
@@ -83,12 +83,12 @@ nonisolated final class FakeIPPool: Sendable {
 
     // MARK: - Static Helpers
     
-    static func isFakeIP(_ ip: String) -> Bool {
+    static func isSyntheticAddress(_ ip: String) -> Bool {
         ip.hasPrefix("198.18.") || ip.hasPrefix("198.19.")
     }
 
     static func ipv4Bytes(offset: Int) -> (UInt8, UInt8, UInt8, UInt8) {
-        let ip32 = TunnelConstants.fakeIPPoolBaseIPv4 + UInt32(offset)
+        let ip32 = TunnelConstants.syntheticAddressPoolBaseIPv4 + UInt32(offset)
         return (
             UInt8((ip32 >> 24) & 0xFF),
             UInt8((ip32 >> 16) & 0xFF),
@@ -109,7 +109,7 @@ nonisolated final class FakeIPPool: Sendable {
             }
 
             let offset: Int
-            if state.nextOffset <= TunnelConstants.fakeIPPoolSize {
+            if state.nextOffset <= TunnelConstants.syntheticAddressPoolSize {
                 offset = state.nextOffset
                 state.nextOffset += 1
             } else {
@@ -188,9 +188,9 @@ nonisolated final class FakeIPPool: Sendable {
     // MARK: - IP ↔ Offset Conversion
 
     private static func offset(ipv4 ip32: UInt32) -> Int? {
-        guard ip32 > TunnelConstants.fakeIPPoolBaseIPv4 else { return nil }
-        let offset = Int(ip32 - TunnelConstants.fakeIPPoolBaseIPv4)
-        guard offset <= TunnelConstants.fakeIPPoolSize else { return nil }
+        guard ip32 > TunnelConstants.syntheticAddressPoolBaseIPv4 else { return nil }
+        let offset = Int(ip32 - TunnelConstants.syntheticAddressPoolBaseIPv4)
+        guard offset <= TunnelConstants.syntheticAddressPoolSize else { return nil }
         return offset
     }
 

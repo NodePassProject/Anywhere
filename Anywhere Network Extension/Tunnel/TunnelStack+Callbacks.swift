@@ -59,7 +59,7 @@ extension TunnelStack {
         let ip = destination.address.description
         requestLog.record(
             protocol: .tcp,
-            host: connectionRouter.fakeIPPool.lookup(ip: ip)?.domain ?? ip,
+            host: connectionRouter.syntheticAddressPool.lookup(ip: ip)?.domain ?? ip,
             port: destination.port,
             routeTarget: .reject
         )

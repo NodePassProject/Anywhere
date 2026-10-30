@@ -106,7 +106,7 @@ extension TunnelStack {
         purgeOutputBuffer()
         attachPacketFlow(nil)
         OutboundConnector.setRoutingContext(nil)
-        fakeIPPool.reset()
+        syntheticAddressPool.reset()
         connectionRouter.clearRejectMarks()
         ConnectionMetrics.shared.setDefaultServer(nil)
         configuration = nil

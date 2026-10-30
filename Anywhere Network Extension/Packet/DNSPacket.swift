@@ -48,7 +48,7 @@ nonisolated enum DNSPacket {
         query queryData: UnsafeBufferPointer<UInt8>,
         answerIP: [UInt8]?,
         qtype: UInt16,
-        ttl: UInt32 = TunnelConstants.dnsFakeIPAnswerTTL
+        ttl: UInt32 = TunnelConstants.dnsSyntheticAddressAnswerTTL
     ) -> Data? {
         guard queryData.count >= 12 else { return nil }
 

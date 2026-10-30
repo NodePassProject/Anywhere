@@ -46,9 +46,12 @@ A destination is classified at several points:
 1. **DNS time.** DNS queries are intercepted and the queried domain is matched
    against domain rules immediately. A **reject** verdict answers `0.0.0.0` /
    `::` (NODATA for other query types) and the domain never resolves.
-   Otherwise a fake IP is allocated and the verdict is cached with it.
-2. **Connect time, fake IP.** A connection to a fake IP is routed by the
-   cached domain verdict (re-matched if the rules changed since DNS time).
+   Otherwise a synthetic address is allocated and the verdict is cached with
+   it. A domain under one of the **Excluded Domain Suffixes** in **Synthetic
+   Addressing** gets no synthetic address.
+2. **Connect time, synthetic address.** A connection to a synthetic address is
+   routed by the cached domain verdict (re-matched if the rules changed since
+   DNS time).
 3. **Connect time, literal IP.** A connection to a real IP is matched against
    CIDR rules only.
 4. **Resolved-IP fallback.** A domain connection that matches **no** domain
@@ -346,8 +349,8 @@ deeper suffix wins within the tier regardless of set order.
 
 - **Rule mode only.** Global mode routes everything through the default
   target without consulting rules; Direct mode bypasses the proxy entirely.
-- **Domain rules win.** A connection with a known host (fake-IP DNS or
-  sniffed SNI) is classified by suffix/keyword rules; CIDR rules apply to
+- **Domain rules win.** A connection with a known host (synthetic-address DNS
+  or sniffed SNI) is classified by suffix/keyword rules; CIDR rules apply to
   literal-IP traffic and, unless Prevent DNS Leak is on, to unmatched domains
   via their resolved IPv4.
 - **Reject is enforced early.** Reject-matched domains get null DNS answers;

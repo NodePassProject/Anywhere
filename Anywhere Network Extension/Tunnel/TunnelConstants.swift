@@ -89,13 +89,13 @@ nonisolated enum TunnelConstants {
     static let quicSnifferDatagramLimit = 4
     static let udpPendingSniffMaxBytes = 8 * 1024
 
-    // MARK: - Fake-IP Pool
+    // MARK: - Synthetic Address Pool
     
-    static let fakeIPPoolBaseIPv4: UInt32 = 0xC612_0000
-    static let fakeIPPoolSize = 16_384
+    static let syntheticAddressPoolBaseIPv4: UInt32 = 0xC612_0000
+    static let syntheticAddressPoolSize = 16_384
 
     // MARK: - Synthesized DNS answers
     
-    static let dnsFakeIPAnswerTTL: UInt32 = 300
+    static let dnsSyntheticAddressAnswerTTL: UInt32 = 300
     static let dnsBlockedAnswerTTL: UInt32 = 10
 }

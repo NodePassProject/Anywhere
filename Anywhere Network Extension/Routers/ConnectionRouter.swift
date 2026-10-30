@@ -23,7 +23,7 @@ nonisolated struct RouteDecision {
 }
 
 nonisolated final class ConnectionRouter: Sendable {
-    let fakeIPPool: FakeIPPool
+    let syntheticAddressPool: SyntheticAddressPool
     let domainRouter: DomainRouter
 
     let preventDNSLeak = Atomic(false)
@@ -39,13 +39,13 @@ nonisolated final class ConnectionRouter: Sendable {
     private let dnsRejectLogged = Mutex(Set<String>())
     private static let dnsRejectLoggedCap = 4096
 
-    init(fakeIPPool: FakeIPPool, domainRouter: DomainRouter) {
-        self.fakeIPPool = fakeIPPool
+    init(syntheticAddressPool: SyntheticAddressPool, domainRouter: DomainRouter) {
+        self.syntheticAddressPool = syntheticAddressPool
         self.domainRouter = domainRouter
     }
 
     func decision(forIP ip: String) -> RouteDecision {
-        guard FakeIPPool.isFakeIP(ip) else {
+        guard SyntheticAddressPool.isSyntheticAddress(ip) else {
             guard let match = domainRouter.matchIP(ip) else {
                 return RouteDecision(host: ip, hostIsResolvedDomain: false, action: .route(target: .default, configuration: nil, ruleSetName: nil))
             }
@@ -56,7 +56,7 @@ nonisolated final class ConnectionRouter: Sendable {
             )
         }
 
-        guard let entry = fakeIPPool.lookup(ip: ip) else {
+        guard let entry = syntheticAddressPool.lookup(ip: ip) else {
             return RouteDecision(host: ip, hostIsResolvedDomain: false, action: .unreachable)
         }
         let domain = entry.domain
@@ -67,7 +67,7 @@ nonisolated final class ConnectionRouter: Sendable {
         } else {
             let versioned = domainRouter.matchDomainVersioned(domain)
             match = versioned.match
-            fakeIPPool.cacheVerdict(domain: domain, match: match, version: versioned.version)
+            syntheticAddressPool.cacheVerdict(domain: domain, match: match, version: versioned.version)
         }
 
         if let match {
@@ -105,7 +105,7 @@ nonisolated final class ConnectionRouter: Sendable {
         _ action: RouteDecision.Action, domain: String
     ) -> RouteDecision.Action {
         if case .reject = action {
-            fakeIPPool.markRejected(domain: domain)
+            syntheticAddressPool.markRejected(domain: domain)
         }
         return action
     }
@@ -140,7 +140,7 @@ nonisolated final class ConnectionRouter: Sendable {
     // MARK: - DNS-time verdict
 
     func dnsVerdict(forDomain domain: String) -> (match: DomainRouter.Match?, rulesVersion: UInt64) {
-        if let cached = fakeIPPool.cachedVerdict(domain: domain),
+        if let cached = syntheticAddressPool.cachedVerdict(domain: domain),
            cached.version == domainRouter.currentRulesVersion {
             return (cached.match, cached.version)
         }
@@ -170,11 +170,11 @@ nonisolated final class ConnectionRouter: Sendable {
     }
 
     private func isRejectMarkedIPv4(_ key: UInt32) -> Bool {
-        fakeIPPool.isRejectMarked(ipv4: key) || rejectedIPs.withLock { $0.v4.contains(key) }
+        syntheticAddressPool.isRejectMarked(ipv4: key) || rejectedIPs.withLock { $0.v4.contains(key) }
     }
 
     func clearRejectMarks() {
-        fakeIPPool.clearRejectMarks()
+        syntheticAddressPool.clearRejectMarks()
         rejectedIPs.withLock { $0 = RejectedIPs() }
         dnsRejectLogged.withLock { $0.removeAll(keepingCapacity: true) }
     }

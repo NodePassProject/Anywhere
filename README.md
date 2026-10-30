@@ -34,7 +34,7 @@ Most iOS proxy clients wrap sing-box or Xray-core in a Go/C++ bridge. Anywhere t
 - **Native core** — Swift 6 with strict concurrency, the native AnywhereIP TCP/IP stack, the native AnywhereQUIC engine, and native BLAKE2b and BLAKE3. No Go or C++ core, no bridging layer, no third-party networking engines. A single codebase builds the iOS, iPadOS, tvOS, and watchOS apps, the packet tunnel, and the Control Center controls.
 - **Native TLS stack** — TLS 1.2 and 1.3, client and server, implemented in Swift. Browser-exact ClientHello fingerprints for Chrome, Firefox, Safari, and Edge; Encrypted Client Hello from an inline configuration or from DNS HTTPS records; hybrid X25519 and ML-KEM key shares. The same stack terminates TLS for MITM and provides the handshake primitives for Reality.
 - **Native QUIC stack** — AnywhereQUIC implemented in Swift, with BBR, CUBIC, and Brutal congestion control, connection migration, DATAGRAM frames, session resumption, and pluggable packet obfuscation. One engine serves Hysteria2, Nowhere, and XHTTP over HTTP/3.
-- **Multi-stage routing** — a five-tier matcher built from domain-suffix tries, keyword automata, and CIDR tries classifies each destination at DNS time through Fake-IP, at connect time before the TCP handshake is accepted, and again from the TLS SNI sniffed out of a TCP ClientHello or a QUIC Initial packet. Bundled service, ad-block, and country-bypass rule sets are complemented by importable and subscribable `.arrs` rule sets.
+- **Multi-stage routing** — a five-tier matcher built from domain-suffix tries, keyword automata, and CIDR tries classifies each destination at DNS time through synthetic addressing, at connect time before the TCP handshake is accepted, and again from the TLS SNI sniffed out of a TCP ClientHello or a QUIC Initial packet. Bundled service, ad-block, and country-bypass rule sets are complemented by importable and subscribable `.arrs` rule sets.
 - **Built-in MITM** — HTTPS is terminated with a generated root CA. HTTP/1.1 and HTTP/2 traffic is rewritten by declarative rules or JavaScript, HTTP/2 clients are bridged to HTTP/1.1 upstreams, and script-initiated HTTP requests are dialled through the tunnel's own routing.
 - **Modules** — a single `.amod` file bundles routing and MITM rule sets for a service into one importable, subscribable unit with its own switch, synced as one record so it is never seen half-updated.
 - **Purify and DNS** — a QUIC policy that fails HTTP/3 fast so that routing and MITM act on HTTP/2, WebRTC and UDP blocking, DNS-leak prevention, and independent plain or DoH resolvers for proxy servers, local requests, subscriptions, ECH, and fallback.
@@ -69,7 +69,7 @@ flowchart TB
 
     subgraph NE["Network Extension"]
         PTP["PacketTunnelProvider"] --> STACK["TunnelStack<br/>AnywhereIP"]
-        STACK -- "DNS" --> DNS["DNS interceptor<br/>Fake-IP pool"]
+        STACK -- "DNS" --> DNS["DNS interceptor<br/>Synthetic address pool"]
         STACK -- "TCP" --> TCP["TCPConnection<br/>SNI / HTTP sniffing"]
         STACK -- "UDP" --> UDP["UDPPlane<br/>QUIC · WebRTC policy"]
         DNS & TCP & UDP --> ROUTER["ConnectionRouter<br/>five-tier rule matcher"]

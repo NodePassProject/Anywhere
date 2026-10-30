@@ -39,7 +39,7 @@ nonisolated final class DNSHosts: Sendable {
     private static func build(_ mappings: [HostMapping]) -> [String: Entry] {
         var table: [String: Entry] = [:]
         for mapping in mappings {
-            guard let host = HostMapping.normalizedHost(mapping.host),
+            guard let host = DNSName.normalizedHost(mapping.host),
                   let address = HostMapping.canonicalAddress(mapping.address)
             else { continue }
             var entry = table[host, default: Entry()]

@@ -9,7 +9,7 @@ import Foundation
 
 extension TunnelStack {
 
-    // MARK: - DNS Interception (Fake-IP)
+    // MARK: - DNS Interception (Synthetic Address)
 
     enum DNSDestination {
         case anywhereResolver

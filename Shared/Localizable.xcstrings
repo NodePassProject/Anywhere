@@ -7363,6 +7363,58 @@
     "Exclude Local Networks" : {
       "shouldTranslate" : false
     },
+    "Excluded Domain Suffixes" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "لواحق النطاقات المستثناة"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Excluded Domain Suffixes"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sufijos de dominio excluidos"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "پسوندهای دامنه مستثنی‌شده"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Исключённые суффиксы доменов"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hariç Tutulan Alan Adı Sonekleri"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hậu tố tên miền bị loại trừ"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "排除的域名后缀"
+          }
+        }
+      }
+    },
     "Excluded Routes" : {
       "shouldTranslate" : false
     },
@@ -7746,6 +7798,9 @@
         }
       }
     },
+    "Fading Random" : {
+      "shouldTranslate" : false
+    },
     "Failed to export certificate." : {
       "localizations" : {
         "ar" : {
@@ -7901,9 +7956,6 @@
           }
         }
       }
-    },
-    "Fading Random" : {
-      "shouldTranslate" : false
     },
     "Fallback" : {
       "localizations" : {
@@ -18524,6 +18576,58 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "正在与 iPhone 同步"
+          }
+        }
+      }
+    },
+    "Synthetic Addressing" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "العنونة الاصطناعية"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Synthetic Addressing"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Direccionamiento sintético"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "آدرس‌دهی مصنوعی"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Синтетическая адресация"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sentetik Adresleme"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Địa chỉ tổng hợp"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "合成地址"
           }
         }
       }

@@ -35,10 +35,10 @@ expressions, and JavaScript, and does not cover the settings UI.
 
 Interception is gated on the host. **HTTPS** is intercepted when the TLS
 ClientHello **SNI** matches a rule set's suffixes; **plain HTTP** is intercepted
-when the first request's host matches — the fake-IP-resolved domain when the
-connection was routed by fake IP, otherwise the request's authority
-(absolute-form target, or the `Host` header). MITM must be enabled by the master
-toggle, and the matching rule set must be enabled.
+when the first request's host matches — the domain behind the synthetic
+address when the connection was routed by one, otherwise the request's
+authority (absolute-form target, or the `Host` header). MITM must be enabled by
+the master toggle, and the matching rule set must be enabled.
 
 An intercepted **HTTPS** connection is handled in four steps:
 

@@ -42,6 +42,7 @@ nonisolated final class AWCore {
             UserDefaultsKey.showVoyagerCard: true,
             UserDefaultsKey.subscriptionDNSDoHURL: DNSUpstream.defaultDoHURL,
             UserDefaultsKey.subscriptionDNSPlainServer: DNSUpstream.defaultPlainServer,
+            UserDefaultsKey.syntheticAddressExcludedDomainSuffixes: [],
             UserDefaultsKey.trustedCertificateSHA256s: [],
             UserDefaultsKey.trustedSSIDs: [],
         ])
@@ -96,6 +97,7 @@ nonisolated final class AWCore {
         static let subscriptionDNSDoHURL = "subscriptionDNSDoHURL"
         static let subscriptionDNSMode = "subscriptionDNSMode"
         static let subscriptionDNSPlainServer = "subscriptionDNSPlainServer"
+        static let syntheticAddressExcludedDomainSuffixes = "syntheticAddressExcludedDomainSuffixes"
         static let trustedCertificateSHA256s = "trustedCertificateSHA256s"
         static let trustedSSIDs = "trustedSSIDs"
         static let tunnelExcludeAPNs = "tunnelExcludeAPNs"
@@ -323,6 +325,14 @@ nonisolated final class AWCore {
 
     static func setTunnelExcludedRoutes(_ routes: [String]) {
         userDefaults.set(routes, forKey: UserDefaultsKey.tunnelExcludedRoutes)
+    }
+
+    static func getSyntheticAddressExcludedDomainSuffixes() -> [String] {
+        userDefaults.stringArray(forKey: UserDefaultsKey.syntheticAddressExcludedDomainSuffixes) ?? []
+    }
+
+    static func setSyntheticAddressExcludedDomainSuffixes(_ suffixes: [String]) {
+        userDefaults.set(suffixes, forKey: UserDefaultsKey.syntheticAddressExcludedDomainSuffixes)
     }
     
     static func getBlockUDP() -> Bool {

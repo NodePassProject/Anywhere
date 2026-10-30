@@ -106,6 +106,13 @@ final class AppSettings {
             AWNotificationCenter.notifyTunnelSettingsChanged()
         }
     }
+
+    var syntheticAddressExcludedDomainSuffixes: [String] {
+        didSet {
+            AWCore.setSyntheticAddressExcludedDomainSuffixes(syntheticAddressExcludedDomainSuffixes)
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
     
     var blockUDP: Bool {
         didSet {
@@ -350,6 +357,7 @@ final class AppSettings {
         proxyMode = AWCore.getProxyMode()
         quicPolicy = AWCore.getQUICPolicy()
         reflectionEnabled = AWCore.getReflectionEnabled()
+        syntheticAddressExcludedDomainSuffixes = AWCore.getSyntheticAddressExcludedDomainSuffixes()
         trustedSSIDs = AWCore.getTrustedSSIDs()
         tunnelExcludedRoutes = AWCore.getTunnelExcludedRoutes()
         tunnelIncludedRoutes = AWCore.getTunnelIncludedRoutes()

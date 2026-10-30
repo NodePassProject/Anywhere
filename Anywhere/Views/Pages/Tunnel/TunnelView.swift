@@ -29,6 +29,14 @@ struct TunnelView: View {
                         TextWithColorfulIcon(title: "Tunnel Scope", systemName: "scope", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                     }
                 }
+                
+                Section {
+                    NavigationLink {
+                        SyntheticAddressingView()
+                    } label: {
+                        TextWithColorfulIcon(title: "Synthetic Addressing", systemName: "envelope.front", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                    }
+                }
             }
             .navigationTitle("Tunnel")
         }
