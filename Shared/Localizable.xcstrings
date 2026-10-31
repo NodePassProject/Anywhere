@@ -14903,6 +14903,58 @@
         }
       }
     },
+    "Re-fetches every proxy subscription, subscribed rule set, and subscribed module." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "يعيد جلب جميع اشتراكات البروكسي، ومجموعات القواعد المشترك فيها، والوحدات المشترك فيها."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Re-fetches every proxy subscription, subscribed rule set, and subscribed module."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vuelve a obtener todas las suscripciones de proxy, los conjuntos de reglas suscritos y los módulos suscritos."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "همه اشتراک‌های پروکسی، مجموعه‌های قانون مشترک‌شده و ماژول‌های مشترک‌شده را دوباره دریافت می‌کند."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Повторно загружает все подписки прокси, подписанные наборы правил и подписанные модули."
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tüm proxy aboneliklerini, abone olunan kural setlerini ve abone olunan modülleri yeniden indirir."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tải lại tất cả đăng ký proxy, các bộ quy tắc đã đăng ký và các mô-đun đã đăng ký."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "重新获取所有代理订阅、已订阅的规则集和已订阅的模块。"
+          }
+        }
+      }
+    },
     "Reality" : {
       "shouldTranslate" : false
     },
@@ -20357,6 +20409,58 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "更新"
+          }
+        }
+      }
+    },
+    "Update All Subscriptions" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "تحديث جميع الاشتراكات"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Update All Subscriptions"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Actualizar todas las suscripciones"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "به‌روزرسانی همه اشتراک‌ها"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Обновить все подписки"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tüm Abonelikleri Güncelle"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Cập nhật tất cả đăng ký"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "更新全部订阅"
           }
         }
       }
