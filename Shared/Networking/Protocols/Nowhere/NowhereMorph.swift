@@ -13,6 +13,7 @@ import Synchronization
 nonisolated enum NowhereMorph {
     static let nonceSize = 12
     static let tcpPreludeSize = 64
+    static let udpPreludeSize = 12
     static let byteLimit: UInt64 = (1 << 38) - 64
     private static let handshakeDeadline: Duration = .seconds(30)
     private static let maximumPreludeCounter: UInt64 = (1 << 48) - 1
@@ -57,6 +58,54 @@ nonisolated enum NowhereMorph {
             tcpPreludeAuth: derive(tcpPreludeAuthLabel),
             tcpPreludeMask: derive(tcpPreludeMaskLabel)
         )
+    }
+
+    static func makePrelude(policy: NowhereMorphPrelude, network: NowhereNetwork) throws -> Data {
+        let count = network == .tcp ? tcpPreludeSize : udpPreludeSize
+        var prelude = try NowhereMorphNonceGenerator.secureRandomBytes(count: count)
+        guard prelude.count == count else {
+            throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Failed to generate Morph prelude"))
+        }
+        switch policy {
+        case .fade:
+            let a: Int
+            let b: Int
+            switch network {
+            case .tcp:
+                let boundaries = try NowhereMorphNonceGenerator.secureRandomBytes(count: 2)
+                a = 8 + Int(try sampleBelow(boundaries[0], upper: 5))
+                b = 16 + Int(try sampleBelow(boundaries[1], upper: 17))
+            case .udp:
+                a = 2
+                b = 10
+            }
+            try prelude.withUnsafeMutableBytes { (bytes: UnsafeMutableRawBufferPointer) in
+                for index in 0..<a {
+                    bytes[index] = 0x20 + (try sampleBelow(bytes[index], upper: 95))
+                }
+                for index in a..<b {
+                    bytes[index] &= 0x7f
+                }
+            }
+        case .full8:
+            break
+        case .low7:
+            prelude.withUnsafeMutableBytes { bytes in
+                for index in bytes.indices {
+                    bytes[index] &= 0x7f
+                }
+            }
+        }
+        return prelude
+    }
+
+    private static func sampleBelow(_ initial: UInt8, upper: UInt8) throws -> UInt8 {
+        let limit = 256 - 256 % Int(upper)
+        var byte = initial
+        while Int(byte) >= limit {
+            byte = try NowhereMorphNonceGenerator.secureRandomBytes(count: 1)[0]
+        }
+        return byte % upper
     }
 
     static func authenticatePrelude(_ prelude: inout Data, nonce: Data, keys: Keys) throws {
@@ -252,7 +301,7 @@ nonisolated final class NowhereMorphNonceGenerator: Sendable {
     }
 }
 
-nonisolated final class NowhereMorphPacketObfuscator: QUICPacketObfuscator {
+nonisolated final class NowhereMorphPacketObfuscator: QUICPreludeCapable {
     private struct FailureState {
         var failed = false
         var handler: (@Sendable (Error) -> Void)?
@@ -261,18 +310,32 @@ nonisolated final class NowhereMorphPacketObfuscator: QUICPacketObfuscator {
     private let sendKey: Data
     private let receiveKey: Data
     private let nonceGenerator: NowhereMorphNonceGenerator
+    private let prelude: NowhereMorphPrelude
     private let failureState = Mutex(FailureState())
 
-    init(sendKey: Data, receiveKey: Data) throws {
-        self.sendKey = sendKey
-        self.receiveKey = receiveKey
-        nonceGenerator = try NowhereMorphNonceGenerator()
+    convenience init(sendKey: Data, receiveKey: Data, prelude: NowhereMorphPrelude = .fade) throws {
+        self.init(
+            sendKey: sendKey,
+            receiveKey: receiveKey,
+            nonceGenerator: try NowhereMorphNonceGenerator(),
+            prelude: prelude
+        )
     }
 
-    init(sendKey: Data, receiveKey: Data, nonceGenerator: NowhereMorphNonceGenerator) {
+    init(
+        sendKey: Data,
+        receiveKey: Data,
+        nonceGenerator: NowhereMorphNonceGenerator,
+        prelude: NowhereMorphPrelude = .fade
+    ) {
         self.sendKey = sendKey
         self.receiveKey = receiveKey
         self.nonceGenerator = nonceGenerator
+        self.prelude = prelude
+    }
+
+    func makePrelude() throws -> Data {
+        try NowhereMorph.makePrelude(policy: prelude, network: .udp)
     }
 
     func setFailureHandler(_ handler: @escaping @Sendable (Error) -> Void) {
@@ -362,37 +425,7 @@ nonisolated final class NowhereMorphTCPTransport: ByteTransport, Sendable {
         prelude policy: NowhereMorphPrelude
     ) async throws -> NowhereMorphTCPTransport {
         do {
-            var prelude = try NowhereMorphNonceGenerator.secureRandomBytes(
-                count: NowhereMorph.tcpPreludeSize
-            )
-            guard prelude.count == NowhereMorph.tcpPreludeSize else {
-                throw AnywhereError.proxy(
-                    .nowhere,
-                    .connectionClosed(detail: "Failed to generate Morph TCP prelude")
-                )
-            }
-            switch policy {
-            case .fade:
-                let boundaries = try NowhereMorphNonceGenerator.secureRandomBytes(count: 2)
-                let a = 8 + Int(try sampleBelow(boundaries[0], upper: 5))
-                let b = 16 + Int(try sampleBelow(boundaries[1], upper: 17))
-                try prelude.withUnsafeMutableBytes { (bytes: UnsafeMutableRawBufferPointer) in
-                    for index in 0..<a {
-                        bytes[index] = 0x20 + (try sampleBelow(bytes[index], upper: 95))
-                    }
-                    for index in a..<b {
-                        bytes[index] &= 0x7f
-                    }
-                }
-            case .full8:
-                break
-            case .low7:
-                prelude.withUnsafeMutableBytes { bytes in
-                    for index in bytes.indices {
-                        bytes[index] &= 0x7f
-                    }
-                }
-            }
+            var prelude = try NowhereMorph.makePrelude(policy: policy, network: .tcp)
             let nonce = try NowhereMorphNonceGenerator.secureRandomBytes(
                 count: NowhereMorph.nonceSize
             )
@@ -406,15 +439,6 @@ nonisolated final class NowhereMorphTCPTransport: ByteTransport, Sendable {
             inner.cancel()
             throw error
         }
-    }
-
-    private static func sampleBelow(_ initial: UInt8, upper: UInt8) throws -> UInt8 {
-        let limit = 256 - 256 % Int(upper)
-        var byte = initial
-        while Int(byte) >= limit {
-            byte = try NowhereMorphNonceGenerator.secureRandomBytes(count: 1)[0]
-        }
-        return byte % upper
     }
 
     var isReady: Bool { inner.isReady }

@@ -19,6 +19,10 @@ nonisolated protocol QUICPacketObfuscator: AnyObject, Sendable {
     func open(_ datagram: Data) -> Data?
 }
 
+nonisolated protocol QUICPreludeCapable: QUICPacketObfuscator {
+    func makePrelude() throws -> Data
+}
+
 // MARK: - QUICConnection
 
 nonisolated final class QUICConnectionCore: QUICPublishingState {

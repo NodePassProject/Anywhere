@@ -399,9 +399,24 @@ nonisolated final class QUICDatagramCarrierCore: QUICPublishingState {
 nonisolated final class QUICDatagramEngine: Sendable {
     private static let receiveConcurrency = 16
 
+    private enum PreludePhase {
+        case initial, sending, sent, failed
+    }
+
+    private struct PreludeState {
+        var phase: PreludePhase
+        var pending: [Data]
+    }
+
+    private enum SendAction {
+        case start, send, overflow, stop
+    }
+
     private let connection: NWConnection
     private let obfuscator: QUICPacketObfuscator?
     private let executor: BridgeExecutor
+    private let sink: QUICDatagramEngineSink
+    private let preludeState = Mutex(PreludeState(phase: .initial, pending: []))
 
     private let terminated = OneShotLatch()
 
@@ -410,6 +425,7 @@ nonisolated final class QUICDatagramEngine: Sendable {
         self.connection = connection
         self.obfuscator = obfuscator
         self.executor = executor
+        self.sink = sink
 
         connection.stateUpdateHandler = { [weak connection] state in
             switch state {
@@ -454,6 +470,73 @@ nonisolated final class QUICDatagramEngine: Sendable {
     }
 
     private func transmit(_ datagrams: [Data]) {
+        guard let obfuscator = obfuscator as? QUICPreludeCapable else {
+            transmitPackets(datagrams)
+            return
+        }
+        guard !terminated.isClaimed else { return }
+        let action = preludeState.withLock { state -> SendAction in
+            switch state.phase {
+            case .initial, .sending:
+                guard datagrams.count <= QUICConnectionCore.maxQueuedTransportDatagrams - state.pending.count else {
+                    return .overflow
+                }
+                let action: SendAction = state.phase == .initial ? .start : .stop
+                state.phase = .sending
+                state.pending.append(contentsOf: datagrams)
+                return action
+            case .sent:
+                return .send
+            case .failed:
+                return .stop
+            }
+        }
+        switch action {
+        case .start:
+            do {
+                let prelude = try obfuscator.makePrelude()
+                guard !terminated.isClaimed else { return }
+                connection.send(content: prelude, completion: .contentProcessed { [weak self] error in
+                    self?.finishPrelude(error)
+                })
+            } catch {
+                failPrelude(EIO)
+            }
+        case .send:
+            transmitPackets(datagrams)
+        case .overflow:
+            failPrelude(ENOBUFS)
+        case .stop:
+            break
+        }
+    }
+
+    private func finishPrelude(_ error: NWError?) {
+        if let error {
+            failPrelude(AnywhereError.errnoCode(from: error))
+            return
+        }
+        let pending = preludeState.withLock { state -> [Data]? in
+            guard state.phase == .sending else { return nil }
+            state.phase = .sent
+            let pending = state.pending
+            state.pending = []
+            return pending
+        }
+        if let pending, !terminated.isClaimed { transmitPackets(pending) }
+    }
+
+    private func failPrelude(_ code: Int32) {
+        let failed = preludeState.withLock { state -> Bool in
+            guard state.phase == .initial || state.phase == .sending else { return false }
+            state.phase = .failed
+            state.pending = []
+            return true
+        }
+        if failed, !terminated.isClaimed { sink.failed(code) }
+    }
+
+    private func transmitPackets(_ datagrams: [Data]) {
         connection.batch {
             for datagram in datagrams {
                 if let obfuscator {
@@ -470,6 +553,10 @@ nonisolated final class QUICDatagramEngine: Sendable {
 
     func close() {
         terminated.claim()
+        preludeState.withLock { state in
+            state.phase = .failed
+            state.pending = []
+        }
         let connection = connection
         executor.queue.async { connection.cancel() }
     }

@@ -472,17 +472,12 @@ struct ProxyEditorView: View {
                 }
                 if nowhereMorph {
                     Picker(selection: $nowhereMorphPrelude) {
-                        if nowhereNetwork == .tcp {
-                            ForEach(NowhereMorphPrelude.allCases, id: \.self) { prelude in
-                                Text(prelude.displayName).tag(prelude)
-                            }
-                        } else {
-                            Text("None").tag(nowhereMorphPrelude)
+                        ForEach(NowhereMorphPrelude.allCases, id: \.self) { prelude in
+                            Text(prelude.displayName).tag(prelude)
                         }
                     } label: {
                         TextWithColorfulIcon(title: "Prelude", systemName: "text.line.first.and.arrowtriangle.forward", foregroundStyle: .white, backgroundStyle: .indigo.gradient)
                     }
-                    .disabled(nowhereNetwork == .udp)
                 }
             }
         } else if isVLESS {

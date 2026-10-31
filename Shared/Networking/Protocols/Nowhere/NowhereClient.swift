@@ -44,6 +44,7 @@ nonisolated final class NowhereClient: Sendable {
         let port: UInt16
         let key: String
         let morph: Bool
+        let morphPrelude: NowhereMorphPrelude
         let chain: [ProxyConfiguration]
     }
 
@@ -70,6 +71,7 @@ nonisolated final class NowhereClient: Sendable {
             port: configuration.proxyPort,
             key: configuration.key,
             morph: configuration.morph,
+            morphPrelude: configuration.morphPrelude,
             chain: []
         )
         return try registry.withLock { state in
@@ -109,6 +111,7 @@ nonisolated final class NowhereClient: Sendable {
             port: configuration.proxyPort,
             key: configuration.key,
             morph: configuration.morph,
+            morphPrelude: configuration.morphPrelude,
             chain: chain
         )
 

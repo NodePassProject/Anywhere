@@ -164,7 +164,8 @@ nonisolated final class NowhereSession: Sendable {
             }
             morphObfuscator = try NowhereMorphPacketObfuscator(
                 sendKey: keys.udpClientToServer,
-                receiveKey: keys.udpServerToClient
+                receiveKey: keys.udpServerToClient,
+                prelude: configuration.morphPrelude
             )
         } else {
             morphObfuscator = nil
