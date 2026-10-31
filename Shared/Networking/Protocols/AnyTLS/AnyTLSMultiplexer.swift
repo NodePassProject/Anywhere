@@ -57,6 +57,7 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer, Sendable {
         var readTask: Task<Void, Never>?
 
         var receiveBuffer = Data()
+        var receiveOffset = 0
 
         var reserved: Bool = false
     }
@@ -173,6 +174,7 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer, Sendable {
                 onEnd: onEnd
             )
             state.streams[sid] = stream
+            state.reserved = false
 
             let armWatchdog = sid >= 2 && state.peerVersion >= 2
             if armWatchdog {
@@ -365,40 +367,60 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer, Sendable {
 
     // MARK: - Demux
 
-    private func handleInbound(_ data: Data) async {
-        let dispatched: [(cmd: UInt8, sid: UInt32, payload: Data)] = state.withLock { state in
-            state.receiveBuffer.appendCompacting(data)
-            var dispatched: [(cmd: UInt8, sid: UInt32, payload: Data)] = []
-            let base = state.receiveBuffer.startIndex
-            var consumed = 0
-            while state.receiveBuffer.count - consumed >= AnyTLSProtocol.headerSize {
-                guard let header = AnyTLSProtocol.decodeFrameHeader(state.receiveBuffer, at: consumed) else { break }
-                let totalLen = AnyTLSProtocol.headerSize + Int(header.length)
-                if state.receiveBuffer.count - consumed < totalLen { break }
-                let payloadStart = base + consumed + AnyTLSProtocol.headerSize
-                let payload = Data(state.receiveBuffer[payloadStart..<(base + consumed + totalLen)])
-                consumed += totalLen
-                dispatched.append((header.cmd, header.sid, payload))
-            }
-            if consumed > 0 {
-                state.receiveBuffer = consumed == state.receiveBuffer.count
-                    ? Data()
-                    : Data(state.receiveBuffer[(base + consumed)...])
-            }
-            return dispatched
-        }
+    private typealias Frame = (cmd: UInt8, sid: UInt32, payload: Data)
 
-        for frame in dispatched {
+    private func handleInbound(_ data: Data) async {
+        state.withLock { state in
+            compactReceiveBufferLocked(&state)
+            state.receiveBuffer.appendCompacting(data)
+        }
+        while !Task.isCancelled, let frame = nextInboundFrame() {
             await routeFrame(cmd: frame.cmd, sid: frame.sid, payload: frame.payload)
         }
+    }
+
+    private func nextInboundFrame() -> Frame? {
+        state.withLock { (state: inout State) -> Frame? in
+            let buffer = state.receiveBuffer
+            let available = buffer.count - state.receiveOffset
+            guard available >= AnyTLSProtocol.headerSize,
+                  let header = AnyTLSProtocol.decodeFrameHeader(buffer, at: state.receiveOffset) else {
+                compactReceiveBufferLocked(&state)
+                return nil
+            }
+            let totalLen = AnyTLSProtocol.headerSize + Int(header.length)
+            guard available >= totalLen else {
+                compactReceiveBufferLocked(&state)
+                return nil
+            }
+            let payloadStart = buffer.startIndex + state.receiveOffset + AnyTLSProtocol.headerSize
+            let payload = header.length == 0
+                ? Data()
+                : Data(buffer[payloadStart..<(payloadStart + Int(header.length))])
+            state.receiveOffset += totalLen
+            if state.receiveOffset == buffer.count {
+                state.receiveBuffer = Data()
+                state.receiveOffset = 0
+            }
+            return (header.cmd, header.sid, payload)
+        }
+    }
+
+    private func compactReceiveBufferLocked(_ state: inout State) {
+        guard state.receiveOffset > 0 else { return }
+        let start = state.receiveBuffer.startIndex + state.receiveOffset
+        state.receiveBuffer = start == state.receiveBuffer.endIndex
+            ? Data()
+            : Data(state.receiveBuffer[start...])
+        state.receiveOffset = 0
     }
 
     private func routeFrame(cmd: UInt8, sid: UInt32, payload: Data) async {
         switch cmd {
         case AnyTLSProtocol.cmdPSH:
             guard let stream = state.withLock({ $0.streams[sid] }) else { break }
+            await stream.awaitDownlinkCredit(for: payload.count)
             stream.deliverData(payload)
-            await stream.awaitDownlinkCredit()
 
         case AnyTLSProtocol.cmdSYNACK:
             let stream = state.withLock { (state: inout State) -> AnyTLSStream? in
@@ -460,6 +482,8 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer, Sendable {
             let live = Array(state.streams.values)
             state.streams.removeAll(keepingCapacity: false)
             state.outboundBuffer.removeAll(keepingCapacity: false)
+            state.receiveBuffer = Data()
+            state.receiveOffset = 0
             let read = state.readTask
             state.readTask = nil
             return (live, read)

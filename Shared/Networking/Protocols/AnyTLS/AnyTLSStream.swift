@@ -9,11 +9,16 @@ import Foundation
 import Synchronization
 
 actor AnyTLSStream {
-    static let downlinkHighWaterMark = 128 * 1024
+    static let downlinkHighWaterMark = 64 * 1024
     static let downlinkLowWaterMark  = 32 * 1024
 
     nonisolated let sid: UInt32
-    private weak var multiplexer: AnyTLSMultiplexer?
+
+    private struct Owner {
+        weak var multiplexer: AnyTLSMultiplexer?
+    }
+    private nonisolated let owner: Mutex<Owner>
+    private nonisolated var multiplexer: AnyTLSMultiplexer? { owner.withLock { $0.multiplexer } }
     
     private nonisolated let cachedTLSVersion: TLSVersion?
     
@@ -51,7 +56,7 @@ actor AnyTLSStream {
     init(sid: UInt32, multiplexer: AnyTLSMultiplexer, outerTLSVersion: TLSVersion?,
          onEnd: (@Sendable () -> Void)? = nil) {
         self.sid = sid
-        self.multiplexer = multiplexer
+        self.owner = Mutex(Owner(multiplexer: multiplexer))
         self.cachedTLSVersion = outerTLSVersion
         self.state = Mutex(StreamState(onEnd: onEnd))
     }
@@ -93,25 +98,29 @@ actor AnyTLSStream {
         guard outcome.proceed else { return }
         releaseDownlink()
         inbox.finish()
+        multiplexer?.removeStream(sid: sid)
         outcome.hook?()
-        Task { await self.removeFromMultiplexer() }
     }
 
-    private func removeFromMultiplexer() {
-        multiplexer?.removeStream(sid: sid)
-    }
-    
     nonisolated func deliverData(_ data: Data) {
-        downlink.withLock { $0.queuedBytes += data.count }
+        let accepted = downlink.withLock { link -> Bool in
+            guard !link.ended else { return false }
+            link.queuedBytes += data.count
+            return true
+        }
+        guard accepted else { return }
         inbox.yield(data)
     }
     
-    nonisolated func awaitDownlinkCredit() async {
-        await H2FlowGate.park {
-            downlink.withLock { link in
-                guard !link.ended, link.queuedBytes >= Self.downlinkHighWaterMark else { return nil }
+    nonisolated func awaitDownlinkCredit(for incoming: Int) async {
+        while !Task.isCancelled {
+            let gate: AsyncStream<Never>? = downlink.withLock { link in
+                guard !link.ended, link.queuedBytes > 0,
+                      link.queuedBytes + incoming > Self.downlinkHighWaterMark else { return nil }
                 return link.gate.enroll()
             }
+            guard let gate else { return }
+            for await _ in gate {}
         }
     }
     
