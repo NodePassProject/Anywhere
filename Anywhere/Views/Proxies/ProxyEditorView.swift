@@ -270,7 +270,7 @@ struct ProxyEditorView: View {
             }
             if isNowhere {
                 LabeledContent {
-                    SecureField("Key", text: $nowhereKey)
+                    TextField("Key", text: $nowhereKey)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
                         .multilineTextAlignment(.trailing)
@@ -296,7 +296,7 @@ struct ProxyEditorView: View {
                 }
             } else if isHysteria {
                 LabeledContent {
-                    SecureField("Password", text: $hysteriaPassword)
+                    TextField("Password", text: $hysteriaPassword)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
                         .multilineTextAlignment(.trailing)
@@ -312,7 +312,7 @@ struct ProxyEditorView: View {
                 }
                 if hysteriaObfuscationType != "none" {
                     LabeledContent {
-                        SecureField("Password", text: $hysteriaObfuscationPassword)
+                        TextField("Password", text: $hysteriaObfuscationPassword)
                             .autocorrectionDisabled()
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
@@ -338,7 +338,7 @@ struct ProxyEditorView: View {
                 }
             } else if isSudoku {
                 LabeledContent {
-                    SecureField(String(localized: "Key", comment: "Key for Sudoku protocol"), text: $sudokuKey)
+                    TextField(String(localized: "Key", comment: "Key for Sudoku protocol"), text: $sudokuKey)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
                         .multilineTextAlignment(.trailing)
@@ -383,7 +383,7 @@ struct ProxyEditorView: View {
                 }
             } else if isTrojan {
                 LabeledContent {
-                    SecureField("Password", text: $trojanPassword)
+                    TextField("Password", text: $trojanPassword)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
                         .multilineTextAlignment(.trailing)
@@ -392,7 +392,7 @@ struct ProxyEditorView: View {
                 }
             } else if isAnyTLS {
                 LabeledContent {
-                    SecureField("Password", text: $anytlsPassword)
+                    TextField("Password", text: $anytlsPassword)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
                         .multilineTextAlignment(.trailing)
@@ -401,7 +401,7 @@ struct ProxyEditorView: View {
                 }
             } else if isShadowsocks {
                 LabeledContent {
-                    SecureField("Password", text: $ssPassword)
+                    TextField("Password", text: $ssPassword)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
                         .multilineTextAlignment(.trailing)
@@ -429,7 +429,7 @@ struct ProxyEditorView: View {
                     TextWithColorfulIcon(title: "Username", systemName: "person.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
                 }
                 LabeledContent {
-                    SecureField("Password", text: $socks5Password)
+                    TextField("Password", text: $socks5Password)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
                         .multilineTextAlignment(.trailing)
@@ -446,7 +446,7 @@ struct ProxyEditorView: View {
                     TextWithColorfulIcon(title: "Username", systemName: "person.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
                 }
                 LabeledContent {
-                    SecureField("Password", text: $rfcPassword)
+                    TextField("Password", text: $rfcPassword)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
                         .multilineTextAlignment(.trailing)

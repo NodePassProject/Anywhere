@@ -280,15 +280,13 @@ class TVTextInputViewController: UIViewController {
     private let currentValue: String
     private let placeholder: String
     private let onDone: (String) -> Void
-    var isSecure = false
 
     private let textField = UITextField()
 
-    init(title: String, currentValue: String, placeholder: String, isSecure: Bool = false, onDone: @escaping (String) -> Void) {
+    init(title: String, currentValue: String, placeholder: String, onDone: @escaping (String) -> Void) {
         self.titleText = title
         self.currentValue = currentValue
         self.placeholder = placeholder
-        self.isSecure = isSecure
         self.onDone = onDone
         super.init(nibName: nil, bundle: nil)
     }
@@ -306,7 +304,6 @@ class TVTextInputViewController: UIViewController {
         textField.autocorrectionType = .no
         textField.autocapitalizationType = .none
         textField.keyboardType = .URL
-        textField.isSecureTextEntry = isSecure
         textField.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(textField)
 

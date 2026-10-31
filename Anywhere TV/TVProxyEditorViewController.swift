@@ -139,7 +139,7 @@ class TVProxyEditorViewController: UITableViewController {
     // MARK: - Form Structure
 
     private enum RowType {
-        case text(label: String, value: String, placeholder: String, key: FieldKey, secure: Bool = false)
+        case text(label: String, value: String, placeholder: String, key: FieldKey)
         case selection(label: String, value: String, options: [(display: String, value: String)], key: FieldKey, systemImage: String? = nil, isEnabled: Bool = true)
         case toggle(
             label: String,
@@ -209,7 +209,7 @@ class TVProxyEditorViewController: UITableViewController {
         ]
         if isNowhere {
             serverRows.append(.text(label: String(localized: "Port"), value: serverPort, placeholder: "443", key: .port))
-            serverRows.append(.text(label: String(localized: "Key"), value: nowhereKey, placeholder: String(localized: "Key"), key: .nowhereKey, secure: true))
+            serverRows.append(.text(label: String(localized: "Key"), value: nowhereKey, placeholder: String(localized: "Key"), key: .nowhereKey))
         } else {
             serverRows.append(.text(label: String(localized: "Port"), value: serverPort, placeholder: "443", key: .port))
         }
@@ -219,32 +219,32 @@ class TVProxyEditorViewController: UITableViewController {
                 serverRows.append(.text(label: String(localized: "Encryption", comment: "Encryption for VLESS protocol"), value: vlessEncryption, placeholder: "none", key: .vlessEncryption))
             }
         } else if isHysteria {
-            serverRows.append(.text(label: String(localized: "Password"), value: hysteriaPassword, placeholder: String(localized: "Password"), key: .hysteriaPassword, secure: true))
+            serverRows.append(.text(label: String(localized: "Password"), value: hysteriaPassword, placeholder: String(localized: "Password"), key: .hysteriaPassword))
             serverRows.append(.selection(label: String(localized: "Obfuscation", comment: "Obfuscation for Hysteria protocol"), value: hysteriaObfuscationDisplayValue, options: [
                 (String(localized: "None"), "none"),
                 ("Salamander", "salamander"),
                 ("Gecko", "gecko"),
             ], key: .hysteriaObfuscationType))
             if hysteriaObfuscationType != "none" {
-                serverRows.append(.text(label: String(localized: "Password"), value: hysteriaObfuscationPassword, placeholder: String(localized: "Password"), key: .hysteriaObfuscationPassword, secure: true))
+                serverRows.append(.text(label: String(localized: "Password"), value: hysteriaObfuscationPassword, placeholder: String(localized: "Password"), key: .hysteriaObfuscationPassword))
             }
             if hysteriaObfuscationType == "gecko" {
                 serverRows.append(.text(label: String(localized: "Maximum Packet Size", comment: "Maximum Packet Size for Hysteria protocol Gecko obfuscation"), value: hysteriaObfuscationMaxText, placeholder: String(HysteriaObfuscation.geckoMaxPacketSizeDefault), key: .hysteriaObfuscationMax))
                 serverRows.append(.text(label: String(localized: "Minimum Packet Size", comment: "Minimum Packet Size for Hysteria protocol Gecko obfuscation"), value: hysteriaObfuscationMinText, placeholder: String(HysteriaObfuscation.geckoMinPacketSizeDefault), key: .hysteriaObfuscationMin))
             }
         } else if isSudoku {
-            serverRows.append(.text(label: String(localized: "Key", comment: "Key for Sudoku protocol"), value: sudokuKey, placeholder: String(localized: "Key", comment: "Key for Sudoku protocol"), key: .sudokuKey, secure: true))
+            serverRows.append(.text(label: String(localized: "Key", comment: "Key for Sudoku protocol"), value: sudokuKey, placeholder: String(localized: "Key", comment: "Key for Sudoku protocol"), key: .sudokuKey))
             serverRows.append(.selection(label: String(localized: "AEAD", comment: "AEAD for Sudoku protocol"), value: sudokuAEADMethod.displayName, options: SudokuAEADMethod.allCases.map { ($0.displayName, $0.rawValue) }, key: .sudokuAEADMethod))
             serverRows.append(.text(label: String(localized: "Maximum Padding", comment: "Maximum Padding for Sudoku protocol"), value: sudokuPaddingMaxText, placeholder: "15", key: .sudokuPaddingMax))
             serverRows.append(.text(label: String(localized: "Minimum Padding", comment: "Minimum Padding for Sudoku protocol"), value: sudokuPaddingMinText, placeholder: "5", key: .sudokuPaddingMin))
             serverRows.append(.selection(label: String(localized: "ASCII Mode", comment: "ASCII Mode for Sudoku protocol"), value: sudokuASCIIMode.displayName, options: SudokuASCIIMode.allCases.map { ($0.displayName, $0.rawValue) }, key: .sudokuASCIIMode))
             serverRows.append(.text(label: String(localized: "Custom Tables", comment: "Custom Tables for Sudoku protocol"), value: sudokuCustomTablesText, placeholder: "comma,separated", key: .sudokuCustomTables))
         } else if isTrojan {
-            serverRows.append(.text(label: String(localized: "Password"), value: trojanPassword, placeholder: String(localized: "Password"), key: .trojanPassword, secure: true))
+            serverRows.append(.text(label: String(localized: "Password"), value: trojanPassword, placeholder: String(localized: "Password"), key: .trojanPassword))
         } else if isAnyTLS {
-            serverRows.append(.text(label: String(localized: "Password"), value: anytlsPassword, placeholder: String(localized: "Password"), key: .anytlsPassword, secure: true))
+            serverRows.append(.text(label: String(localized: "Password"), value: anytlsPassword, placeholder: String(localized: "Password"), key: .anytlsPassword))
         } else if isShadowsocks {
-            serverRows.append(.text(label: String(localized: "Password"), value: ssPassword, placeholder: String(localized: "Password"), key: .ssPassword, secure: true))
+            serverRows.append(.text(label: String(localized: "Password"), value: ssPassword, placeholder: String(localized: "Password"), key: .ssPassword))
             let methods: [(String, String)] = [
                 (String(localized: "None"), "none"),
                 ("AES-128-GCM", "aes-128-gcm"),
@@ -257,10 +257,10 @@ class TVProxyEditorViewController: UITableViewController {
             serverRows.append(.selection(label: String(localized: "Method", comment: "Method for Shadowsocks protocol"), value: ssMethodDisplayValue, options: methods, key: .ssMethod))
         } else if isSOCKS5 {
             serverRows.append(.text(label: String(localized: "Username"), value: socks5Username, placeholder: String(localized: "Username"), key: .socks5Username))
-            serverRows.append(.text(label: String(localized: "Password"), value: socks5Password, placeholder: String(localized: "Password"), key: .socks5Password, secure: true))
+            serverRows.append(.text(label: String(localized: "Password"), value: socks5Password, placeholder: String(localized: "Password"), key: .socks5Password))
         } else if isRFC {
             serverRows.append(.text(label: String(localized: "Username"), value: rfcUsername, placeholder: String(localized: "Username"), key: .rfcUsername))
-            serverRows.append(.text(label: String(localized: "Password"), value: rfcPassword, placeholder: String(localized: "Password"), key: .rfcPassword, secure: true))
+            serverRows.append(.text(label: String(localized: "Password"), value: rfcPassword, placeholder: String(localized: "Password"), key: .rfcPassword))
         }
         if !isDirect {
             sections.append((String(localized: "Server"), serverRows))
@@ -645,14 +645,14 @@ class TVProxyEditorViewController: UITableViewController {
         cell.contentView.alpha = 1
 
         switch row {
-        case .text(let label, let value, let placeholder, _, let secure):
+        case .text(let label, let value, let placeholder, _):
             var content = cell.defaultContentConfiguration()
             content.text = label
             if value.isEmpty {
                 content.secondaryText = placeholder
                 content.secondaryTextProperties.color = .tertiaryLabel
             } else {
-                content.secondaryText = secure ? String(repeating: "•", count: min(value.count, 12)) : value
+                content.secondaryText = value
                 content.secondaryTextProperties.color = .label
             }
             cell.contentConfiguration = content
@@ -705,12 +705,11 @@ class TVProxyEditorViewController: UITableViewController {
         let row = formSections[indexPath.section].rows[indexPath.row]
 
         switch row {
-        case .text(let label, let value, let placeholder, let key, let secure):
+        case .text(let label, let value, let placeholder, let key):
             let inputVC = TVTextInputViewController(
                 title: label,
                 currentValue: value,
-                placeholder: placeholder,
-                isSecure: secure
+                placeholder: placeholder
             ) { [weak self] newValue in
                 self?.updateField(key, value: newValue)
                 self?.tableView.reloadData()
