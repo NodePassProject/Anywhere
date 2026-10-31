@@ -171,23 +171,13 @@ struct ModuleContentView: View {
                     .lineLimit(1)
             }
             Spacer()
-            statusDot(enabled: ruleSet.enabled)
+            statusLabel(enabled: ruleSet.enabled)
         }
     }
 
-    @ViewBuilder
-    private func statusDot(enabled: Bool) -> some View {
-        if enabled {
-            Image(systemName: "circle.fill")
-                .foregroundStyle(.green)
-                .font(.caption)
-                .accessibilityLabel("Enabled")
-        } else {
-            Image(systemName: "circle.fill")
-                .foregroundStyle(.red)
-                .font(.caption)
-                .accessibilityLabel("Disabled")
-        }
+    private func statusLabel(enabled: Bool) -> some View {
+        Text(enabled ? "On" : "Off")
+            .foregroundStyle(.secondary)
     }
 
     private func summary(for ruleSet: ModuleMITMRuleSet) -> String {

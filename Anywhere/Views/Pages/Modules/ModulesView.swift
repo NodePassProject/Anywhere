@@ -146,23 +146,13 @@ struct ModulesView: View {
             ModuleIconView(iconLight: module.iconLight, iconDark: module.iconDark)
             Text(module.name)
             Spacer()
-            statusDot(enabled: module.enabled)
+            statusLabel(enabled: module.enabled)
         }
     }
 
-    @ViewBuilder
-    private func statusDot(enabled: Bool) -> some View {
-        if enabled {
-            Image(systemName: "circle.fill")
-                .foregroundStyle(.green)
-                .font(.caption)
-                .accessibilityLabel("Enabled")
-        } else {
-            Image(systemName: "circle.fill")
-                .foregroundStyle(.red)
-                .font(.caption)
-                .accessibilityLabel("Disabled")
-        }
+    private func statusLabel(enabled: Bool) -> some View {
+        Text(enabled ? "On" : "Off")
+            .foregroundStyle(.secondary)
     }
 
     private func handleFileImport(_ result: Result<URL, Error>) {

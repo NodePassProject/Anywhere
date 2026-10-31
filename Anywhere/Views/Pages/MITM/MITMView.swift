@@ -179,17 +179,8 @@ struct MITMView: View {
                     .lineLimit(1)
             }
             Spacer()
-            if ruleSet.enabled {
-                Image(systemName: "circle.fill")
-                    .foregroundStyle(.green)
-                    .font(.caption)
-                    .accessibilityLabel("Enabled")
-            } else {
-                Image(systemName: "circle.fill")
-                    .foregroundStyle(.red)
-                    .font(.caption)
-                    .accessibilityLabel("Disabled")
-            }
+            Text(ruleSet.enabled ? "On" : "Off")
+                .foregroundStyle(.secondary)
         }
     }
 
