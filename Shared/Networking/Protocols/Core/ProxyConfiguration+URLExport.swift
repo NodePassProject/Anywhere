@@ -76,7 +76,7 @@ extension ProxyConfiguration {
             if let alpn = tls.alpn, !alpn.isEmpty {
                 parameters.append("alpn=\(alpn.joined(separator: ",").addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? alpn.joined(separator: ","))")
             }
-            if tls.fingerprint != .default {
+            if tls.fingerprint != .plain {
                 parameters.append("fp=\(tls.fingerprint.rawValue)")
             }
             if let ech = tls.echQueryValue {
@@ -90,7 +90,7 @@ extension ProxyConfiguration {
             if !reality.shortId.isEmpty {
                 parameters.append("sid=\(reality.shortId.hexEncodedString())")
             }
-            if reality.fingerprint != .default {
+            if reality.fingerprint != .plain {
                 parameters.append("fp=\(reality.fingerprint.rawValue)")
             }
         }
@@ -216,7 +216,7 @@ extension ProxyConfiguration {
             let joined = alpn.joined(separator: ",")
             parameters.append("alpn=\(joined.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? joined)")
         }
-        if tls.fingerprint != .default {
+        if tls.fingerprint != .plain {
             parameters.append("fp=\(tls.fingerprint.rawValue)")
         }
         if let ech = tls.echQueryValue {
@@ -239,7 +239,7 @@ extension ProxyConfiguration {
             let joined = alpn.joined(separator: ",")
             parameters.append("alpn=\(joined.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? joined)")
         }
-        if tls.fingerprint != .default {
+        if tls.fingerprint != .plain {
             parameters.append("fp=\(tls.fingerprint.rawValue)")
         }
         if let ech = tls.echQueryValue {
@@ -310,7 +310,7 @@ extension ProxyConfiguration {
                 let joined = alpn.joined(separator: ",")
                 parameters.append("alpn=\(encodedQueryValue(joined))")
             }
-            if tls.fingerprint != .default {
+            if tls.fingerprint != .plain {
                 parameters.append("fp=\(tls.fingerprint.rawValue)")
             }
             if let ech = tls.echQueryValue {

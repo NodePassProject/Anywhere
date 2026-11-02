@@ -403,7 +403,6 @@ nonisolated struct TLSClientHelloBuilder {
             : fingerprint
 
         switch fingerprint {
-        case .nonBrowser: return buildNonBrowser(serverName: serverName, publicKey: publicKey, alpn: alpn)
         case .chrome133:  return buildChrome133(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn, omitPQKeyShares: omitPQKeyShares, mlkemEncapsulationKey: mlkemEncapsulationKey)
         case .chrome120:  return buildChrome120(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn)
         case .chrome106:  return buildChrome106(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn)
@@ -411,12 +410,13 @@ nonisolated struct TLSClientHelloBuilder {
         case .firefox120: return buildFirefox120(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn)
         case .safari26:   return buildSafari26(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn, omitPQKeyShares: omitPQKeyShares, mlkemEncapsulationKey: mlkemEncapsulationKey)
         case .edge106:    return buildEdge106(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn)
+        case .plain:      return buildPlain(serverName: serverName, publicKey: publicKey, alpn: alpn)
         }
     }
 
-    // MARK: - Non-Browser (minimal, honest client)
+    // MARK: - Plain (minimal, honest client)
 
-    private static func buildNonBrowser(
+    private static func buildPlain(
         serverName: String, publicKey: Data, alpn: [String]?
     ) -> (Data, Data, Bool) {
         let suites = cipherSuitesData([

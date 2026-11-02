@@ -674,7 +674,7 @@ actor MITMSession: MITMHTTP1StreamDelegate {
             alpn: [innerALPN],
             minVersion: .tls12,
             maxVersion: .tls13,
-            fingerprint: .nonBrowser
+            fingerprint: .plain
         )
         let client = TLSClient(configuration: configuration)
         tlsClient = client
@@ -1395,7 +1395,7 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
             alpn: ["h2", "http/1.1"],
             minVersion: .tls12,
             maxVersion: .tls13,
-            fingerprint: .nonBrowser
+            fingerprint: .plain
         )
         let client = TLSClient(configuration: configuration)
         sharedUpstreamTLSClient = client
@@ -1728,7 +1728,7 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
             alpn: ["http/1.1"],
             minVersion: .tls12,
             maxVersion: .tls13,
-            fingerprint: .nonBrowser
+            fingerprint: .plain
         )
         let client = TLSClient(configuration: configuration)
         bridgeStream.tlsClient = client

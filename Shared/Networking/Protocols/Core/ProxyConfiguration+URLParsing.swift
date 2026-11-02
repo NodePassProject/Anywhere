@@ -653,7 +653,7 @@ nonisolated extension ProxyConfiguration {
         if let alpnString = parameters["alpn"], !alpnString.isEmpty {
             alpn = alpnString.split(separator: ",").map { String($0) }
         }
-        let fingerprint = parameters["fp"].flatMap { TLSFingerprint(importValue: $0) } ?? .default
+        let fingerprint = TLSFingerprint(linkValue: parameters["fp"])
         let ech = TLSConfiguration.echSettings(fromQueryValue: parameters["ech"])
         return TLSConfiguration(serverName: serverName, alpn: alpn, echEnabled: ech.enabled, echConfig: ech.config, fingerprint: fingerprint)
     }

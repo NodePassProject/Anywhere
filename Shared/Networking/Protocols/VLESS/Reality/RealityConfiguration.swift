@@ -38,7 +38,7 @@ nonisolated struct RealityConfiguration {
         let sidString = params["sid"] ?? ""
         let shortId = Data(hexString: sidString) ?? Data()
 
-        let fingerprint = params["fp"].flatMap { TLSFingerprint(importValue: $0) } ?? .default
+        let fingerprint = TLSFingerprint(linkValue: params["fp"])
 
         return RealityConfiguration(
             serverName: sni,
@@ -106,11 +106,11 @@ nonisolated enum TLSFingerprint: String, Codable, CaseIterable {
 
     case edge106 = "edge_106"
     
-    case nonBrowser = "non_browser"
+    case plain = "plain"
     
     init(from decoder: Decoder) throws {
         let raw = try decoder.singleValueContainer().decode(String.self)
-        self = TLSFingerprint(rawValue: raw) ?? .default
+        self = TLSFingerprint(importValue: raw) ?? .default
     }
 
     var displayName: String {
@@ -122,18 +122,19 @@ nonisolated enum TLSFingerprint: String, Codable, CaseIterable {
         case .firefox120: return "Firefox 120"
         case .safari26:   return "Safari 26.3"
         case .edge106:    return "Edge 106"
-        case .nonBrowser: return "Non-Browser"
+        case .plain:      return "Plain"
         }
     }
     
-    static var allCases: [TLSFingerprint] {
-        [.chrome133, .chrome120, .chrome106,
-         .firefox148, .firefox120,
-         .safari26,
-         .edge106]
-    }
-    
     static var `default`: TLSFingerprint { TLSFingerprint.chrome133.supportedOnThisOS }
+
+    init(linkValue: String?) {
+        guard let linkValue, !linkValue.isEmpty else {
+            self = .plain
+            return
+        }
+        self = TLSFingerprint(importValue: linkValue) ?? .default
+    }
     
     init?(importValue: String) {
         if let exact = TLSFingerprint(rawValue: importValue) {
@@ -145,6 +146,7 @@ nonisolated enum TLSFingerprint: String, Codable, CaseIterable {
         case "firefox": self = TLSFingerprint.firefox148.supportedOnThisOS
         case "safari":  self = TLSFingerprint.safari26.supportedOnThisOS
         case "edge":    self = TLSFingerprint.edge106.supportedOnThisOS
+        case "plain":   self = .plain
         default:        return nil
         }
     }

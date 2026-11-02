@@ -431,11 +431,11 @@ nonisolated enum ClashProxyParser {
     }
 
     private static func parseFingerprint(_ node: YAML.Node) -> TLSFingerprint {
-        guard let rawValue = node.string(forKey: "client-fingerprint") else { return .default }
+        guard let rawValue = node.string(forKey: "client-fingerprint") else { return .plain }
         switch rawValue.lowercased() {
         case "ios":    return .chrome120
         case "random": return .default
-        default:       return TLSFingerprint(importValue: rawValue) ?? .default
+        default:       return TLSFingerprint(linkValue: rawValue)
         }
     }
 

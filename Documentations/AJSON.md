@@ -136,7 +136,7 @@ alone when the defaults are enough (`"security": "tls"`).
 | ------------- | --------------- | ------- | ------- |
 | `sni`         | string          | `server` | Server name. |
 | `alpn`        | array of string | protocol default | ALPN list. |
-| `fingerprint` | string          | Chrome 133 (Chrome 120 before iOS 26) | `chrome_133`, `chrome_120`, `chrome_106`, `firefox_148`, `firefox_120`, `safari_26`, `edge_106`, `non_browser`, or the family names `chrome`, `firefox`, `safari`, `edge`. |
+| `fingerprint` | string          | Chrome 133 (Chrome 120 before iOS 26) | `chrome_133`, `chrome_120`, `chrome_106`, `firefox_148`, `firefox_120`, `safari_26`, `edge_106`, `plain`, or the family names `chrome`, `firefox`, `safari`, `edge`. |
 | `minVersion`  | string          | — | `"1.0"`, `"1.1"`, `"1.2"`, or `"1.3"`. |
 | `maxVersion`  | string          | — | As `minVersion`. |
 | `insecure`    | boolean         | `false` | Skip certificate verification. |

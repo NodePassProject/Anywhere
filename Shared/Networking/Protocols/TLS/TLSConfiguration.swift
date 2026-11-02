@@ -60,7 +60,7 @@ nonisolated struct TLSConfiguration {
             alpn = alpnString.split(separator: ",").map { String($0) }
         }
 
-        let fingerprint = params["fp"].flatMap { TLSFingerprint(importValue: $0) } ?? .default
+        let fingerprint = TLSFingerprint(linkValue: params["fp"])
 
         let minVersion = Self.parseTLSVersion(params["minVersion"])
         let maxVersion = Self.parseTLSVersion(params["maxVersion"])
