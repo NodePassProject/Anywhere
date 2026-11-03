@@ -15,7 +15,6 @@ struct AnywhereApp: App {
     @State private var voyagerStore = VoyagerStore()
     @State private var mitmCertificateController = MITMCertificateController()
     @State private var deepLinkManager = DeepLinkManager()
-    @State private var watchSession: WatchSessionManager
 
     init() {
         let container = AppContainer()
@@ -27,23 +26,11 @@ struct AnywhereApp: App {
             tunnel?.reconnect()
         }
 
-        let watchSession = WatchSessionManager(
-            tunnel: container.tunnel,
-            selection: container.selection,
-            configurationStore: container.configurationStore,
-            chainStore: container.chainStore,
-            groupStore: container.groupStore,
-            subscriptionStore: container.subscriptionStore,
-            operations: operations
-        )
-        watchSession.start()
-
         Task { await CloudSync.shared.start { keys in await operations.reload(keys) } }
 
         _container = State(initialValue: container)
         _operations = State(initialValue: operations)
         _settings = State(initialValue: settings)
-        _watchSession = State(initialValue: watchSession)
     }
 
     var body: some Scene {
