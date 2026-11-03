@@ -195,13 +195,13 @@ actor MITMBridgeClientLeg: MITMResponseSink {
         var input = data
         if prefaceRemaining > 0, !input.isEmpty {
             let take = min(prefaceRemaining, input.count)
-            input.removeFirst(take)
+            input = take == input.count ? Data() : input[(input.startIndex + take)...]
             prefaceRemaining -= take
         }
-        if !input.isEmpty { receiveBuffer.append(input) }
         ensureServerPrefaceSent()
         parkedContinuation = continuation
-        let parked = pump()
+        let parked = pump(&input)
+        if !input.isEmpty, phase != .failed, phase != .torn { receiveBuffer.append(input) }
         finishPass(parked: parked)
     }
 
@@ -240,8 +240,13 @@ actor MITMBridgeClientLeg: MITMResponseSink {
     }
 
     private func pump() -> Bool {
+        var input = Data()
+        return pump(&input)
+    }
+
+    private func pump(_ input: inout Data) -> Bool {
         while true {
-            switch Codec.parseFrame(from: &receiveBuffer) {
+            switch Codec.parseFrame(from: &receiveBuffer, then: &input) {
             case .needMore:
                 return false
             case .error:

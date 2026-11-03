@@ -491,15 +491,21 @@ actor MITMHTTP2UpstreamLeg {
             continuation.resume()
             return
         }
-        receiveBuffer.append(data)
+        var input = data
         parkedContinuation = continuation
-        let parked = pump()
+        let parked = pump(&input)
+        if !input.isEmpty, phase != .failed, phase != .torn { receiveBuffer.append(input) }
         finishPass(parked: parked)
     }
 
     private func pump() -> Bool {
+        var input = Data()
+        return pump(&input)
+    }
+
+    private func pump(_ input: inout Data) -> Bool {
         while true {
-            switch Codec.parseFrame(from: &receiveBuffer) {
+            switch Codec.parseFrame(from: &receiveBuffer, then: &input) {
             case .needMore: return false
                         case .error:
                 fail("upstream frame exceeded receive cap")

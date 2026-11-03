@@ -78,6 +78,46 @@ nonisolated enum MITMHTTP2FrameCodec {
         return .frame(RawFrame(typeCode: type, flags: flags, streamID: streamID, payload: payload))
     }
 
+    static func parseFrame(from buffer: inout MITMByteBuffer, then input: inout Data) -> ParseResult {
+        if !buffer.isEmpty {
+            if buffer.count < 9 {
+                moveBytes(9 - buffer.count, from: &input, to: &buffer)
+                guard buffer.count >= 9 else { return .needMore }
+            }
+            let length = (Int(buffer[0]) << 16) | (Int(buffer[1]) << 8) | Int(buffer[2])
+            if length <= maxReceivedFramePayloadSize, buffer.count < 9 + length {
+                moveBytes(9 + length - buffer.count, from: &input, to: &buffer)
+            }
+            return parseFrame(from: &buffer)
+        }
+        guard input.count >= 9 else { return .needMore }
+        let base = input.startIndex
+        let length = (Int(input[base]) << 16) | (Int(input[base + 1]) << 8) | Int(input[base + 2])
+        if length > maxReceivedFramePayloadSize {
+            input = Data()
+            return .error
+        }
+        let total = 9 + length
+        guard input.count >= total else { return .needMore }
+        let type = input[base + 3]
+        let flags = input[base + 4]
+        let streamID = (UInt32(input[base + 5]) << 24
+                      | UInt32(input[base + 6]) << 16
+                      | UInt32(input[base + 7]) << 8
+                      | UInt32(input[base + 8])) & 0x7FFFFFFF
+        let payload = input.subdata(in: (base + 9)..<(base + total))
+        input = input.count == total ? Data() : input[(base + total)...]
+        return .frame(RawFrame(typeCode: type, flags: flags, streamID: streamID, payload: payload))
+    }
+
+    private static func moveBytes(_ count: Int, from input: inout Data, to buffer: inout MITMByteBuffer) {
+        let take = min(count, input.count)
+        guard take > 0 else { return }
+        let split = input.startIndex + take
+        buffer.append(input[..<split])
+        input = take == input.count ? Data() : input[split...]
+    }
+
     // MARK: Header writing
 
     static func appendFrameHeader(

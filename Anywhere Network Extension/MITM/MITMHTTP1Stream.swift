@@ -257,7 +257,9 @@ actor MITMHTTP1Stream {
         }
         parkedContinuation = continuation
         var output = Data()
-        let unread = forwardLengthDirectly(data, into: &output)
+        var unread = forwardLengthDirectly(data, into: &output)
+        guard phase != .torn else { return }
+        unread = forwardChunkedDirectly(unread, into: &output)
         guard phase != .torn else { return }
         if !unread.isEmpty { receiveBuffer.append(unread) }
         while drive(into: &output) { }
@@ -946,6 +948,28 @@ actor MITMHTTP1Stream {
         } else {
             result = reader.consumeForward(&receiveBuffer, into: &output)
         }
+        return finishForwardedChunked(result, reader: reader, into: &output)
+    }
+
+    private func forwardChunkedDirectly(_ data: Data, into output: inout Data) -> Data {
+        guard receiveBuffer.isEmpty, !data.isEmpty, case .forwardingChunked(let reader) = mode else { return data }
+        let sink = responseIRSink
+        var bodyRanges: [Range<Data.Index>] = []
+        let scan = reader.scanForward(data, onData: sink == nil ? nil : { bodyRanges.append($0) })
+        if let sink {
+            for range in bodyRanges where !range.isEmpty {
+                sink.http1ResponseBody(data.subdata(in: range), endStream: false)
+                if phase == .torn { return Data() }
+            }
+        } else if scan.consumed > 0 {
+            let forwarded = data.prefix(scan.consumed)
+            if output.isEmpty { output = forwarded } else { output.append(forwarded) }
+        }
+        _ = finishForwardedChunked(scan.result, reader: reader, into: &output)
+        return scan.consumed == data.count ? Data() : data.suffix(from: data.startIndex + scan.consumed)
+    }
+
+    private func finishForwardedChunked(_ result: ChunkedReader.ForwardResult, reader: ChunkedReader, into output: inout Data) -> Bool {
         switch result {
         case .needMore:
             mode = .forwardingChunked(reader: reader)
@@ -1324,7 +1348,7 @@ actor MITMHTTP1Stream {
 
     private func discardChunked(reader: inout ChunkedReader) -> Bool {
         guard !receiveBuffer.isEmpty else { return false }
-        let result = reader.consumeForwardIR(&receiveBuffer) { _ in }
+        let result = reader.consumeForwardIR(&receiveBuffer, deliver: nil)
         switch result {
         case .needMore:
             mode = .discardingChunked(reader: reader)
@@ -2295,7 +2319,63 @@ nonisolated private final class ChunkedReader {
         return .needMore
     }
 
-    func consumeForwardIR(_ buffer: inout MITMByteBuffer, deliver: (Data) -> Void) -> ForwardResult {
+    func scanForward(_ data: Data, onData: ((Range<Data.Index>) -> Void)?) -> (consumed: Int, result: ForwardResult) {
+        let base = data.startIndex
+        let count = data.count
+        var cursor = 0
+        while cursor < count {
+            switch state {
+            case .sizeLine:
+                guard let lineEnd = Self.firstCRLF(in: data, from: cursor) else { return (cursor, .needMore) }
+                let size = data.withUnsafeBytes { bytes in
+                    MITMHTTP1Stream.parseHexSize(UnsafeRawBufferPointer(rebasing: bytes[cursor..<lineEnd]))
+                }
+                guard let size else { return (cursor, .malformed) }
+                cursor = lineEnd + 2
+                state = size == 0 ? .trailerOrEnd : .chunkData(remaining: size, originalSize: size)
+            case .chunkData(let remaining, let originalSize):
+                let take = min(remaining, count - cursor)
+                onData?((base + cursor)..<(base + cursor + take))
+                cursor += take
+                let left = remaining - take
+                if left == 0 {
+                    state = .dataCRLF(originalSize: originalSize)
+                } else {
+                    state = .chunkData(remaining: left, originalSize: originalSize)
+                    return (cursor, .needMore)
+                }
+            case .dataCRLF:
+                guard count - cursor >= 2 else { return (cursor, .needMore) }
+                guard data[base + cursor] == 0x0D, data[base + cursor + 1] == 0x0A else {
+                    return (cursor, .malformed)
+                }
+                cursor += 2
+                state = .sizeLine
+            case .trailerOrEnd:
+                guard let lineEnd = Self.firstCRLF(in: data, from: cursor) else { return (cursor, .needMore) }
+                let isEmptyLine = lineEnd == cursor
+                cursor = lineEnd + 2
+                if isEmptyLine { return (cursor, .complete) }
+            }
+        }
+        return (cursor, .needMore)
+    }
+
+    private static func firstCRLF(in data: Data, from start: Int) -> Int? {
+        data.withUnsafeBytes { bytes -> Int? in
+            guard let base = bytes.baseAddress, bytes.count >= 2 else { return nil }
+            var index = start
+            while index < bytes.count - 1 {
+                guard let found = memchr(base + index, 0x0D, bytes.count - 1 - index) else { return nil }
+                index = base.distance(to: UnsafeRawPointer(found))
+                if bytes[index + 1] == 0x0A { return index }
+                index += 1
+            }
+            return nil
+        }
+    }
+
+    func consumeForwardIR(_ buffer: inout MITMByteBuffer, deliver: ((Data) -> Void)?) -> ForwardResult {
         while !buffer.isEmpty {
             switch state {
             case .sizeLine:
@@ -2312,7 +2392,7 @@ nonisolated private final class ChunkedReader {
                 state = size == 0 ? .trailerOrEnd : .chunkData(remaining: size, originalSize: size)
             case .chunkData(let remaining, let originalSize):
                 let take = min(remaining, buffer.count)
-                if take > 0 { deliver(Data(buffer.prefix(take))) }
+                if take > 0, let deliver { deliver(buffer.prefix(take)) }
                 buffer.removeFirst(take)
                 let left = remaining - take
                 if left == 0 {
