@@ -66,7 +66,7 @@ nonisolated enum OutboundProtocol: String, Codable, CaseIterable {
         case .trojan:
             "Trojan"
         case .anytls:
-            String(localized: "AnyTLS (not recommended)")
+            "AnyTLS"
         case .shadowsocks:
             "Shadowsocks"
         case .socks5:
