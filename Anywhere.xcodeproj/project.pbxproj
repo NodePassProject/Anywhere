@@ -158,6 +158,7 @@
 				Networking/DNS/DNSMessage.swift,
 				Networking/DNS/DNSName.swift,
 				Networking/DNS/DNSResolver.swift,
+				"Networking/DNS/DNSUpstream+Availability.swift",
 				Networking/DNS/DNSUpstreamClient.swift,
 				Networking/DNS/ECHResolver.swift,
 				Networking/IPRoute.swift,

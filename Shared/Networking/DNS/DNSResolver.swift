@@ -46,7 +46,7 @@ nonisolated final class DNSResolver: Sendable {
         servesStaleOnFailure: Bool,
         waitLimit: Duration?
     ) {
-        self.upstreamSource = upstream
+        self.upstreamSource = { upstream().reachable }
         self.hosts = hosts
         self.fallsBackToSystem = fallsBackToSystem
         self.cache = DNSLookupCache(
@@ -107,7 +107,9 @@ nonisolated final class DNSResolver: Sendable {
         var resolved: [String] = []
         if !upstream.isSystem {
             resolved = (try? await DNSUpstreamClient.resolve(host, via: upstream, family: family)) ?? []
-            guard resolved.isEmpty, fallsBackToSystem else { return Self.cacheable(resolved) }
+            guard resolved.isEmpty, fallsBackToSystem, !DNSUpstream.systemResolverUnavailable else {
+                return Self.cacheable(resolved)
+            }
         }
         resolved = await blockingBridge.resolveAddresses(host, family: family)
         return Self.cacheable(resolved)
