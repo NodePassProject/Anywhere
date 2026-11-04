@@ -15,8 +15,8 @@ nonisolated enum ProxyModeOption: String, AppEnum {
     static let typeDisplayRepresentation = TypeDisplayRepresentation(name: "Mode")
 
     static let caseDisplayRepresentations: [ProxyModeOption: DisplayRepresentation] = [
-        .rule: DisplayRepresentation(title: "Proxy Mode", image: .init(named: "anywhere.proxy")),
-        .global: DisplayRepresentation(title: "Global Mode", image: .init(named: "anywhere.global")),
+        .rule: DisplayRepresentation(title: "Proxy Mode", image: .init(systemName: "arrow.triangle.branch")),
+        .global: DisplayRepresentation(title: "Global Mode", image: .init(systemName: "arrow.triangle.merge")),
     ]
 
     var proxyMode: ProxyMode {

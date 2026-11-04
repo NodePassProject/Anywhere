@@ -40,7 +40,7 @@ struct RoutingView: View {
                             ControlCenter.shared.reloadControls(ofKind: "com.argsment.Anywhere.Widget.VPNToggle")
                         }
                     )) {
-                        TextWithColorfulIcon(title: "Global Mode", systemName: "arrow.merge", foregroundStyle: .white, backgroundStyle: .orange.gradient)
+                        TextWithColorfulIcon(title: "Global Mode", systemName: "arrow.triangle.merge", foregroundStyle: .white, backgroundStyle: .orange.gradient)
                     }
                     Picker(selection: Binding(
                         get: { routingRuleSetStore.bypassCountryCode },
