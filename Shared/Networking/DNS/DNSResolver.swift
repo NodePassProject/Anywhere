@@ -9,17 +9,15 @@ import Foundation
 
 nonisolated final class DNSResolver: Sendable {
     static let proxies = DNSResolver(
-        upstream: { AWCore.getProxyDNSUpstream().reachable },
+        upstream: { AWCore.getProxyDNSUpstream() },
         fallsBackToSystem: true,
         servesStaleOnFailure: true,
         waitLimit: nil
     )
     
+    /// Backs the resolved-IP rule fallback only: getaddrinfo, first IPv4 or else first IPv6.
     static let localRequests = DNSResolver(
-        upstream: {
-            let upstream = AWCore.getLocalRequestDNSUpstream()
-            return AWCore.getPreventDNSLeak() ? upstream : upstream.reachable
-        },
+        upstream: { .system },
         fallsBackToSystem: false,
         servesStaleOnFailure: false,
         waitLimit: .seconds(4)
@@ -107,17 +105,11 @@ nonisolated final class DNSResolver: Sendable {
         family: DNSAddressFamily,
         upstream: DNSUpstream
     ) async -> (value: [String], ttl: TimeInterval)? {
-        var resolved: [String] = []
-        if upstream.isSystem {
-            guard !DNSUpstream.systemResolverUnavailable else { return nil }
-        } else {
-            resolved = (try? await DNSUpstreamClient.resolve(host, via: upstream, family: family)) ?? []
-            guard resolved.isEmpty, fallsBackToSystem, !DNSUpstream.systemResolverUnavailable else {
-                return Self.cacheable(resolved)
-            }
+        if !upstream.isSystem {
+            let resolved = (try? await DNSUpstreamClient.resolve(host, via: upstream, family: family)) ?? []
+            guard resolved.isEmpty, fallsBackToSystem else { return Self.cacheable(resolved) }
         }
-        resolved = await blockingBridge.resolveAddresses(host, family: family)
-        return Self.cacheable(resolved)
+        return Self.cacheable(await blockingBridge.resolveAddresses(host, family: family))
     }
 
     private static func cacheable(_ addresses: [String]) -> (value: [String], ttl: TimeInterval)? {

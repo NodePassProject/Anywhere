@@ -51,7 +51,7 @@ nonisolated enum OutboundConnector {
         if isLoopbackOrPrivate(host) { return (.direct, nil) }
 
         if !isLiteral, !context.preventDNSLeak,
-           let ip = await DNSResolver.localRequests.resolveHost(host, family: .ipv4),
+           let ip = await DNSResolver.localRequests.resolveHost(host),
            let ruleMatch = router.matchIP(ip) {
             return (ruleMatch.action, ruleMatch.ruleSetName)
         }

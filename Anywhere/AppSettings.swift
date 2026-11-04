@@ -183,27 +183,6 @@ final class AppSettings {
         }
     }
     
-    var localRequestDNSMode: DNSMode {
-        didSet {
-            AWCore.setLocalRequestDNSMode(localRequestDNSMode)
-            AWNotificationCenter.notifyTunnelSettingsChanged()
-        }
-    }
-
-    var localRequestDNSUDPServer: String {
-        didSet {
-            AWCore.setLocalRequestDNSUDPServer(localRequestDNSUDPServer)
-            AWNotificationCenter.notifyTunnelSettingsChanged()
-        }
-    }
-
-    var localRequestDNSDoHURL: String {
-        didSet {
-            AWCore.setLocalRequestDNSDoHURL(localRequestDNSDoHURL)
-            AWNotificationCenter.notifyTunnelSettingsChanged()
-        }
-    }
-
     var hostMappings: [HostMapping] {
         didSet {
             HostMapping.store(hostMappings)
@@ -346,9 +325,6 @@ final class AppSettings {
         fallbackDNSMode = AWCore.getFallbackDNSMode()
         fallbackDNSServer = AWCore.getFallbackDNSServer()
         hideVPNIcon = AWCore.getHideVPNIcon()
-        localRequestDNSMode = AWCore.getLocalRequestDNSMode()
-        localRequestDNSUDPServer = AWCore.getLocalRequestDNSUDPServer()
-        localRequestDNSDoHURL = AWCore.getLocalRequestDNSDoHURL()
         hostMappings = HostMapping.load()
         preventDNSLeak = AWCore.getPreventDNSLeak()
         proxyDNSMode = AWCore.getProxyDNSMode()

@@ -84,11 +84,6 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
             throw error
         }
 
-#if !os(tvOS)
-        let includeAllNetworks = protocolConfiguration.includeAllNetworks
-        DNSUpstream.systemResolverUnavailable = includeAllNetworks
-#endif
-
         do {
             try await applyTunnelSettings()
         } catch {

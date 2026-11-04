@@ -157,7 +157,7 @@ actor UDPPlane {
         pendingResolutions[flowKey] = PendingDatagrams(datagrams: [datagram],
                                                        byteCount: datagram.payload.count)
         Task { [weak self] in
-            _ = await DNSResolver.localRequests.resolveHost(domain, family: .ipv4)
+            _ = await DNSResolver.localRequests.resolveHost(domain)
             await self?.resumeAfterResolution(flowKey: flowKey)
         }
         return true

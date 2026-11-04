@@ -26,7 +26,7 @@ nonisolated final class ECHResolver: Sendable {
         let bare = DNSName.stripBrackets(host)
         if bare.isEmpty || DNSName.isIPAddress(bare) { return nil }
 
-        let upstream = AWCore.getECHDNSUpstream().reachable
+        let upstream = AWCore.getECHDNSUpstream()
         return await cache.value(for: DNSName.cacheKey(for: bare), from: upstream) { [self] in
             let result = await lookup(bare, upstream: upstream)
             let ttl = result

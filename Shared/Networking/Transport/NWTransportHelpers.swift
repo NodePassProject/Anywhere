@@ -116,15 +116,11 @@ extension NWEndpoint.Host {
             else { return .name(host, nil) }
             return literal
         case .localRequests:
-            let resolver = DNSResolver.localRequests
-            var address = await resolver.resolveHost(host, family: .ipv4)
-            if address == nil {
-                address = await resolver.resolveHost(host, family: .ipv6)
+            if let mapped = DNSResolver.localRequests.mappedAddress(for: host),
+               let literal = NWEndpoint.Host(ipLiteral: mapped) {
+                return literal
             }
-            guard let resolved = address, let literal = NWEndpoint.Host(ipLiteral: resolved) else {
-                throw AnywhereError.dns(.resolutionFailed(host: host, detail: nil))
-            }
-            return literal
+            return .name(host, nil)
         }
     }
 }

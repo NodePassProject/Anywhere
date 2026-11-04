@@ -33,8 +33,6 @@ nonisolated final class AWCore {
             UserDefaultsKey.echDNSDoHURL: DNSUpstream.defaultDoHURL,
             UserDefaultsKey.echDNSUDPServer: DNSUpstream.defaultUDPServer,
             UserDefaultsKey.fallbackDNSServer: DNSUpstream.defaultUDPServer,
-            UserDefaultsKey.localRequestDNSDoHURL: DNSUpstream.defaultDoHURL,
-            UserDefaultsKey.localRequestDNSUDPServer: DNSUpstream.defaultUDPServer,
             UserDefaultsKey.proxyDNSDoHURL: DNSUpstream.defaultDoHURL,
             UserDefaultsKey.proxyDNSUDPServer: DNSUpstream.defaultUDPServer,
             UserDefaultsKey.proxyMode: ProxyMode.rule.rawValue,
@@ -75,9 +73,6 @@ nonisolated final class AWCore {
         static let iCloudSyncEnabled = "iCloudSyncEnabled"
         static let identifier = "identifier"
         static let latencyResults = "latencyResults"
-        static let localRequestDNSDoHURL = "localRequestDNSDoHURL"
-        static let localRequestDNSMode = "localRequestDNSMode"
-        static let localRequestDNSUDPServer = "localRequestDNSUDPServer"
         static let mitmEnabled = "mitmEnabled"
         static let moduleRuleSetAssignments = "moduleRuleSetAssignments"
         static let onboardingCompleted = "onboardingCompleted"
@@ -480,30 +475,6 @@ nonisolated final class AWCore {
         userDefaults.set(value, forKey: UserDefaultsKey.subscriptionDNSDoHURL)
     }
 
-    static func getLocalRequestDNSMode() -> DNSMode {
-        userDefaults.string(forKey: UserDefaultsKey.localRequestDNSMode).flatMap(DNSMode.init(rawValue:)) ?? .default
-    }
-
-    static func setLocalRequestDNSMode(_ value: DNSMode) {
-        userDefaults.set(value.rawValue, forKey: UserDefaultsKey.localRequestDNSMode)
-    }
-
-    static func getLocalRequestDNSUDPServer() -> String {
-        userDefaults.string(forKey: UserDefaultsKey.localRequestDNSUDPServer)!
-    }
-
-    static func setLocalRequestDNSUDPServer(_ value: String) {
-        userDefaults.set(value, forKey: UserDefaultsKey.localRequestDNSUDPServer)
-    }
-
-    static func getLocalRequestDNSDoHURL() -> String {
-        userDefaults.string(forKey: UserDefaultsKey.localRequestDNSDoHURL)!
-    }
-
-    static func setLocalRequestDNSDoHURL(_ value: String) {
-        userDefaults.set(value, forKey: UserDefaultsKey.localRequestDNSDoHURL)
-    }
-
     static func getHostMappingsData() -> Data? {
         userDefaults.data(forKey: UserDefaultsKey.hostMappings)
     }
@@ -585,14 +556,6 @@ nonisolated final class AWCore {
             mode: getSubscriptionDNSMode(),
             udpServer: getSubscriptionDNSUDPServer(),
             dohURL: getSubscriptionDNSDoHURL()
-        )
-    }
-    
-    static func getLocalRequestDNSUpstream() -> DNSUpstream {
-        DNSUpstream(
-            mode: getLocalRequestDNSMode(),
-            udpServer: getLocalRequestDNSUDPServer(),
-            dohURL: getLocalRequestDNSDoHURL()
         )
     }
     
@@ -684,6 +647,7 @@ nonisolated final class AWCore {
 
     private static func migrateLegacySettings(_ defaults: UserDefaults) {
         migratePlainDNSToUDP(defaults)
+        removeLocalRequestDNSSettings(defaults)
     }
 
     /// Nov 2026: the "Plain" DNS mode was renamed to "UDP".
@@ -691,7 +655,6 @@ nonisolated final class AWCore {
         let modeKeys = [
             UserDefaultsKey.echDNSMode,
             UserDefaultsKey.fallbackDNSMode,
-            UserDefaultsKey.localRequestDNSMode,
             UserDefaultsKey.proxyDNSMode,
             UserDefaultsKey.subscriptionDNSMode,
         ]
@@ -701,7 +664,6 @@ nonisolated final class AWCore {
 
         let serverKeys = [
             ("echDNSPlainServer", UserDefaultsKey.echDNSUDPServer),
-            ("localRequestDNSPlainServer", UserDefaultsKey.localRequestDNSUDPServer),
             ("proxyDNSPlainServer", UserDefaultsKey.proxyDNSUDPServer),
             ("subscriptionDNSPlainServer", UserDefaultsKey.subscriptionDNSUDPServer),
         ]
@@ -709,6 +671,19 @@ nonisolated final class AWCore {
             guard let server = defaults.string(forKey: legacyKey) else { continue }
             defaults.set(server, forKey: key)
             defaults.removeObject(forKey: legacyKey)
+        }
+    }
+
+    /// Nov 2026: local requests hand their hostnames to Network.framework; the dedicated resolver was removed.
+    private static func removeLocalRequestDNSSettings(_ defaults: UserDefaults) {
+        let keys = [
+            "localRequestDNSMode",
+            "localRequestDNSUDPServer",
+            "localRequestDNSDoHURL",
+            "localRequestDNSPlainServer",
+        ]
+        for key in keys {
+            defaults.removeObject(forKey: key)
         }
     }
 }

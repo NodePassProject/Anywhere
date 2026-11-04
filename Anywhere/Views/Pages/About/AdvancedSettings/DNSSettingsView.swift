@@ -10,8 +10,6 @@ import SwiftUI
 private struct ServerDrafts: Equatable {
     var subscriptionUDP = DNSUpstream.defaultUDPServer
     var subscriptionDoH = DNSUpstream.defaultDoHURL
-    var localRequestUDP = DNSUpstream.defaultUDPServer
-    var localRequestDoH = DNSUpstream.defaultDoHURL
     var proxyUDP = DNSUpstream.defaultUDPServer
     var proxyDoH = DNSUpstream.defaultDoHURL
     var echUDP = DNSUpstream.defaultUDPServer
@@ -51,22 +49,6 @@ struct DNSSettingsView: View {
                     udpRow($drafts.subscriptionUDP)
                 case .doh:
                     dohRow($drafts.subscriptionDoH)
-                }
-            }
-
-            Section("Local Requests") {
-                Picker("Resolver", selection: $settings.localRequestDNSMode) {
-                    ForEach(DNSMode.allCases, id: \.self) { mode in
-                        Text(mode.title).tag(mode)
-                    }
-                }
-                switch settings.localRequestDNSMode {
-                case .default:
-                    EmptyView()
-                case .udp:
-                    udpRow($drafts.localRequestUDP)
-                case .doh:
-                    dohRow($drafts.localRequestDoH)
                 }
             }
 
@@ -173,8 +155,6 @@ struct DNSSettingsView: View {
         drafts = ServerDrafts(
             subscriptionUDP: settings.subscriptionDNSUDPServer,
             subscriptionDoH: settings.subscriptionDNSDoHURL,
-            localRequestUDP: settings.localRequestDNSUDPServer,
-            localRequestDoH: settings.localRequestDNSDoHURL,
             proxyUDP: settings.proxyDNSUDPServer,
             proxyDoH: settings.proxyDNSDoHURL,
             echUDP: settings.echDNSUDPServer,
@@ -187,8 +167,6 @@ struct DNSSettingsView: View {
         drafts = ServerDrafts(
             subscriptionUDP: Self.normalized(drafts.subscriptionUDP, empty: DNSUpstream.defaultUDPServer),
             subscriptionDoH: Self.normalized(drafts.subscriptionDoH, empty: DNSUpstream.defaultDoHURL),
-            localRequestUDP: Self.normalized(drafts.localRequestUDP, empty: DNSUpstream.defaultUDPServer),
-            localRequestDoH: Self.normalized(drafts.localRequestDoH, empty: DNSUpstream.defaultDoHURL),
             proxyUDP: Self.normalized(drafts.proxyUDP, empty: DNSUpstream.defaultUDPServer),
             proxyDoH: Self.normalized(drafts.proxyDoH, empty: DNSUpstream.defaultDoHURL),
             echUDP: Self.normalized(drafts.echUDP, empty: DNSUpstream.defaultUDPServer),
@@ -201,12 +179,6 @@ struct DNSSettingsView: View {
         }
         if settings.subscriptionDNSDoHURL != drafts.subscriptionDoH {
             settings.subscriptionDNSDoHURL = drafts.subscriptionDoH
-        }
-        if settings.localRequestDNSUDPServer != drafts.localRequestUDP {
-            settings.localRequestDNSUDPServer = drafts.localRequestUDP
-        }
-        if settings.localRequestDNSDoHURL != drafts.localRequestDoH {
-            settings.localRequestDNSDoHURL = drafts.localRequestDoH
         }
         if settings.proxyDNSUDPServer != drafts.proxyUDP {
             settings.proxyDNSUDPServer = drafts.proxyUDP

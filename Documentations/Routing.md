@@ -55,10 +55,8 @@ A destination is classified at several points:
 3. **Connect time, literal IP.** A connection to a real IP is matched against
    CIDR rules only.
 4. **Resolved-IP fallback.** A domain connection that matches **no** domain
-   rule has its real IPv4 (resolved through the dedicated **Local Requests**
-   resolver) checked against CIDR rules — TCP applies this before dialing, UDP
-   holds the first datagrams until resolution completes. Enabling **Prevent
-   DNS Leak** disables this fallback.
+   rule has its first resolved IPv4, or its first IPv6 when there is none,
+   checked against CIDR rules.
 5. **TLS SNI.** A sniffed SNI re-runs domain matching and can change the route
    of a connection that was accepted by IP. TCP reads it from the ClientHello
    record; QUIC reads it from the client's Initial packets.

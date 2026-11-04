@@ -264,7 +264,7 @@ actor TCPConnection: MITMSessionHost {
     private func applyIPRuleMatch() async {
         guard hostIsResolvedDomain, !ruleMatched, phase != .closed,
               let stack, !stack.connectionRouter.preventDNSLeak.load(ordering: .relaxed),
-              let ip = await DNSResolver.localRequests.resolveHost(dstHost, family: .ipv4),
+              let ip = await DNSResolver.localRequests.resolveHost(dstHost),
               phase != .closed, let match = stack.domainRouter.matchIP(ip)
         else { return }
 
@@ -1168,7 +1168,7 @@ actor TCPConnection: MITMSessionHost {
     private func ipRuleCandidate(forDialHost host: String) async -> String? {
         if let literal = Self.bareIPLiteral(host) { return literal }
         guard let stack, !stack.connectionRouter.preventDNSLeak.load(ordering: .relaxed) else { return nil }
-        return await DNSResolver.localRequests.resolveHost(host, family: .ipv4)
+        return await DNSResolver.localRequests.resolveHost(host)
     }
 
     nonisolated private static func bareIPLiteral(_ host: String) -> String? {
