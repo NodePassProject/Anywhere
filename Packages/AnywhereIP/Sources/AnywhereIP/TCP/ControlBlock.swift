@@ -207,8 +207,8 @@ final class ControlBlock {
     private func growSendBuffer() -> Bool {
         guard sendBufferLimit < growth.maximumSendBuffer, sndWnd > sendBufferLimit else { return false }
         let delta = min(sendBufferLimit, growth.maximumSendBuffer - sendBufferLimit)
-        guard delta > 0, growth.budget.reserve(Int(delta)) else { return false }
-        reservedGrowth += Int(delta)
+        guard delta > 0, growth.budget.reserve(Int(delta) * 2) else { return false }
+        reservedGrowth += Int(delta) * 2
         sendBufferLimit += delta
         sndBuf += delta
         return true

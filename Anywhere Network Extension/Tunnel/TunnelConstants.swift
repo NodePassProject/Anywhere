@@ -38,8 +38,7 @@ nonisolated enum TunnelConstants {
     static let tcpWindowSize = 64 * 1460
     static let tcpMaximumWindow = 768 * 1024
     static let tcpMaximumSendBuffer = 512 * 1024
-    static let tcpBufferGrowthBudget = 4 * 1024 * 1024
-    static let tcpDownlinkBudget = 4 * 1024 * 1024
+    static let tcpBufferGrowthBudget = 6 * 1024 * 1024
     static let tcpAcknowledgmentDelay: Duration = .milliseconds(5)
 
     // MARK: - UDP Settings

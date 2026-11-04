@@ -52,7 +52,6 @@ actor TCPConnection: MITMSessionHost {
         didSet { syncBufferLedger() }
     }
     private let bufferLedger: TCPBufferLedger
-    private nonisolated let downlinkLease: DownlinkByteGate.Lease
 
     private enum Phase: PhaseTransitionable {
         case establishing
@@ -160,7 +159,6 @@ actor TCPConnection: MITMSessionHost {
     ) {
         self.stack = stack
         self.bufferLedger = stack.tcpBufferLedger
-        self.downlinkLease = stack.tcpDownlinkGate.makeLease()
         self.connection = connection
         self.stackGeneration = stack.dataPlaneGeneration.load(ordering: .acquiring)
         self.dstHost = dstHost
@@ -658,7 +656,6 @@ actor TCPConnection: MITMSessionHost {
     @concurrent
     private nonisolated func runDownloadRelay(_ connection: ProxyConnection, _ stream: AnywhereIP.Stream, context: RelayContext) async {
         let handoff = BoundedAsyncQueue<Data>(capacity: Self.downloadPrefetchDepth)
-        let lease = downlinkLease
         let ended = await withTaskGroup(of: Void.self, returning: Bool.self) { group in
             group.addTask {
                 while true {
@@ -673,7 +670,6 @@ actor TCPConnection: MITMSessionHost {
                         handoff.finish()
                         return
                     }
-                    guard await lease.reserve(data.count) else { return }
                     guard await handoff.put(data) else { return }
                 }
             }
@@ -693,13 +689,11 @@ actor TCPConnection: MITMSessionHost {
                     await relayFailed("Write", error: error)
                     return false
                 }
-                lease.release(data.count)
                 markActivity()
                 context.meter?.addBytesIn(data.count)
                 activityRecord.addBytesIn(data.count)
             }
         }
-        lease.releaseAll()
         guard ended else { return }
         await boundDownlinkDrain()
         try? await stream.waitUntilAcknowledged()
@@ -1309,7 +1303,6 @@ actor TCPConnection: MITMSessionHost {
         httpSniffer = nil
         pendingData = Data()
         bufferLedger.releaseAll(flow: connectionID)
-        downlinkLease.releaseAll()
         closePending = false
 
         session?.assumeIsolated { $0.cancel(error: nil) }

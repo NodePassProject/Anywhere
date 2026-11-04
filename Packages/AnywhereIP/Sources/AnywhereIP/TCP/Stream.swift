@@ -68,8 +68,14 @@ public final class Stream: Sendable {
 
     private struct State {
         let core: ControlBlock
-        let pendingLimit: Int
+        let basePendingLimit: Int
 
+        var pendingLimit: Int { max(basePendingLimit, Int(core.sendBufferLimit)) }
+        var writeThreshold: Int { max(1, pendingLimit / 2) }
+
+        var receiveChunkLimit: Int {
+            min(Constants.receiveChunkSize, max(Constants.minimumReceiveChunkSize, Int(core.windowLimit) / 4))
+        }
         var started = false
         var admission = Admission.handshake
         var admissionTick: UInt32 = 0
@@ -93,31 +99,9 @@ public final class Stream: Sendable {
         var draining = false
         var outputDeferred = false
         var outputRunning = false
-        
-        var writeThreshold: Int { max(1, pendingLimit / 2) }
-        var receiveChunkLimit: Int {
-            min(
-                Constants.receiveChunkSize,
-                max(
-                    Constants.minimumReceiveChunkSize,
-                    Int(core.windowLimit) / 4
-                )
-            )
-        }
 
-        init(
-            packet: InboundTCP,
-            initialSequenceNumber: UInt32,
-            ticks: UInt32,
-            pendingLimit: Int,
-            delaysAcknowledgment: Bool,
-            growth: GrowthPolicy
-        ) {
-            let context = Context(
-                key: packet.key,
-                initialSequenceNumber: initialSequenceNumber,
-                ticks: ticks
-            )
+        init(packet: InboundTCP, initialSequenceNumber: UInt32, ticks: UInt32, pendingLimit: Int, delaysAcknowledgment: Bool, growth: GrowthPolicy) {
+            let context = Context(key: packet.key, initialSequenceNumber: initialSequenceNumber, ticks: ticks)
             core = ControlBlock(
                 stack: context,
                 key: packet.key,
@@ -127,7 +111,7 @@ public final class Stream: Sendable {
                 delaysAcknowledgment: delaysAcknowledgment,
                 growth: growth
             )
-            self.pendingLimit = pendingLimit
+            basePendingLimit = pendingLimit
         }
 
         var deadline: UInt32? {
@@ -158,7 +142,7 @@ public final class Stream: Sendable {
         }
 
         mutating func wakeReaders() {
-            if let continuation = reader.signal() { publications.append(.wake(continuation)) } 
+            if let continuation = reader.signal() { publications.append(.wake(continuation)) }
         }
 
         mutating func wakeWriters() {
