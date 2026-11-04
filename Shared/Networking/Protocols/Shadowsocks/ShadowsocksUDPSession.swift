@@ -29,15 +29,18 @@ actor ShadowsocksUDPSession {
         let token: Token
         let port: UInt16
         var responseHosts: Set<String>
-        var hasLearnedSource: Bool
+        var hasLearnedSource = false
         let inbox: AsyncThrowingStream<Data, Error>.Continuation
 
-        init(token: Token, port: UInt16, responseHosts: Set<String>,
-             hasLearnedSource: Bool, inbox: AsyncThrowingStream<Data, Error>.Continuation) {
+        init(
+            token: Token,
+            port: UInt16,
+            responseHosts: Set<String>,
+            inbox: AsyncThrowingStream<Data, Error>.Continuation
+        ) {
             self.token = token
             self.port = port
             self.responseHosts = responseHosts
-            self.hasLearnedSource = hasLearnedSource
             self.inbox = inbox
         }
     }
@@ -172,31 +175,19 @@ actor ShadowsocksUDPSession {
         _isUsable.load(ordering: .relaxed)
     }
 
-    func register(
-        dstHost: String,
-        dstPort: UInt16,
-        responseHostHints: [String] = []
-    ) -> (token: Token, stream: AsyncThrowingStream<Data, Error>) {
+    func register(dstHost: String, dstPort: UInt16) -> (token: Token, stream: AsyncThrowingStream<Data, Error>) {
         nextToken += 1
         let token = nextToken
-
-        var hosts: Set<String> = [dstHost]
-        for hint in responseHostHints { hosts.insert(hint) }
-
-        let pinned = hosts.count > 1
 
         let (stream, continuation) = AsyncThrowingStream.makeStream(of: Data.self)
         let registration = Registration(
             token: token,
             port: dstPort,
-            responseHosts: hosts,
-            hasLearnedSource: pinned,
+            responseHosts: [dstHost],
             inbox: continuation
         )
         registrations[token] = registration
-        for host in hosts {
-            tokensByResponse[ResponseKey(host: host, port: dstPort), default: []].append(token)
-        }
+        tokensByResponse[ResponseKey(host: dstHost, port: dstPort), default: []].append(token)
         tokensByPort[dstPort, default: []].append(token)
         
         switch phase {
@@ -210,18 +201,6 @@ actor ShadowsocksUDPSession {
             break
         }
         return (token, stream)
-    }
-
-    func addResponseHints(token: Token, hints: [String]) {
-        guard let registration = registrations[token] else { return }
-        var inserted = false
-        for hint in hints where registration.responseHosts.insert(hint).inserted {
-            tokensByResponse[ResponseKey(host: hint, port: registration.port), default: []].append(token)
-            inserted = true
-        }
-        if inserted {
-            registration.hasLearnedSource = true
-        }
     }
 
     func unregister(token: Token) {

@@ -9,7 +9,7 @@ import Foundation
 
 nonisolated final class DNSResolver: Sendable {
     static let proxies = DNSResolver(
-        upstream: { AWCore.getProxyDNSUpstream() },
+        upstream: { AWCore.getProxyDNSUpstream().reachable },
         hosts: nil,
         fallsBackToSystem: true,
         servesStaleOnFailure: true,
@@ -17,7 +17,10 @@ nonisolated final class DNSResolver: Sendable {
     )
     
     static let localRequests = DNSResolver(
-        upstream: { AWCore.getLocalRequestDNSUpstream() },
+        upstream: {
+            let upstream = AWCore.getLocalRequestDNSUpstream()
+            return AWCore.getPreventDNSLeak() ? upstream : upstream.reachable
+        },
         hosts: DNSHosts.shared,
         fallsBackToSystem: false,
         servesStaleOnFailure: false,
@@ -46,7 +49,7 @@ nonisolated final class DNSResolver: Sendable {
         servesStaleOnFailure: Bool,
         waitLimit: Duration?
     ) {
-        self.upstreamSource = { upstream().reachable }
+        self.upstreamSource = upstream
         self.hosts = hosts
         self.fallsBackToSystem = fallsBackToSystem
         self.cache = DNSLookupCache(
@@ -105,7 +108,9 @@ nonisolated final class DNSResolver: Sendable {
         upstream: DNSUpstream
     ) async -> (value: [String], ttl: TimeInterval)? {
         var resolved: [String] = []
-        if !upstream.isSystem {
+        if upstream.isSystem {
+            guard !DNSUpstream.systemResolverUnavailable else { return nil }
+        } else {
             resolved = (try? await DNSUpstreamClient.resolve(host, via: upstream, family: family)) ?? []
             guard resolved.isEmpty, fallsBackToSystem, !DNSUpstream.systemResolverUnavailable else {
                 return Self.cacheable(resolved)

@@ -459,22 +459,10 @@ actor UDPFlow {
             return
         }
 
-        let cachedHints = DNSResolver.proxies.cachedIPs(for: dstHost) ?? []
-        let (token, stream) = await session.register(
-            dstHost: dstHost, dstPort: dstPort, responseHostHints: cachedHints
-        )
+        let (token, stream) = await session.register(dstHost: dstHost, dstPort: dstPort)
         guard establish(.shadowsocks(session: session, token: token)) else {
             await session.unregister(token: token)
             return
-        }
-
-        if cachedHints.isEmpty, Self.isDomainName(dstHost) {
-            let host = dstHost
-            Task { [weak session] in
-                let ips = await DNSResolver.proxies.resolveAll(host)
-                guard !ips.isEmpty, let session else { return }
-                await session.addResponseHints(token: token, hints: ips)
-            }
         }
 
         do {
@@ -484,20 +472,6 @@ actor UDPFlow {
         } catch {
             await receiveClosed(operation: "Receive", error: error)
         }
-    }
-
-    nonisolated private static func isDomainName(_ host: String) -> Bool {
-        let bare: String
-        if host.hasPrefix("[") && host.hasSuffix("]") {
-            bare = String(host.dropFirst().dropLast())
-        } else {
-            bare = host
-        }
-        var v4 = in_addr()
-        if inet_pton(AF_INET, bare, &v4) == 1 { return false }
-        var v6 = in6_addr()
-        if inet_pton(AF_INET6, bare, &v6) == 1 { return false }
-        return !bare.isEmpty
     }
 
     // MARK: ProxyClient
