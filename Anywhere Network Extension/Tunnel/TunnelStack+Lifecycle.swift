@@ -80,6 +80,7 @@ extension TunnelStack {
     private func runDutyCycle(packetFlow: NEPacketTunnelFlow, udpPlane: UDPPlane) async {
         await withDiscardingTaskGroup { group in
             group.addTask { await self.runReadLoop(packetFlow: packetFlow, udpPlane: udpPlane) }
+            group.addTask { await self.runOutputWriter() }
             group.addTask { await self.runSettingsObserver() }
             group.addTask { await self.runUDPCleanupLoop(udpPlane: udpPlane) }
             group.addTask { await self.runTCPIdleSweep() }

@@ -12,22 +12,40 @@ import AnywhereIP
 
 extension TunnelStack {
 
-    // MARK: - Output Batching
+    // MARK: - Output Writer
 
-    nonisolated func claimOutputDrain() -> Bool {
-        outputBuffer.withLock { $0.claimDrain() }
-    }
-
-    nonisolated func drainOutput() {
+    @concurrent
+    nonisolated func runOutputWriter() async {
         var packets: [OutboundPacket] = []
-        while let writer = outputBuffer.withLock({ $0.take(&packets) }) {
-            var start = 0
-            while start < packets.count {
-                let end = min(start + TunnelConstants.outputWriteLimit, packets.count)
-                write(packets[start..<end], to: writer)
-                start = end
+        while !Task.isCancelled {
+            guard let writer = outputBuffer.withLock({ $0.take(&packets) }) else {
+                await parkOutputWriter()
+                continue
+            }
+            autoreleasepool {
+                var start = 0
+                while start < packets.count {
+                    let end = min(start + TunnelConstants.outputWriteLimit, packets.count)
+                    write(packets[start..<end], to: writer)
+                    start = end
+                }
             }
             packets.removeAll(keepingCapacity: true)
+        }
+    }
+
+    private nonisolated func parkOutputWriter() async {
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                let ready: Bool = outputBuffer.withLock { buffer in
+                    if buffer.hasWritable || Task.isCancelled { return true }
+                    buffer.waiter = continuation
+                    return false
+                }
+                if ready { continuation.resume() }
+            }
+        } onCancel: {
+            outputBuffer.withLock { $0.takeWaiter() }?.resume()
         }
     }
 
@@ -39,26 +57,20 @@ extension TunnelStack {
         }
     }
 
-    nonisolated func flushOutputBuffer() {
-        if claimOutputDrain() { drainOutput() }
-    }
-
     nonisolated func enqueueOutbound(_ packet: OutboundPacket) {
-        let drains = outputBuffer.withLock { buffer in
-            guard buffer.writer != nil else { return false }
+        outputBuffer.withLock { buffer -> CheckedContinuation<Void, Never>? in
+            guard buffer.writer != nil else { return nil }
             buffer.packets.append(packet)
-            return buffer.claimDrain()
-        }
-        if drains { drainOutput() }
+            return buffer.takeWaiter()
+        }?.resume()
     }
 
     nonisolated func enqueueTCPOutput(_ packets: [OutboundPacket], generation: UInt64) {
-        let drains = outputBuffer.withLock { buffer in
-            guard buffer.generation == generation, buffer.writer != nil, !packets.isEmpty else { return false }
+        outputBuffer.withLock { buffer -> CheckedContinuation<Void, Never>? in
+            guard buffer.generation == generation, buffer.writer != nil, !packets.isEmpty else { return nil }
             buffer.packets.append(contentsOf: packets)
-            return buffer.claimDrain()
-        }
-        if drains { drainOutput() }
+            return buffer.takeWaiter()
+        }?.resume()
     }
 
     // MARK: - Packet Reading
@@ -103,7 +115,6 @@ extension TunnelStack {
     }
 
     private nonisolated func processInbound(_ packets: [UnsafeRawBufferPointer]) {
-        let drains = claimOutputDrain()
         var batch = packets
         if reflectionEnabled {
             batch = []
@@ -119,7 +130,6 @@ extension TunnelStack {
         if !batch.isEmpty, let ipStack = liveIPStack.withLock({ $0 }) {
             ipStack.input(batch)
         }
-        if drains { drainOutput() }
     }
     
     nonisolated func admitDatagrams(_ batch: [InboundDatagram]) {

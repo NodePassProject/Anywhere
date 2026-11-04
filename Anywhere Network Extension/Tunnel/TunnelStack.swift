@@ -180,19 +180,17 @@ actor TunnelStack {
         var generation: UInt64 = 0
         var writer: PacketFlowWriter?
         var packets: [OutboundPacket] = []
-        var draining = false
+        var waiter: CheckedContinuation<Void, Never>?
 
-        mutating func claimDrain() -> Bool {
-            guard !draining, writer != nil else { return false }
-            draining = true
-            return true
+        var hasWritable: Bool { writer != nil && !packets.isEmpty }
+
+        mutating func takeWaiter() -> CheckedContinuation<Void, Never>? {
+            defer { waiter = nil }
+            return waiter
         }
 
         mutating func take(_ packets: inout [OutboundPacket]) -> PacketFlowWriter? {
-            guard let writer, !self.packets.isEmpty else {
-                draining = false
-                return nil
-            }
+            guard let writer, !self.packets.isEmpty else { return nil }
             swap(&packets, &self.packets)
             return writer
         }
