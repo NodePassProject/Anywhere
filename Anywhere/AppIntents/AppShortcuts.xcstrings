@@ -50,6 +50,12 @@
             "state" : "translated",
             "value" : "连接${applicationName}"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "連接${applicationName}"
+          }
         }
       }
     },
@@ -101,6 +107,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "断开${applicationName}"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "斷開${applicationName}"
           }
         }
       }
@@ -154,6 +166,12 @@
             "state" : "translated",
             "value" : "把${applicationName}设为${mode}"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "將${applicationName}設為${mode}"
+          }
         }
       }
     },
@@ -205,6 +223,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "把${applicationName}切换到${proxy}"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "將${applicationName}切換到${proxy}"
           }
         }
       }
@@ -258,6 +282,12 @@
             "state" : "translated",
             "value" : "在${applicationName}中更新${subscription}"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "用${applicationName}更新${subscription}"
+          }
         }
       }
     },
@@ -309,6 +339,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "更新${applicationName}的全部订阅"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "用${applicationName}更新所有訂閱"
           }
         }
       }

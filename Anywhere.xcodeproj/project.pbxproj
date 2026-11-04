@@ -717,6 +717,7 @@
 				fa,
 				vi,
 				tr,
+				"zh-HK",
 			);
 			mainGroup = CB1C105C2F23B81500B74CD8;
 			minimizedProjectReferenceProxies = 1;

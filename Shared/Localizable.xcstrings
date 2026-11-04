@@ -59,6 +59,12 @@
             "state" : "translated",
             "value" : "%@"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@"
+          }
         }
       }
     },
@@ -107,6 +113,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ %2$@"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "%1$@ %2$@"
@@ -163,6 +175,12 @@
             "state" : "translated",
             "value" : "%1$@ %2$lld"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ %2$lld"
+          }
         }
       }
     },
@@ -211,6 +229,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ → %2$@"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "%1$@ → %2$@"
@@ -267,6 +291,12 @@
             "state" : "translated",
             "value" : "已使用 %2$@ 中的 %1$@"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已使用 %1$@（共 %2$@）"
+          }
         }
       }
     },
@@ -319,6 +349,12 @@
             "state" : "translated",
             "value" : "总计 %@"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "總計 %@"
+          }
         }
       }
     },
@@ -367,6 +403,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已使用 %@"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "已使用 %@"
@@ -423,6 +465,12 @@
             "state" : "translated",
             "value" : "%1$@:%2$@"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@:%2$@"
+          }
         }
       }
     },
@@ -475,6 +523,12 @@
             "state" : "translated",
             "value" : "%@/秒"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@/秒"
+          }
         }
       }
     },
@@ -523,6 +577,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "%lld"
@@ -681,6 +741,18 @@
               }
             }
           }
+        },
+        "zh-HK" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld 位元組"
+                }
+              }
+            }
+          }
         }
       }
     },
@@ -729,6 +801,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld 毫秒"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "%lld 毫秒"
@@ -887,6 +965,18 @@
               }
             }
           }
+        },
+        "zh-HK" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld 個參數"
+                }
+              }
+            }
+          }
         }
       }
     },
@@ -1041,6 +1131,18 @@
               }
             }
           }
+        },
+        "zh-HK" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld 個代理"
+                }
+              }
+            }
+          }
         }
       }
     },
@@ -1092,6 +1194,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "%lld 个代理"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld 個代理"
           }
         }
       }
@@ -1247,6 +1355,18 @@
               }
             }
           }
+        },
+        "zh-HK" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld 條規則"
+                }
+              }
+            }
+          }
         }
       }
     },
@@ -1298,6 +1418,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "%lld 个订阅"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld 個訂閱"
           }
         }
       }
@@ -1357,6 +1483,12 @@
             "state" : "translated",
             "value" : "302 重定向"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "302 重新導向"
+          }
         }
       }
     },
@@ -1408,6 +1540,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "链式代理至少需要 2 个代理。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "代理鏈最少需要 2 個代理。"
           }
         }
       }
@@ -1461,6 +1599,12 @@
             "state" : "translated",
             "value" : "一次购买，终身可用。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "一次購買，永久擁有。"
+          }
         }
       }
     },
@@ -1512,6 +1656,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "关于"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "關於"
           }
         }
       }
@@ -1565,6 +1715,12 @@
             "state" : "translated",
             "value" : "致谢"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "鳴謝"
+          }
         }
       }
     },
@@ -1616,6 +1772,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "活跃"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "使用中"
           }
         }
       }
@@ -1669,6 +1831,12 @@
             "state" : "translated",
             "value" : "添加"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "加入"
+          }
         }
       }
     },
@@ -1720,6 +1888,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "添加配置"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "加入設定"
           }
         }
       }
@@ -1773,6 +1947,12 @@
             "state" : "translated",
             "value" : "至少添加 2 个代理以组成链式代理。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "加入最少 2 個代理以組成代理鏈。"
+          }
         }
       }
     },
@@ -1824,6 +2004,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "添加证书"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "加入證書"
           }
         }
       }
@@ -1877,6 +2063,12 @@
             "state" : "translated",
             "value" : "添加链式代理"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "加入代理鏈"
+          }
         }
       }
     },
@@ -1928,6 +2120,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "添加配置"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "加入設定"
           }
         }
       }
@@ -1981,6 +2179,12 @@
             "state" : "translated",
             "value" : "添加 MITM 规则集"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "加入 MITM 規則集"
+          }
         }
       }
     },
@@ -2032,6 +2236,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "添加模块"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "加入模組"
           }
         }
       }
@@ -2085,6 +2295,12 @@
             "state" : "translated",
             "value" : "添加代理"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "加入代理"
+          }
         }
       }
     },
@@ -2136,6 +2352,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "添加路由规则集"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "加入路由規則集"
           }
         }
       }
@@ -2189,6 +2411,12 @@
             "state" : "translated",
             "value" : "添加规则"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "加入規則"
+          }
         }
       }
     },
@@ -2240,6 +2468,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "添加规则集"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "加入規則集"
           }
         }
       }
@@ -2293,6 +2527,12 @@
             "state" : "translated",
             "value" : "添加 SSID “%@”"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "加入 SSID「%@」"
+          }
         }
       }
     },
@@ -2344,6 +2584,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "添加到分组"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "加入至群組"
           }
         }
       }
@@ -2397,6 +2643,12 @@
             "state" : "translated",
             "value" : "地址"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "位址"
+          }
         }
       }
     },
@@ -2448,6 +2700,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "高级设置"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "進階設定"
           }
         }
       }
@@ -2511,6 +2769,12 @@
             "state" : "translated",
             "value" : "所有商标、服务标识和公司名称均为其各自所有者的财产。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "所有商標、服務標記及公司名稱均為其各自擁有人的財產。"
+          }
         }
       }
     },
@@ -2563,6 +2827,12 @@
             "state" : "translated",
             "value" : "仍然允许"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仍要允許"
+          }
         }
       }
     },
@@ -2614,6 +2884,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "允许不安全连接"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "允許不安全連線"
           }
         }
       }
@@ -2670,6 +2946,12 @@
             "state" : "translated",
             "value" : "始终开启"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "永遠開啟"
+          }
         }
       }
     },
@@ -2721,6 +3003,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "始终信任蜂窝网络"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "永遠信任流動網絡"
           }
         }
       }
@@ -2774,6 +3062,12 @@
             "state" : "translated",
             "value" : "始终不信任蜂窝网络"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "永遠不信任流動網絡"
+          }
         }
       }
     },
@@ -2825,6 +3119,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "任何之前安装的 MITM 描述文件都将停止工作直到你重新安装一份新的证书。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "之前安裝的 MITM 描述檔將會失效，直至你重新安裝新證書為止。"
           }
         }
       }
@@ -2884,6 +3184,12 @@
             "state" : "translated",
             "value" : "Anywhere 无法连接：%@"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Anywhere 無法連接：%@"
+          }
         }
       }
     },
@@ -2935,6 +3241,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Anywhere 未在规定时间内响应。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Anywhere 未能及時回應。"
           }
         }
       }
@@ -2988,6 +3300,12 @@
             "state" : "translated",
             "value" : "Anywhere 是一个独立项目，与以下列出的任何公司无关，未获其认可或赞助。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Anywhere 是一個獨立項目，與下列任何公司概無關係，亦未獲其認可或贊助。"
+          }
         }
       }
     },
@@ -3039,6 +3357,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Anywhere 未连接。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Anywhere 未連接。"
           }
         }
       }
@@ -3092,6 +3416,12 @@
             "state" : "translated",
             "value" : "Anywhere 仍在加载，请稍后再试。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Anywhere 仍在載入中，請再試一次。"
+          }
         }
       }
     },
@@ -3143,6 +3473,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Anywhere MITM 规则列表 URL"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Anywhere MITM 規則集 URL"
           }
         }
       }
@@ -3196,6 +3532,12 @@
             "state" : "translated",
             "value" : "Anywhere 模块 URL"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Anywhere 模組 URL"
+          }
         }
       }
     },
@@ -3247,6 +3589,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Anywhere Root Certificate 已安装且受信任。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Anywhere Root Certificate 已安裝並受信任。"
           }
         }
       }
@@ -3300,6 +3648,12 @@
             "state" : "translated",
             "value" : "Anywhere 路由规则列表 URL"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Anywhere 路由規則集 URL"
+          }
         }
       }
     },
@@ -3352,6 +3706,12 @@
             "state" : "translated",
             "value" : "Anywhere Voyager 暂不可用。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Anywhere Voyager 暫時無法使用。"
+          }
         }
       }
     },
@@ -3403,6 +3763,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Anywhere Voyager 暂不可用，请稍后重试。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Anywhere Voyager 暫時無法使用，請稍後再試。"
           }
         }
       }
@@ -3458,6 +3824,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "App 图标"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "App 圖示"
           }
         }
       }
@@ -3518,6 +3890,12 @@
             "state" : "translated",
             "value" : "自动"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "自動"
+          }
         }
       }
     },
@@ -3569,6 +3947,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "自动"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "自動"
           }
         }
       }
@@ -3622,6 +4006,12 @@
             "state" : "translated",
             "value" : "当 VPN 断开时自动重新连接。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VPN 中斷連接時自動重新連接。"
+          }
         }
       }
     },
@@ -3670,6 +4060,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "平均"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "平均"
@@ -3726,6 +4122,12 @@
             "state" : "translated",
             "value" : "返回"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "返回"
+          }
         }
       }
     },
@@ -3774,6 +4176,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "背景"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "背景"
@@ -3830,6 +4238,12 @@
             "state" : "translated",
             "value" : "背景（深色）"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "背景（深色）"
+          }
         }
       }
     },
@@ -3881,6 +4295,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "背景（浅色）"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "背景（淺色）"
           }
         }
       }
@@ -3943,6 +4363,12 @@
             "state" : "translated",
             "value" : "在网络层拦截广告和追踪器，获得更清爽的浏览体验。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在網絡層面攔截廣告及追蹤器，帶來更清爽的瀏覽體驗。"
+          }
         }
       }
     },
@@ -3994,6 +4420,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "阻止广告"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "封鎖廣告"
           }
         }
       }
@@ -4047,6 +4479,12 @@
             "state" : "translated",
             "value" : "阻止 QUIC"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "封鎖 QUIC"
+          }
         }
       }
     },
@@ -4098,6 +4536,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "阻止 UDP"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "封鎖 UDP"
           }
         }
       }
@@ -4151,6 +4595,12 @@
             "state" : "translated",
             "value" : "阻止 WebRTC"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "封鎖 WebRTC"
+          }
         }
       }
     },
@@ -4202,6 +4652,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "阻止"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "封鎖"
           }
         }
       }
@@ -4255,6 +4711,12 @@
             "state" : "translated",
             "value" : "体"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "主體"
+          }
         }
       }
     },
@@ -4306,6 +4768,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "体 JSON"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "主體 JSON"
           }
         }
       }
@@ -4359,6 +4827,12 @@
             "state" : "translated",
             "value" : "体替换"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "取代主體"
+          }
         }
       }
     },
@@ -4407,6 +4881,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "底部"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "底部"
@@ -4463,6 +4943,12 @@
             "state" : "translated",
             "value" : "打造自定义主题和使用替换图标。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "打造自訂主題，並使用其他 App 圖示。"
+          }
         }
       }
     },
@@ -4514,6 +5000,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "取消"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "取消"
@@ -4573,6 +5065,12 @@
             "state" : "translated",
             "value" : "链式代理"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "代理鏈"
+          }
         }
       }
     },
@@ -4624,6 +5122,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "链式代理分组"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "代理鏈群組"
           }
         }
       }
@@ -4677,6 +5181,12 @@
             "state" : "translated",
             "value" : "链式代理"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "代理鏈"
+          }
         }
       }
     },
@@ -4728,6 +5238,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "经典"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "經典"
           }
         }
       }
@@ -4781,6 +5297,12 @@
             "state" : "translated",
             "value" : "关闭"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "關閉"
+          }
         }
       }
     },
@@ -4833,6 +5355,12 @@
             "state" : "translated",
             "value" : "已关闭"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已關閉"
+          }
         }
       }
     },
@@ -4884,6 +5412,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "逗号分隔"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "以逗號分隔"
           }
         }
       }
@@ -4938,6 +5472,12 @@
             "state" : "translated",
             "value" : "拥塞控制"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "擠塞控制"
+          }
         }
       }
     },
@@ -4989,6 +5529,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "连接"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "連接"
           }
         }
       }
@@ -5042,6 +5588,12 @@
             "state" : "translated",
             "value" : "连接到${proxy}"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "連接至${proxy}"
+          }
         }
       }
     },
@@ -5093,6 +5645,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "已连接"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已連接"
           }
         }
       }
@@ -5146,6 +5704,12 @@
             "state" : "translated",
             "value" : "已连接到%@。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已連接至 %@。"
+          }
         }
       }
     },
@@ -5197,6 +5761,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "正在连接"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在連接"
           }
         }
       }
@@ -5250,6 +5820,12 @@
             "state" : "translated",
             "value" : "连接 VPN。可先指定一个代理再连接，否则使用当前选中的代理。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "連接 VPN。可先選擇要切換至的代理，否則會使用目前所選的代理。"
+          }
         }
       }
     },
@@ -5301,6 +5877,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "继续"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "繼續"
           }
         }
       }
@@ -5354,6 +5936,12 @@
             "state" : "translated",
             "value" : "复制"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "複製"
+          }
         }
       }
     },
@@ -5405,6 +5993,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "复制（%lld）"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "複製（%lld）"
           }
         }
       }
@@ -5458,6 +6052,12 @@
             "state" : "translated",
             "value" : "复制主机"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "複製主機"
+          }
         }
       }
     },
@@ -5509,6 +6109,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "复制链接"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "複製連結"
           }
         }
       }
@@ -5562,6 +6168,12 @@
             "state" : "translated",
             "value" : "复制验证代码"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "複製驗證代碼"
+          }
         }
       }
     },
@@ -5613,6 +6225,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "无法更新%@：%@"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無法更新 %@：%@"
           }
         }
       }
@@ -5666,6 +6284,12 @@
             "state" : "translated",
             "value" : "没有任何订阅更新成功：%@"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "所有訂閱均無法更新：%@"
+          }
         }
       }
     },
@@ -5718,6 +6342,12 @@
             "state" : "translated",
             "value" : "国家分流"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "國家／地區分流"
+          }
         }
       }
     },
@@ -5769,6 +6399,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "自定义 app 图标对 Anywhere Voyager 成员开放。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "自訂 App 圖示只供 Anywhere Voyager 會員使用。"
           }
         }
       }
@@ -5826,6 +6462,12 @@
             "state" : "translated",
             "value" : "自定义主题对 Anywhere Voyager 成员开放。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "自訂主題只供 Anywhere Voyager 會員使用。"
+          }
         }
       }
     },
@@ -5874,6 +6516,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "深色"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "深色"
@@ -5930,6 +6578,12 @@
             "state" : "translated",
             "value" : "仪表盘"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "儀表板"
+          }
         }
       }
     },
@@ -5981,6 +6635,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "数据"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "資料"
           }
         }
       }
@@ -6034,6 +6694,12 @@
             "state" : "translated",
             "value" : "数据（Base64）"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "資料（Base64）"
+          }
         }
       }
     },
@@ -6085,6 +6751,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "默认"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "預設"
           }
         }
       }
@@ -6138,6 +6810,12 @@
             "state" : "translated",
             "value" : "删除"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "刪除"
+          }
         }
       }
     },
@@ -6189,6 +6867,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "删除证书"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "刪除證書"
           }
         }
       }
@@ -6242,6 +6926,12 @@
             "state" : "translated",
             "value" : "分离下行"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "分離下行"
+          }
         }
       }
     },
@@ -6293,6 +6983,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "诊断"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "診斷"
           }
         }
       }
@@ -6346,6 +7042,12 @@
             "state" : "translated",
             "value" : "诊断"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "診斷"
+          }
         }
       }
     },
@@ -6397,6 +7099,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "拨号"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "撥號"
           }
         }
       }
@@ -6450,6 +7158,12 @@
             "state" : "translated",
             "value" : "直连"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "直連"
+          }
         }
       }
     },
@@ -6501,6 +7215,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "直连"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "直連"
           }
         }
       }
@@ -6554,6 +7274,12 @@
             "state" : "translated",
             "value" : "禁用"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "停用"
+          }
         }
       }
     },
@@ -6605,6 +7331,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "断开连接"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "中斷連接"
           }
         }
       }
@@ -6658,6 +7390,12 @@
             "state" : "translated",
             "value" : "未连接"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未連接"
+          }
         }
       }
     },
@@ -6709,6 +7447,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "已断开连接。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已中斷連接。"
           }
         }
       }
@@ -6762,6 +7506,12 @@
             "state" : "translated",
             "value" : "正在断开连接"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在中斷連接"
+          }
         }
       }
     },
@@ -6813,6 +7563,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "断开 VPN 连接。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "中斷 VPN 連接。"
           }
         }
       }
@@ -6872,6 +7628,12 @@
             "state" : "translated",
             "value" : "域名关键词"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "網域關鍵字"
+          }
         }
       }
     },
@@ -6923,6 +7685,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "域名尾缀"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "網域後綴"
           }
         }
       }
@@ -6976,6 +7744,12 @@
             "state" : "translated",
             "value" : "域名尾缀"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "網域後綴"
+          }
         }
       }
     },
@@ -7024,6 +7798,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "完成"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "完成"
@@ -7080,6 +7860,12 @@
             "state" : "translated",
             "value" : "下载"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "下載"
+          }
         }
       }
     },
@@ -7132,6 +7918,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "下载速度"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "下載速度"
           }
         }
       }
@@ -7191,6 +7983,12 @@
             "state" : "translated",
             "value" : "编辑"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "編輯"
+          }
         }
       }
     },
@@ -7242,6 +8040,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "编辑链式代理"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "編輯代理鏈"
           }
         }
       }
@@ -7295,6 +8099,12 @@
             "state" : "translated",
             "value" : "编辑配置"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "編輯設定"
+          }
         }
       }
     },
@@ -7346,6 +8156,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "编辑分组"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "編輯群組"
           }
         }
       }
@@ -7399,6 +8215,12 @@
             "state" : "translated",
             "value" : "编辑规则"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "編輯規則"
+          }
         }
       }
     },
@@ -7450,6 +8272,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "编辑订阅"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "編輯訂閱"
           }
         }
       }
@@ -7503,6 +8331,12 @@
             "state" : "translated",
             "value" : "启用"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "啟用"
+          }
         }
       }
     },
@@ -7554,6 +8388,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "启用 %@ 以继续。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "啟用「%@」以繼續。"
           }
         }
       }
@@ -7607,6 +8447,12 @@
             "state" : "translated",
             "value" : "仍然启用"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仍要啟用"
+          }
         }
       }
     },
@@ -7658,6 +8504,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "启用 ECH"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "啟用 ECH"
           }
         }
       }
@@ -7711,6 +8563,12 @@
             "state" : "translated",
             "value" : "启用隐藏 VPN 图标可能导致连接不稳定。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "啟用「隱藏 VPN 圖示」可能會令連線不穩定。"
+          }
         }
       }
     },
@@ -7763,6 +8621,12 @@
             "state" : "translated",
             "value" : "启用反射可能降低性能。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "啟用「反射」可能會降低效能。"
+          }
         }
       }
     },
@@ -7812,6 +8676,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "加密"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "加密"
@@ -7868,6 +8738,12 @@
             "state" : "translated",
             "value" : "享受无限制的 Anywhere 特色功能。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無限制盡享 Anywhere 的所有功能。"
+          }
         }
       }
     },
@@ -7920,6 +8796,12 @@
             "state" : "translated",
             "value" : "输入要信任的证书的 SHA-256 指纹（64 个十六进制字符）。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "輸入要信任的證書的 SHA-256 指紋（64 個十六進制字符）。"
+          }
         }
       }
     },
@@ -7968,6 +8850,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "入口"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "入口"
@@ -8023,6 +8911,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "错误"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "錯誤"
           }
         }
       }
@@ -8088,6 +8982,12 @@
             "state" : "translated",
             "value" : "排除的域名后缀"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "排除的網域後綴"
+          }
         }
       }
     },
@@ -8139,6 +9039,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "出口"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "出口"
@@ -8195,6 +9101,12 @@
             "state" : "translated",
             "value" : "实验性功能"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "實驗性功能"
+          }
         }
       }
     },
@@ -8247,6 +9159,12 @@
             "state" : "translated",
             "value" : "到期时间"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "到期日"
+          }
         }
       }
     },
@@ -8298,6 +9216,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "已过期"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已過期"
           }
         }
       }
@@ -8471,6 +9395,18 @@
               }
             }
           }
+        },
+        "zh-HK" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld 日後到期"
+                }
+              }
+            }
+          }
         }
       }
     },
@@ -8522,6 +9458,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "导出证书"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "匯出證書"
           }
         }
       }
@@ -8578,6 +9520,12 @@
             "state" : "translated",
             "value" : "无法导出证书。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無法匯出證書。"
+          }
         }
       }
     },
@@ -8629,6 +9577,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "无法导出描述文件。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無法匯出描述檔。"
           }
         }
       }
@@ -8682,6 +9636,12 @@
             "state" : "translated",
             "value" : "无法打开描述文件安装器。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無法打開描述檔安裝程式。"
+          }
         }
       }
     },
@@ -8733,6 +9693,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "回落"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "後備"
           }
         }
       }
@@ -8786,6 +9752,12 @@
             "state" : "translated",
             "value" : "家庭共享"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "家人共享"
+          }
         }
       }
     },
@@ -8838,6 +9810,12 @@
             "state" : "translated",
             "value" : "重新拉取一个代理订阅，并用最新列表替换其中的代理。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "重新取得代理訂閱，並以最新列表取代當中的代理。"
+          }
         }
       }
     },
@@ -8889,6 +9867,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "文件"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "檔案"
           }
         }
       }
@@ -8949,6 +9933,12 @@
             "state" : "translated",
             "value" : "解锁全部特色功能"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已解鎖全部功能"
+          }
         }
       }
     },
@@ -9000,6 +9990,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "生成一份证书以开始。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "產生證書以開始使用。"
           }
         }
       }
@@ -9053,6 +10049,12 @@
             "state" : "translated",
             "value" : "生成证书"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "產生證書"
+          }
         }
       }
     },
@@ -9105,6 +10107,12 @@
             "state" : "translated",
             "value" : "开始使用"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "開始使用"
+          }
         }
       }
     },
@@ -9153,6 +10161,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "全局模式"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "全局模式"
@@ -9209,6 +10223,12 @@
             "state" : "translated",
             "value" : "前往设置"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "前往「設定」"
+          }
         }
       }
     },
@@ -9260,6 +10280,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "分组"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "群組"
           }
         }
       }
@@ -9322,6 +10348,12 @@
             "state" : "translated",
             "value" : "握手"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "握手"
+          }
         }
       }
     },
@@ -9373,6 +10405,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "请求头添加"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "加入標頭"
           }
         }
       }
@@ -9426,6 +10464,12 @@
             "state" : "translated",
             "value" : "请求头删除"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "刪除標頭"
+          }
         }
       }
     },
@@ -9477,6 +10521,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "请求头名称"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "標頭名稱"
           }
         }
       }
@@ -9530,6 +10580,12 @@
             "state" : "translated",
             "value" : "必须指定请求头名称。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "必須輸入標頭名稱。"
+          }
         }
       }
     },
@@ -9581,6 +10637,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "请求头替换"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "取代標頭"
           }
         }
       }
@@ -9634,6 +10696,12 @@
             "state" : "translated",
             "value" : "请求头值"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "標頭值"
+          }
         }
       }
     },
@@ -9685,6 +10753,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "隐藏 VPN 图标"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "隱藏 VPN 圖示"
           }
         }
       }
@@ -9738,6 +10812,12 @@
             "state" : "translated",
             "value" : "主机"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "主機"
+          }
         }
       }
     },
@@ -9789,6 +10869,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "主机映射"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "主機映射"
           }
         }
       }
@@ -9855,6 +10941,12 @@
             "state" : "translated",
             "value" : "iCloud 同步"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iCloud 同步"
+          }
         }
       }
     },
@@ -9906,6 +10998,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "导入失败"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "匯入失敗"
           }
         }
       }
@@ -9959,6 +11057,12 @@
             "state" : "translated",
             "value" : "导入模块"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "匯入模組"
+          }
         }
       }
     },
@@ -10010,6 +11114,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "导入规则集"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "匯入規則集"
           }
         }
       }
@@ -10069,6 +11179,12 @@
             "state" : "translated",
             "value" : "不安全"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "不安全"
+          }
         }
       }
     },
@@ -10120,6 +11236,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "安装证书"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "安裝證書"
           }
         }
       }
@@ -10173,6 +11295,12 @@
             "state" : "translated",
             "value" : "安装描述文件并在“设置”中信任以使用 MITM。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在「設定」中安裝描述檔並信任證書，即可使用 MITM。"
+          }
         }
       }
     },
@@ -10224,6 +11352,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "无效 AJSON 文件。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "AJSON 檔案無效。"
           }
         }
       }
@@ -10277,6 +11411,12 @@
             "state" : "translated",
             "value" : "无效 Anywhere MITM 规则列表文件。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Anywhere MITM 規則集檔案無效。"
+          }
         }
       }
     },
@@ -10328,6 +11468,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "无效 Anywhere MITM 规则列表 URL。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Anywhere MITM 規則集 URL 無效。"
           }
         }
       }
@@ -10381,6 +11527,12 @@
             "state" : "translated",
             "value" : "无效 Anywhere 模块文件。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Anywhere 模組檔案無效。"
+          }
         }
       }
     },
@@ -10432,6 +11584,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "无效 Anywhere 模块 URL。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Anywhere 模組 URL 無效。"
           }
         }
       }
@@ -10485,6 +11643,12 @@
             "state" : "translated",
             "value" : "无效 Anywhere 路由规则列表文件。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Anywhere 路由規則集檔案無效。"
+          }
         }
       }
     },
@@ -10536,6 +11700,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "无效 Anywhere 路由规则列表 URL。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Anywhere 路由規則集 URL 無效。"
           }
         }
       }
@@ -10589,6 +11759,12 @@
             "state" : "translated",
             "value" : "链式代理无效 — 某些代理缺失"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "代理鏈無效 — 部分代理已不存在"
+          }
         }
       }
     },
@@ -10640,6 +11816,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "指纹无效"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "指紋無效"
           }
         }
       }
@@ -10693,6 +11875,12 @@
             "state" : "translated",
             "value" : "指纹无效。必须是 64 个十六进制字符的字符串，或者已经存在。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "指紋無效。必須為 64 個字符的十六進制字串，或該指紋已存在。"
+          }
         }
       }
     },
@@ -10745,6 +11933,12 @@
             "state" : "translated",
             "value" : "订阅链接无效。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "訂閱 URL 無效。"
+          }
         }
       }
     },
@@ -10793,6 +11987,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "IPv4 CIDR"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "IPv4 CIDR"
@@ -10849,6 +12049,12 @@
             "state" : "translated",
             "value" : "IPv6 CIDR"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "IPv6 CIDR"
+          }
         }
       }
     },
@@ -10897,6 +12103,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "加入"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "加入"
@@ -10953,6 +12165,12 @@
             "state" : "translated",
             "value" : "加入公开测试版并抢先体验新特色功能。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "加入公開測試版，搶先試用新功能。"
+          }
         }
       }
     },
@@ -11004,6 +12222,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "加入 Telegram 群组"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "加入 Telegram 群組"
           }
         }
       }
@@ -11061,6 +12285,12 @@
             "state" : "translated",
             "value" : "类型"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "類型"
+          }
         }
       }
     },
@@ -11109,6 +12339,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "上次更新"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "上次更新"
@@ -11165,6 +12401,12 @@
             "state" : "translated",
             "value" : "启动台"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "啟動台"
+          }
         }
       }
     },
@@ -11216,6 +12458,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "终身授权"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "終身使用權"
           }
         }
       }
@@ -11269,6 +12517,12 @@
             "state" : "translated",
             "value" : "浅色"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "淺色"
+          }
         }
       }
     },
@@ -11320,6 +12574,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "链接"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "連結"
           }
         }
       }
@@ -11373,6 +12633,12 @@
             "state" : "translated",
             "value" : "加载中…"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在載入⋯"
+          }
         }
       }
     },
@@ -11424,6 +12690,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "本地请求"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "本地請求"
           }
         }
       }
@@ -11477,6 +12749,12 @@
             "state" : "translated",
             "value" : "日志"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "日誌"
+          }
         }
       }
     },
@@ -11528,6 +12806,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "将某个代理设为当前使用的代理。若 VPN 已连接，流量会立即切换过去。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "將某個代理設為目前使用的代理。如 VPN 已連接，流量會即時切換過去。"
           }
         }
       }
@@ -11581,6 +12865,12 @@
             "state" : "translated",
             "value" : "手动"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "手動"
+          }
         }
       }
     },
@@ -11633,6 +12923,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "最大包大小"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "最大封包大小"
           }
         }
       }
@@ -11692,6 +12988,12 @@
             "state" : "translated",
             "value" : "成员 %@"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "會員 %@"
+          }
         }
       }
     },
@@ -11744,6 +13046,12 @@
             "state" : "translated",
             "value" : "内存"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "記憶體"
+          }
         }
       }
     },
@@ -11793,6 +13101,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "加密方式"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "加密方式"
@@ -11849,6 +13163,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "最小包大小"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "最小封包大小"
           }
         }
       }
@@ -11908,6 +13228,12 @@
             "state" : "translated",
             "value" : "MITM 规则集"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MITM 規則集"
+          }
         }
       }
     },
@@ -11960,6 +13286,12 @@
             "state" : "translated",
             "value" : "MITM 规则集在 MITM 被启用之前不会生效。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MITM 規則集須在啟用 MITM 後才會生效。"
+          }
         }
       }
     },
@@ -12008,6 +13340,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "模式"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "模式"
@@ -12064,6 +13402,12 @@
             "state" : "translated",
             "value" : "模块"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "模組"
+          }
         }
       }
     },
@@ -12115,6 +13459,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "模块不包含任何规则集。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "模組不包含任何規則集。"
           }
         }
       }
@@ -12168,6 +13518,12 @@
             "state" : "translated",
             "value" : "模块内容"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "模組內容"
+          }
         }
       }
     },
@@ -12219,6 +13575,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "模块过大。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "模組過大。"
           }
         }
       }
@@ -12272,6 +13634,12 @@
             "state" : "translated",
             "value" : "模块已被移除。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "模組已被移除。"
+          }
         }
       }
     },
@@ -12324,6 +13692,12 @@
             "state" : "translated",
             "value" : "模块"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "模組"
+          }
         }
       }
     },
@@ -12372,6 +13746,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "更多"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "更多"
@@ -12431,6 +13811,12 @@
             "state" : "translated",
             "value" : "向下移动"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "下移"
+          }
         }
       }
     },
@@ -12482,6 +13868,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "向上移动"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "上移"
           }
         }
       }
@@ -12541,6 +13933,12 @@
             "state" : "translated",
             "value" : "柔和"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "柔和"
+          }
         }
       }
     },
@@ -12592,6 +13990,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "名称"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "名稱"
           }
         }
       }
@@ -12645,6 +14049,12 @@
             "state" : "translated",
             "value" : "网络"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "網絡"
+          }
         }
       }
     },
@@ -12696,6 +14106,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "网络错误：%@"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "網絡錯誤：%@"
           }
         }
       }
@@ -12749,6 +14165,12 @@
             "state" : "translated",
             "value" : "新建链式代理"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "新增代理鏈"
+          }
         }
       }
     },
@@ -12801,6 +14223,12 @@
             "state" : "translated",
             "value" : "新分组"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "新增群組"
+          }
         }
       }
     },
@@ -12849,6 +14277,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "下一步"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "下一步"
@@ -12905,6 +14339,12 @@
             "state" : "translated",
             "value" : "无证书"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "沒有證書"
+          }
         }
       }
     },
@@ -12956,6 +14396,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "没有链式代理"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "沒有代理鏈"
           }
         }
       }
@@ -13009,6 +14455,12 @@
             "state" : "translated",
             "value" : "无数据"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "沒有數據"
+          }
         }
       }
     },
@@ -13060,6 +14512,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "无主机映射"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "沒有主機映射"
           }
         }
       }
@@ -13113,6 +14571,12 @@
             "state" : "translated",
             "value" : "没有模块"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "沒有模組"
+          }
         }
       }
     },
@@ -13164,6 +14628,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "未找到可供恢复的之前购买。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "找不到可恢復的購買項目。"
           }
         }
       }
@@ -13217,6 +14687,12 @@
             "state" : "translated",
             "value" : "没有代理"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "沒有代理"
+          }
         }
       }
     },
@@ -13268,6 +14744,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "未选择代理，请先在 Anywhere 中添加或选择一个代理。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未選擇代理。請先在 Anywhere 中加入或選擇代理。"
           }
         }
       }
@@ -13321,6 +14803,12 @@
             "state" : "translated",
             "value" : "无最近日志"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "沒有最近的日誌"
+          }
         }
       }
     },
@@ -13372,6 +14860,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "无最近请求"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "沒有最近的請求"
           }
         }
       }
@@ -13425,6 +14919,12 @@
             "state" : "translated",
             "value" : "没有规则集"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "沒有規則集"
+          }
         }
       }
     },
@@ -13476,6 +14976,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "无 TCP 连接"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "沒有 TCP 連線"
           }
         }
       }
@@ -13529,6 +15035,12 @@
             "state" : "translated",
             "value" : "没有受信任的证书"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "沒有受信任的證書"
+          }
         }
       }
     },
@@ -13580,6 +15092,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "无受信任的 SSID"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "沒有受信任的 SSID"
           }
         }
       }
@@ -13633,6 +15151,12 @@
             "state" : "translated",
             "value" : "无 UDP 流"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "沒有 UDP 流"
+          }
         }
       }
     },
@@ -13684,6 +15208,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "订阅中未找到有效的配置。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "訂閱中找不到有效的設定。"
           }
         }
       }
@@ -13737,6 +15267,12 @@
             "state" : "translated",
             "value" : "无"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無"
+          }
         }
       }
     },
@@ -13788,6 +15324,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "未配置"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未設定"
           }
         }
       }
@@ -13841,6 +15383,12 @@
             "state" : "translated",
             "value" : "未连接"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未連接"
+          }
         }
       }
     },
@@ -13892,6 +15440,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "代理数量不足"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "代理數量不足"
           }
         }
       }
@@ -13945,6 +15499,12 @@
             "state" : "translated",
             "value" : "未信任"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未受信任"
+          }
         }
       }
     },
@@ -13994,6 +15554,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "混淆"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "混淆"
@@ -14050,6 +15616,12 @@
             "state" : "translated",
             "value" : "关闭"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "關閉"
+          }
         }
       }
     },
@@ -14098,6 +15670,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "好"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "好"
@@ -14154,6 +15732,12 @@
             "state" : "translated",
             "value" : "开启"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "開啟"
+          }
         }
       }
     },
@@ -14205,6 +15789,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "开源库"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "開源程式庫"
           }
         }
       }
@@ -14258,6 +15848,12 @@
             "state" : "translated",
             "value" : "操作"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "操作"
+          }
         }
       }
     },
@@ -14306,6 +15902,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "其他"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "其他"
@@ -14365,6 +15967,12 @@
             "state" : "translated",
             "value" : "发送到 %@ 的数据包会被退回给发送方，而不会进行路由或代理。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "傳送至 %@ 的封包會退回給傳送者，而不會經路由或代理處理。"
+          }
         }
       }
     },
@@ -14417,6 +16025,12 @@
             "state" : "translated",
             "value" : "密码"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "密碼"
+          }
         }
       }
     },
@@ -14468,6 +16082,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "路径"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "路徑"
           }
         }
       }
@@ -14525,6 +16145,12 @@
             "state" : "translated",
             "value" : "权限被拒绝"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "權限被拒"
+          }
         }
       }
     },
@@ -14576,6 +16202,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "个性化"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "個人化"
           }
         }
       }
@@ -14629,57 +16261,11 @@
             "state" : "translated",
             "value" : "阶段"
           }
-        }
-      }
-    },
-    "Plain" : {
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "عادي"
-          }
         },
-        "en" : {
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Plain"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Simple"
-          }
-        },
-        "fa" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ساده"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Обычный"
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Düz"
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Thông thường"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "简单"
+            "value" : "階段"
           }
         }
       }
@@ -14733,6 +16319,12 @@
             "state" : "translated",
             "value" : "策略"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "策略"
+          }
         }
       }
     },
@@ -14781,6 +16373,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "端口"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "端口"
@@ -14840,6 +16438,12 @@
             "state" : "translated",
             "value" : "压力"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "壓力"
+          }
         }
       }
     },
@@ -14891,6 +16495,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "阻止 DNS 泄漏"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "防止 DNS 洩漏"
           }
         }
       }
@@ -14944,6 +16554,12 @@
             "state" : "translated",
             "value" : "预览"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "預覽"
+          }
         }
       }
     },
@@ -14995,6 +16611,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "隐私"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "私隱"
           }
         }
       }
@@ -15048,6 +16670,12 @@
             "state" : "translated",
             "value" : "协议"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "協定"
+          }
         }
       }
     },
@@ -15100,6 +16728,12 @@
             "state" : "translated",
             "value" : "提供额外的 DNS 安全性。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "提供額外的 DNS 安全保障。"
+          }
         }
       }
     },
@@ -15148,6 +16782,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "代理"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "代理"
@@ -15204,6 +16844,12 @@
             "state" : "translated",
             "value" : "代理"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "代理"
+          }
         }
       }
     },
@@ -15252,6 +16898,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "代理"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "代理"
@@ -15308,6 +16960,12 @@
             "state" : "translated",
             "value" : "代理类型"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "代理類型"
+          }
         }
       }
     },
@@ -15356,6 +17014,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "代理模式"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "代理模式"
@@ -15412,6 +17076,12 @@
             "state" : "translated",
             "value" : "代理类型"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "代理類型"
+          }
         }
       }
     },
@@ -15463,6 +17133,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "公开测试版"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "公開測試版"
           }
         }
       }
@@ -15516,6 +17192,12 @@
             "state" : "translated",
             "value" : "公开测试版授权"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "公開測試版資格"
+          }
         }
       }
     },
@@ -15567,6 +17249,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "公开测试版对 Anywhere Voyager 成员开放。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "公開測試版只供 Anywhere Voyager 會員使用。"
           }
         }
       }
@@ -15620,6 +17308,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "公钥"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "公鑰"
           }
         }
       }
@@ -15677,6 +17371,12 @@
             "state" : "translated",
             "value" : "净化"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "淨化"
+          }
         }
       }
     },
@@ -15728,6 +17428,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "二维码"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "QR 碼"
           }
         }
       }
@@ -15784,6 +17490,12 @@
             "state" : "translated",
             "value" : "经过代理的 QUIC 连接可能导致不稳定性和更长等待时间。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "經代理的 QUIC 連線可能會導致不穩定及等候時間增加。"
+          }
         }
       }
     },
@@ -15832,6 +17544,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "速率"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "速率"
@@ -15888,6 +17606,12 @@
             "state" : "translated",
             "value" : "重新获取所有代理订阅、已订阅的规则集和已订阅的模块。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "重新取得所有代理訂閱、已訂閱的規則集及已訂閱的模組。"
+          }
         }
       }
     },
@@ -15943,6 +17667,12 @@
             "state" : "translated",
             "value" : "正在重新连接"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在重新連接"
+          }
         }
       }
     },
@@ -15991,6 +17721,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "反射"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "反射"
@@ -16047,6 +17783,12 @@
             "state" : "translated",
             "value" : "重新生成"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "重新產生"
+          }
         }
       }
     },
@@ -16098,6 +17840,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "重新生成证书"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "重新產生證書"
           }
         }
       }
@@ -16151,6 +17899,12 @@
             "state" : "translated",
             "value" : "拒绝"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "拒絕"
+          }
         }
       }
     },
@@ -16202,6 +17956,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "拒绝"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "拒絕"
           }
         }
       }
@@ -16255,6 +18015,12 @@
             "state" : "translated",
             "value" : "拒绝 数据"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "拒絕（資料）"
+          }
         }
       }
     },
@@ -16307,6 +18073,12 @@
             "state" : "translated",
             "value" : "拒绝 GIF"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "拒絕（GIF）"
+          }
         }
       }
     },
@@ -16358,6 +18130,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "拒绝 文本"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "拒絕（文字）"
           }
         }
       }
@@ -16414,6 +18192,12 @@
             "state" : "translated",
             "value" : "移除"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "移除"
+          }
         }
       }
     },
@@ -16466,6 +18250,12 @@
             "state" : "translated",
             "value" : "从分组中移除"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "從群組中移除"
+          }
         }
       }
     },
@@ -16514,6 +18304,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "重新命名"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "重新命名"
@@ -16570,6 +18366,12 @@
             "state" : "translated",
             "value" : "重新命名模块"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "重新命名模組"
+          }
         }
       }
     },
@@ -16620,7 +18422,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "重新命名代理集"
+            "value" : "重新命名规则集"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "重新命名規則集"
           }
         }
       }
@@ -16670,6 +18478,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "重新排序"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "重新排序"
@@ -16726,6 +18540,12 @@
             "state" : "translated",
             "value" : "替换"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "取代內容"
+          }
         }
       }
     },
@@ -16777,6 +18597,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "请求"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "請求"
           }
         }
       }
@@ -16830,6 +18656,12 @@
             "state" : "translated",
             "value" : "请求"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "請求"
+          }
         }
       }
     },
@@ -16881,6 +18713,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "重置"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "重設"
           }
         }
       }
@@ -16934,6 +18772,12 @@
             "state" : "translated",
             "value" : "将所有规则集选择重置为默认。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "將所有規則集的指派重設為預設。"
+          }
         }
       }
     },
@@ -16985,6 +18829,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "重置选择"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "重設指派"
           }
         }
       }
@@ -17038,6 +18888,12 @@
             "state" : "translated",
             "value" : "重置统计"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "重設統計數據"
+          }
         }
       }
     },
@@ -17086,6 +18942,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "解析器"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "解析器"
@@ -17142,6 +19004,12 @@
             "state" : "translated",
             "value" : "响应"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "回應"
+          }
         }
       }
     },
@@ -17194,6 +19062,12 @@
             "state" : "translated",
             "value" : "恢复购买"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "恢復購買項目"
+          }
         }
       }
     },
@@ -17245,6 +19119,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "重新验证成员身份"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "重新驗證會籍"
           }
         }
       }
@@ -17299,6 +19179,12 @@
             "state" : "translated",
             "value" : "重写"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "重寫"
+          }
         }
       }
     },
@@ -17350,6 +19236,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "根证书"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "根證書"
           }
         }
       }
@@ -17403,6 +19295,12 @@
             "state" : "translated",
             "value" : "路由预览"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "路由預覽"
+          }
         }
       }
     },
@@ -17454,6 +19352,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "路由到"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "路由至"
           }
         }
       }
@@ -17507,6 +19411,12 @@
             "state" : "translated",
             "value" : "将访问本国的流量直连，绕过代理以获得更快的本地访问速度。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "前往你所在國家或地區的流量會直接連線，繞過代理以加快本地存取速度。"
+          }
         }
       }
     },
@@ -17555,6 +19465,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "路由"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "路由"
@@ -17611,6 +19527,12 @@
             "state" : "translated",
             "value" : "路由规则集"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "路由規則集"
+          }
         }
       }
     },
@@ -17662,6 +19584,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "路由规则已更新"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "路由規則已更新"
           }
         }
       }
@@ -17715,6 +19643,12 @@
             "state" : "translated",
             "value" : "规则集"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "規則集"
+          }
         }
       }
     },
@@ -17766,6 +19700,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "规则集过大。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "規則集過大。"
           }
         }
       }
@@ -17819,6 +19759,12 @@
             "state" : "translated",
             "value" : "规则集已被移除。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "規則集已被移除。"
+          }
         }
       }
     },
@@ -17870,6 +19816,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "规则集"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "規則集"
           }
         }
       }
@@ -17923,6 +19875,12 @@
             "state" : "translated",
             "value" : "规则"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "規則"
+          }
         }
       }
     },
@@ -17974,6 +19932,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "保存"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "儲存"
           }
         }
       }
@@ -18027,6 +19991,12 @@
             "state" : "translated",
             "value" : "扫描二维码"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "掃描 QR 碼"
+          }
         }
       }
     },
@@ -18078,6 +20048,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "脚本"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "腳本"
           }
         }
       }
@@ -18131,6 +20107,12 @@
             "state" : "translated",
             "value" : "搜索"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "搜尋"
+          }
         }
       }
     },
@@ -18183,6 +20165,12 @@
             "state" : "translated",
             "value" : "搜索不是一个有效的正则表达式。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "搜尋內容不是有效的正規表達式。"
+          }
         }
       }
     },
@@ -18234,6 +20222,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "必须指定搜索内容。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "必須輸入搜尋內容。"
           }
         }
       }
@@ -18288,6 +20282,12 @@
             "state" : "translated",
             "value" : "安全"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "安全性"
+          }
         }
       }
     },
@@ -18339,6 +20339,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "选择"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "選擇"
           }
         }
       }
@@ -18392,6 +20398,12 @@
             "state" : "translated",
             "value" : "选择${proxy}"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "選擇${proxy}"
+          }
         }
       }
     },
@@ -18443,6 +20455,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "选择代理"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "選擇代理"
           }
         }
       }
@@ -18496,6 +20514,12 @@
             "state" : "translated",
             "value" : "已选中"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已選擇"
+          }
         }
       }
     },
@@ -18547,6 +20571,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "已选择%@。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已選擇 %@。"
           }
         }
       }
@@ -18600,6 +20630,12 @@
             "state" : "translated",
             "value" : "服务器"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "伺服器"
+          }
         }
       }
     },
@@ -18652,6 +20688,12 @@
             "state" : "translated",
             "value" : "服务器分组"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "伺服器群組"
+          }
         }
       }
     },
@@ -18703,6 +20745,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "服务器"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "伺服器"
           }
         }
       }
@@ -18760,6 +20808,12 @@
             "state" : "translated",
             "value" : "设置模式"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "設定模式"
+          }
         }
       }
     },
@@ -18812,6 +20866,12 @@
             "state" : "translated",
             "value" : "将模式设为${mode}"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "將模式設為${mode}"
+          }
         }
       }
     },
@@ -18863,6 +20923,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "SHA-256 指纹"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SHA-256 指紋"
           }
         }
       }
@@ -18919,6 +20985,12 @@
             "state" : "translated",
             "value" : "分享"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "分享"
+          }
         }
       }
     },
@@ -18970,6 +21042,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "与家庭成员分享 Voyager 成员身份。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "與家人共享 Voyager 會籍。"
           }
         }
       }
@@ -19023,6 +21101,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "睡眠"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "睡眠"
@@ -19088,6 +21172,12 @@
             "state" : "translated",
             "value" : "统计卡片（深色）"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "統計卡（深色）"
+          }
         }
       }
     },
@@ -19140,6 +21230,12 @@
             "state" : "translated",
             "value" : "统计卡片（浅色）"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "統計卡（淺色）"
+          }
         }
       }
     },
@@ -19191,6 +21287,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "阻止你的设备在未经允许的情况下成为 CDN 节点。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "防止你的裝置在未經許可下成為 CDN 節點。"
           }
         }
       }
@@ -19247,6 +21349,12 @@
             "state" : "translated",
             "value" : "流式脚本"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "串流腳本"
+          }
         }
       }
     },
@@ -19302,6 +21410,12 @@
             "state" : "translated",
             "value" : "订阅"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "訂閱"
+          }
         }
       }
     },
@@ -19353,6 +21467,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "订阅模块"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "訂閱模組"
           }
         }
       }
@@ -19406,6 +21526,12 @@
             "state" : "translated",
             "value" : "订阅规则集"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "訂閱規則集"
+          }
         }
       }
     },
@@ -19457,6 +21583,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "订阅"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "訂閱"
           }
         }
       }
@@ -19510,6 +21642,12 @@
             "state" : "translated",
             "value" : "订阅失败"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "訂閱失敗"
+          }
         }
       }
     },
@@ -19561,6 +21699,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "订阅"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "訂閱"
           }
         }
       }
@@ -19617,6 +21761,12 @@
             "state" : "translated",
             "value" : "支持开源"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "支持開源"
+          }
         }
       }
     },
@@ -19668,6 +21818,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "支持代理、订阅和 Clash 链接"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "支援代理、訂閱及 Clash 連結"
           }
         }
       }
@@ -19721,6 +21877,12 @@
             "state" : "translated",
             "value" : "切换模式"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "切換模式"
+          }
         }
       }
     },
@@ -19772,6 +21934,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "已切换到%@。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已切換至 %@。"
           }
         }
       }
@@ -19825,6 +21993,12 @@
             "state" : "translated",
             "value" : "已切换到全局模式。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已切換至全局模式。"
+          }
         }
       }
     },
@@ -19876,6 +22050,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "已切换到代理模式。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已切換至代理模式。"
           }
         }
       }
@@ -19929,6 +22109,12 @@
             "state" : "translated",
             "value" : "在代理模式和全局模式之间切换。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在代理模式與全局模式之間切換。"
+          }
         }
       }
     },
@@ -19980,6 +22166,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "使用 iCloud 在你的设备间同步数据。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "透過 iCloud 在你的裝置之間同步資料。"
           }
         }
       }
@@ -20033,6 +22225,12 @@
             "state" : "translated",
             "value" : "合成地址"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "合成位址"
+          }
         }
       }
     },
@@ -20084,6 +22282,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "目标"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "目標"
           }
         }
       }
@@ -20140,6 +22344,12 @@
             "state" : "translated",
             "value" : "TCP 连接"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "TCP 連線"
+          }
         }
       }
     },
@@ -20191,6 +22401,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "条款"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "條款"
           }
         }
       }
@@ -20244,6 +22460,12 @@
             "state" : "translated",
             "value" : "测试延迟"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "測試延遲"
+          }
         }
       }
     },
@@ -20295,6 +22517,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "该代理已不存在。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "該代理已不存在。"
           }
         }
       }
@@ -20348,6 +22576,12 @@
             "state" : "translated",
             "value" : "该订阅已不存在。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "該訂閱已不存在。"
+          }
         }
       }
     },
@@ -20399,6 +22633,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "链式代理 %@ 无法使用，因为其中有代理已缺失。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "代理鏈「%@」無法使用，因為其中一個代理已不存在。"
           }
         }
       }
@@ -20452,6 +22692,12 @@
             "state" : "translated",
             "value" : "以下路由规则使用的代理已被删除，它们已重置为默认: %@"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "以下路由規則所使用的代理已被刪除，現已重設為預設：%@"
+          }
         }
       }
     },
@@ -20503,6 +22749,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "前路漫漫，让我们共同砥砺前行。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "前路漫長，與我們並肩同行。"
           }
         }
       }
@@ -20556,6 +22808,12 @@
             "state" : "translated",
             "value" : "VPN 配置尚未就绪，请先打开一次 Anywhere 完成设置。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VPN 設定尚未準備就緒。請先打開 Anywhere 一次以完成設定。"
+          }
         }
       }
     },
@@ -20607,6 +22865,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "VPN 在完成连接前已停止。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VPN 在完成連接前已停止。"
           }
         }
       }
@@ -20660,6 +22924,12 @@
             "state" : "translated",
             "value" : "主题"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "主題"
+          }
         }
       }
     },
@@ -20711,6 +22981,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "没有可更新的订阅。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "沒有可更新的訂閱。"
           }
         }
       }
@@ -20764,6 +23040,12 @@
             "state" : "translated",
             "value" : "这将跳过 TLS 证书验证，使您的连接容易受到中间人攻击。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此操作會略過 TLS 證書驗證，令你的連線容易受到中間人攻擊。"
+          }
         }
       }
     },
@@ -20815,6 +23097,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "超时"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "逾時"
           }
         }
       }
@@ -20871,6 +23159,12 @@
             "state" : "translated",
             "value" : "TLS（下行）"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "TLS（下行）"
+          }
         }
       }
     },
@@ -20919,6 +23213,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "TLS（上行）"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "TLS（上行）"
@@ -20975,6 +23275,12 @@
             "state" : "translated",
             "value" : "VPN 开关"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "切換 VPN"
+          }
         }
       }
     },
@@ -21027,6 +23333,12 @@
             "state" : "translated",
             "value" : "开启或关闭 VPN 连接。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "開啟或關閉 VPN 連接。"
+          }
         }
       }
     },
@@ -21075,6 +23387,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "工具箱"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "工具箱"
@@ -21131,6 +23449,12 @@
             "state" : "translated",
             "value" : "顶部"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "頂部"
+          }
         }
       }
     },
@@ -21182,6 +23506,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "商标"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "商標"
           }
         }
       }
@@ -21235,6 +23565,12 @@
             "state" : "translated",
             "value" : "路由流量"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "路由流量"
+          }
         }
       }
     },
@@ -21283,6 +23619,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "透明"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "透明"
@@ -21340,6 +23682,12 @@
             "state" : "translated",
             "value" : "传输"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "傳輸"
+          }
         }
       }
     },
@@ -21391,6 +23739,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "受信任"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "受信任"
@@ -21447,6 +23801,12 @@
             "state" : "translated",
             "value" : "受信任的证书"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "受信任的證書"
+          }
         }
       }
     },
@@ -21499,6 +23859,12 @@
             "state" : "translated",
             "value" : "受信任的网络"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "受信任的網絡"
+          }
         }
       }
     },
@@ -21547,6 +23913,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "受信任的 SSID"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "受信任的 SSID"
@@ -21603,6 +23975,12 @@
             "state" : "translated",
             "value" : "隧道"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "隧道"
+          }
         }
       }
     },
@@ -21655,6 +24033,12 @@
             "state" : "translated",
             "value" : "隧道范围"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "隧道範圍"
+          }
         }
       }
     },
@@ -21706,6 +24090,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "类型"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "類型"
           }
         }
       }
@@ -21762,6 +24152,12 @@
             "state" : "translated",
             "value" : "UDP 流"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "UDP 流"
+          }
         }
       }
     },
@@ -21813,6 +24209,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "不阻止"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "不封鎖"
           }
         }
       }
@@ -21866,6 +24268,12 @@
             "state" : "translated",
             "value" : "未知内容。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未知內容。"
+          }
         }
       }
     },
@@ -21917,6 +24325,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "解锁 Voyager — %@"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "解鎖 Voyager — %@"
           }
         }
       }
@@ -21970,6 +24384,12 @@
             "state" : "translated",
             "value" : "不支持的链接。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "不支援的連結。"
+          }
         }
       }
     },
@@ -22018,6 +24438,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "更新"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "更新"
@@ -22074,6 +24500,12 @@
             "state" : "translated",
             "value" : "更新${subscription}"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "更新${subscription}"
+          }
         }
       }
     },
@@ -22125,6 +24557,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "更新全部订阅"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "更新所有訂閱"
           }
         }
       }
@@ -22178,6 +24616,12 @@
             "state" : "translated",
             "value" : "更新失败"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "更新失敗"
+          }
         }
       }
     },
@@ -22229,6 +24673,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "更新订阅"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "更新訂閱"
           }
         }
       }
@@ -22282,6 +24732,12 @@
             "state" : "translated",
             "value" : "更新订阅"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "更新訂閱"
+          }
         }
       }
     },
@@ -22333,6 +24789,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "已更新%@，共 %lld 个代理。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已更新 %@，共 %lld 個代理。"
           }
         }
       }
@@ -22386,6 +24848,12 @@
             "state" : "translated",
             "value" : "已更新 %lld/%lld 个订阅。失败：%@"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已更新 %lld/%lld 個訂閱。失敗：%@"
+          }
         }
       }
     },
@@ -22437,6 +24905,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "已更新 %lld 个代理订阅、%lld 个规则集和 %lld 个模块。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已更新 %lld 個代理訂閱、%lld 個規則集及 %lld 個模組。"
           }
         }
       }
@@ -22490,6 +24964,12 @@
             "state" : "translated",
             "value" : "上传"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "上載"
+          }
         }
       }
     },
@@ -22542,6 +25022,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "上传速度"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "上載速度"
           }
         }
       }
@@ -22598,6 +25084,12 @@
             "state" : "translated",
             "value" : "URL 无效。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "URL 無效。"
+          }
         }
       }
     },
@@ -22650,6 +25142,12 @@
             "state" : "translated",
             "value" : "必须指定 URL。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "必須輸入 URL。"
+          }
         }
       }
     },
@@ -22698,6 +25196,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "URL 模式"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "URL 模式"
@@ -22754,6 +25258,12 @@
             "state" : "translated",
             "value" : "URL 模式不是一个有效的正则表达式。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "URL 模式不是有效的正規表達式。"
+          }
         }
       }
     },
@@ -22805,6 +25315,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "必须指定 URL 模式。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "必須輸入 URL 模式。"
           }
         }
       }
@@ -22861,6 +25377,12 @@
             "state" : "translated",
             "value" : "用户名"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "用户名稱"
+          }
         }
       }
     },
@@ -22913,6 +25435,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "值"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "值"
@@ -22981,6 +25509,12 @@
             "state" : "translated",
             "value" : "仅限 Voyager"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Voyager 專享"
+          }
         }
       }
     },
@@ -23029,6 +25563,12 @@
           }
         },
         "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VPN"
+          }
+        },
+        "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "VPN"
@@ -23085,6 +25625,12 @@
             "state" : "translated",
             "value" : "VPN 已启用"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VPN 已啟用"
+          }
         }
       }
     },
@@ -23137,6 +25683,12 @@
             "state" : "translated",
             "value" : "VPN 错误"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VPN 錯誤"
+          }
         }
       }
     },
@@ -23188,6 +25740,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "唤醒"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "喚醒"
           }
         }
       }
@@ -23244,6 +25802,12 @@
             "state" : "translated",
             "value" : "连接到受信任的 SSID 时，启用直连模式。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "連接受信任的 SSID 時，啟用直連模式。"
+          }
         }
       }
     },
@@ -23295,6 +25859,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "使用蜂窝数据时，启用直连模式。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "使用流動數據時，啟用直連模式。"
           }
         }
       }
@@ -23348,6 +25918,12 @@
             "state" : "translated",
             "value" : "使用蜂窝数据时，启用全局模式。"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "使用流動數據時，啟用全局模式。"
+          }
         }
       }
     },
@@ -23399,6 +25975,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "哪个模式？"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "哪個模式？"
           }
         }
       }
@@ -23452,6 +26034,12 @@
             "state" : "translated",
             "value" : "哪个代理？"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "哪個代理？"
+          }
         }
       }
     },
@@ -23503,6 +26091,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "哪个订阅？"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "哪個訂閱？"
           }
         }
       }
@@ -23559,6 +26153,12 @@
             "state" : "translated",
             "value" : "你"
           }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "你"
+          }
         }
       }
     },
@@ -23610,6 +26210,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "你将需要重新生成证书以再次使用 MITM。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "你需要重新產生證書，才能再次使用 MITM。"
           }
         }
       }
