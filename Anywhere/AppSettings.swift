@@ -61,9 +61,9 @@ final class AppSettings {
         }
     }
 
-    var subscriptionDNSPlainServer: String {
+    var subscriptionDNSUDPServer: String {
         didSet {
-            AWCore.setSubscriptionDNSPlainServer(subscriptionDNSPlainServer)
+            AWCore.setSubscriptionDNSUDPServer(subscriptionDNSUDPServer)
             AWNotificationCenter.notifyTunnelSettingsChanged()
         }
     }
@@ -190,9 +190,9 @@ final class AppSettings {
         }
     }
 
-    var localRequestDNSPlainServer: String {
+    var localRequestDNSUDPServer: String {
         didSet {
-            AWCore.setLocalRequestDNSPlainServer(localRequestDNSPlainServer)
+            AWCore.setLocalRequestDNSUDPServer(localRequestDNSUDPServer)
             AWNotificationCenter.notifyTunnelSettingsChanged()
         }
     }
@@ -219,9 +219,9 @@ final class AppSettings {
         }
     }
 
-    var proxyDNSPlainServer: String {
+    var proxyDNSUDPServer: String {
         didSet {
-            AWCore.setProxyDNSPlainServer(proxyDNSPlainServer)
+            AWCore.setProxyDNSUDPServer(proxyDNSUDPServer)
             AWNotificationCenter.notifyTunnelSettingsChanged()
         }
     }
@@ -240,9 +240,9 @@ final class AppSettings {
         }
     }
 
-    var echDNSPlainServer: String {
+    var echDNSUDPServer: String {
         didSet {
-            AWCore.setECHDNSPlainServer(echDNSPlainServer)
+            AWCore.setECHDNSUDPServer(echDNSUDPServer)
             AWNotificationCenter.notifyTunnelSettingsChanged()
         }
     }
@@ -333,7 +333,7 @@ final class AppSettings {
         statCardBackgroundLightData = AWCore.getThemeColorData(.statCardBackgroundLight)
         statCardBackgroundDarkData = AWCore.getThemeColorData(.statCardBackgroundDark)
         subscriptionDNSMode = AWCore.getSubscriptionDNSMode()
-        subscriptionDNSPlainServer = AWCore.getSubscriptionDNSPlainServer()
+        subscriptionDNSUDPServer = AWCore.getSubscriptionDNSUDPServer()
         subscriptionDNSDoHURL = AWCore.getSubscriptionDNSDoHURL()
 
         alwaysTrustCellular = AWCore.getAlwaysTrustCellular()
@@ -341,18 +341,18 @@ final class AppSettings {
         blockUDP = AWCore.getBlockUDP()
         blockWebRTC = AWCore.getBlockWebRTC()
         echDNSMode = AWCore.getECHDNSMode()
-        echDNSPlainServer = AWCore.getECHDNSPlainServer()
+        echDNSUDPServer = AWCore.getECHDNSUDPServer()
         echDNSDoHURL = AWCore.getECHDNSDoHURL()
         fallbackDNSMode = AWCore.getFallbackDNSMode()
         fallbackDNSServer = AWCore.getFallbackDNSServer()
         hideVPNIcon = AWCore.getHideVPNIcon()
         localRequestDNSMode = AWCore.getLocalRequestDNSMode()
-        localRequestDNSPlainServer = AWCore.getLocalRequestDNSPlainServer()
+        localRequestDNSUDPServer = AWCore.getLocalRequestDNSUDPServer()
         localRequestDNSDoHURL = AWCore.getLocalRequestDNSDoHURL()
         hostMappings = HostMapping.load()
         preventDNSLeak = AWCore.getPreventDNSLeak()
         proxyDNSMode = AWCore.getProxyDNSMode()
-        proxyDNSPlainServer = AWCore.getProxyDNSPlainServer()
+        proxyDNSUDPServer = AWCore.getProxyDNSUDPServer()
         proxyDNSDoHURL = AWCore.getProxyDNSDoHURL()
         proxyMode = AWCore.getProxyMode()
         quicPolicy = AWCore.getQUICPolicy()

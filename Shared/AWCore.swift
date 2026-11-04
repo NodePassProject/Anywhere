@@ -26,22 +26,23 @@ nonisolated final class AWCore {
     
     nonisolated(unsafe) private static let userDefaults: UserDefaults = {
         let defaults = UserDefaults(suiteName: Identifier.appGroupSuite)!
+        migrateLegacySettings(defaults)
         defaults.register(defaults: [
             UserDefaultsKey.blockWebRTC: true,
             UserDefaultsKey.bypassCountryCode: "",
             UserDefaultsKey.echDNSDoHURL: DNSUpstream.defaultDoHURL,
-            UserDefaultsKey.echDNSPlainServer: DNSUpstream.defaultPlainServer,
-            UserDefaultsKey.fallbackDNSServer: DNSUpstream.defaultPlainServer,
+            UserDefaultsKey.echDNSUDPServer: DNSUpstream.defaultUDPServer,
+            UserDefaultsKey.fallbackDNSServer: DNSUpstream.defaultUDPServer,
             UserDefaultsKey.localRequestDNSDoHURL: DNSUpstream.defaultDoHURL,
-            UserDefaultsKey.localRequestDNSPlainServer: DNSUpstream.defaultPlainServer,
+            UserDefaultsKey.localRequestDNSUDPServer: DNSUpstream.defaultUDPServer,
             UserDefaultsKey.proxyDNSDoHURL: DNSUpstream.defaultDoHURL,
-            UserDefaultsKey.proxyDNSPlainServer: DNSUpstream.defaultPlainServer,
+            UserDefaultsKey.proxyDNSUDPServer: DNSUpstream.defaultUDPServer,
             UserDefaultsKey.proxyMode: ProxyMode.rule.rawValue,
             UserDefaultsKey.quicPolicy: QUICPolicy.automatic.rawValue,
             UserDefaultsKey.remnawaveHWID: UUID().uuidString,
             UserDefaultsKey.showVoyagerCard: true,
             UserDefaultsKey.subscriptionDNSDoHURL: DNSUpstream.defaultDoHURL,
-            UserDefaultsKey.subscriptionDNSPlainServer: DNSUpstream.defaultPlainServer,
+            UserDefaultsKey.subscriptionDNSUDPServer: DNSUpstream.defaultUDPServer,
             UserDefaultsKey.syntheticAddressExcludedDomainSuffixes: [],
             UserDefaultsKey.trustedCertificateSHA256s: [],
             UserDefaultsKey.trustedSSIDs: [],
@@ -64,7 +65,7 @@ nonisolated final class AWCore {
         static let detailRevealed = "detailRevealed"
         static let echDNSDoHURL = "echDNSDoHURL"
         static let echDNSMode = "echDNSMode"
-        static let echDNSPlainServer = "echDNSPlainServer"
+        static let echDNSUDPServer = "echDNSUDPServer"
         static let experimentalEnabled = "experimentalEnabled"
         static let fallbackDNSMode = "fallbackDNSMode"
         static let fallbackDNSServer = "fallbackDNSServer"
@@ -76,7 +77,7 @@ nonisolated final class AWCore {
         static let latencyResults = "latencyResults"
         static let localRequestDNSDoHURL = "localRequestDNSDoHURL"
         static let localRequestDNSMode = "localRequestDNSMode"
-        static let localRequestDNSPlainServer = "localRequestDNSPlainServer"
+        static let localRequestDNSUDPServer = "localRequestDNSUDPServer"
         static let mitmEnabled = "mitmEnabled"
         static let moduleRuleSetAssignments = "moduleRuleSetAssignments"
         static let onboardingCompleted = "onboardingCompleted"
@@ -84,7 +85,7 @@ nonisolated final class AWCore {
         static let proxiesPageProxyType = "proxiesPageProxyType"
         static let proxyDNSDoHURL = "proxyDNSDoHURL"
         static let proxyDNSMode = "proxyDNSMode"
-        static let proxyDNSPlainServer = "proxyDNSPlainServer"
+        static let proxyDNSUDPServer = "proxyDNSUDPServer"
         static let proxyMode = "proxyMode"
         static let quicPolicy = "quicPolicy"
         static let reflectionEnabled = "reflectionEnabled"
@@ -96,7 +97,7 @@ nonisolated final class AWCore {
         static let showVoyagerCard = "showVoyagerCard"
         static let subscriptionDNSDoHURL = "subscriptionDNSDoHURL"
         static let subscriptionDNSMode = "subscriptionDNSMode"
-        static let subscriptionDNSPlainServer = "subscriptionDNSPlainServer"
+        static let subscriptionDNSUDPServer = "subscriptionDNSUDPServer"
         static let syntheticAddressExcludedDomainSuffixes = "syntheticAddressExcludedDomainSuffixes"
         static let trustedCertificateSHA256s = "trustedCertificateSHA256s"
         static let trustedSSIDs = "trustedSSIDs"
@@ -463,12 +464,12 @@ nonisolated final class AWCore {
         userDefaults.set(value.rawValue, forKey: UserDefaultsKey.subscriptionDNSMode)
     }
 
-    static func getSubscriptionDNSPlainServer() -> String {
-        userDefaults.string(forKey: UserDefaultsKey.subscriptionDNSPlainServer)!
+    static func getSubscriptionDNSUDPServer() -> String {
+        userDefaults.string(forKey: UserDefaultsKey.subscriptionDNSUDPServer)!
     }
 
-    static func setSubscriptionDNSPlainServer(_ value: String) {
-        userDefaults.set(value, forKey: UserDefaultsKey.subscriptionDNSPlainServer)
+    static func setSubscriptionDNSUDPServer(_ value: String) {
+        userDefaults.set(value, forKey: UserDefaultsKey.subscriptionDNSUDPServer)
     }
 
     static func getSubscriptionDNSDoHURL() -> String {
@@ -487,12 +488,12 @@ nonisolated final class AWCore {
         userDefaults.set(value.rawValue, forKey: UserDefaultsKey.localRequestDNSMode)
     }
 
-    static func getLocalRequestDNSPlainServer() -> String {
-        userDefaults.string(forKey: UserDefaultsKey.localRequestDNSPlainServer)!
+    static func getLocalRequestDNSUDPServer() -> String {
+        userDefaults.string(forKey: UserDefaultsKey.localRequestDNSUDPServer)!
     }
 
-    static func setLocalRequestDNSPlainServer(_ value: String) {
-        userDefaults.set(value, forKey: UserDefaultsKey.localRequestDNSPlainServer)
+    static func setLocalRequestDNSUDPServer(_ value: String) {
+        userDefaults.set(value, forKey: UserDefaultsKey.localRequestDNSUDPServer)
     }
 
     static func getLocalRequestDNSDoHURL() -> String {
@@ -539,12 +540,12 @@ nonisolated final class AWCore {
         userDefaults.set(value.rawValue, forKey: UserDefaultsKey.proxyDNSMode)
     }
 
-    static func getProxyDNSPlainServer() -> String {
-        userDefaults.string(forKey: UserDefaultsKey.proxyDNSPlainServer)!
+    static func getProxyDNSUDPServer() -> String {
+        userDefaults.string(forKey: UserDefaultsKey.proxyDNSUDPServer)!
     }
 
-    static func setProxyDNSPlainServer(_ value: String) {
-        userDefaults.set(value, forKey: UserDefaultsKey.proxyDNSPlainServer)
+    static func setProxyDNSUDPServer(_ value: String) {
+        userDefaults.set(value, forKey: UserDefaultsKey.proxyDNSUDPServer)
     }
 
     static func getProxyDNSDoHURL() -> String {
@@ -563,12 +564,12 @@ nonisolated final class AWCore {
         userDefaults.set(value.rawValue, forKey: UserDefaultsKey.echDNSMode)
     }
 
-    static func getECHDNSPlainServer() -> String {
-        userDefaults.string(forKey: UserDefaultsKey.echDNSPlainServer)!
+    static func getECHDNSUDPServer() -> String {
+        userDefaults.string(forKey: UserDefaultsKey.echDNSUDPServer)!
     }
 
-    static func setECHDNSPlainServer(_ value: String) {
-        userDefaults.set(value, forKey: UserDefaultsKey.echDNSPlainServer)
+    static func setECHDNSUDPServer(_ value: String) {
+        userDefaults.set(value, forKey: UserDefaultsKey.echDNSUDPServer)
     }
 
     static func getECHDNSDoHURL() -> String {
@@ -582,7 +583,7 @@ nonisolated final class AWCore {
     static func getSubscriptionDNSUpstream() -> DNSUpstream {
         DNSUpstream(
             mode: getSubscriptionDNSMode(),
-            plainServer: getSubscriptionDNSPlainServer(),
+            udpServer: getSubscriptionDNSUDPServer(),
             dohURL: getSubscriptionDNSDoHURL()
         )
     }
@@ -590,22 +591,22 @@ nonisolated final class AWCore {
     static func getLocalRequestDNSUpstream() -> DNSUpstream {
         DNSUpstream(
             mode: getLocalRequestDNSMode(),
-            plainServer: getLocalRequestDNSPlainServer(),
+            udpServer: getLocalRequestDNSUDPServer(),
             dohURL: getLocalRequestDNSDoHURL()
         )
     }
     
     static func getFallbackDNSUpstream() -> DNSUpstream {
         switch getFallbackDNSMode() {
-        case .default: return .defaultPlain
-        case .plain: return DNSUpstream.parsePlain(getFallbackDNSServer()) ?? .defaultPlain
+        case .default: return .defaultUDP
+        case .udp: return DNSUpstream.parseUDP(getFallbackDNSServer()) ?? .defaultUDP
         }
     }
 
     static func getProxyDNSUpstream() -> DNSUpstream {
         DNSUpstream(
             mode: getProxyDNSMode(),
-            plainServer: getProxyDNSPlainServer(),
+            udpServer: getProxyDNSUDPServer(),
             dohURL: getProxyDNSDoHURL()
         )
     }
@@ -613,7 +614,7 @@ nonisolated final class AWCore {
     static func getECHDNSUpstream() -> DNSUpstream {
         DNSUpstream(
             mode: getECHDNSMode(),
-            plainServer: getECHDNSPlainServer(),
+            udpServer: getECHDNSUDPServer(),
             dohURL: getECHDNSDoHURL()
         )
     }
@@ -677,5 +678,37 @@ nonisolated final class AWCore {
 
     static func setMITMEnabled(_ value: Bool) {
         userDefaults.set(value, forKey: UserDefaultsKey.mitmEnabled)
+    }
+
+    // MARK: - Legacy Migrations
+
+    private static func migrateLegacySettings(_ defaults: UserDefaults) {
+        migratePlainDNSToUDP(defaults)
+    }
+
+    /// Nov 2026: the "Plain" DNS mode was renamed to "UDP".
+    private static func migratePlainDNSToUDP(_ defaults: UserDefaults) {
+        let modeKeys = [
+            UserDefaultsKey.echDNSMode,
+            UserDefaultsKey.fallbackDNSMode,
+            UserDefaultsKey.localRequestDNSMode,
+            UserDefaultsKey.proxyDNSMode,
+            UserDefaultsKey.subscriptionDNSMode,
+        ]
+        for key in modeKeys where defaults.string(forKey: key) == "plain" {
+            defaults.set("udp", forKey: key)
+        }
+
+        let serverKeys = [
+            ("echDNSPlainServer", UserDefaultsKey.echDNSUDPServer),
+            ("localRequestDNSPlainServer", UserDefaultsKey.localRequestDNSUDPServer),
+            ("proxyDNSPlainServer", UserDefaultsKey.proxyDNSUDPServer),
+            ("subscriptionDNSPlainServer", UserDefaultsKey.subscriptionDNSUDPServer),
+        ]
+        for (legacyKey, key) in serverKeys {
+            guard let server = defaults.string(forKey: legacyKey) else { continue }
+            defaults.set(server, forKey: key)
+            defaults.removeObject(forKey: legacyKey)
+        }
     }
 }

@@ -8,15 +8,15 @@
 import SwiftUI
 
 private struct ServerDrafts: Equatable {
-    var subscriptionPlain = DNSUpstream.defaultPlainServer
+    var subscriptionUDP = DNSUpstream.defaultUDPServer
     var subscriptionDoH = DNSUpstream.defaultDoHURL
-    var localRequestPlain = DNSUpstream.defaultPlainServer
+    var localRequestUDP = DNSUpstream.defaultUDPServer
     var localRequestDoH = DNSUpstream.defaultDoHURL
-    var proxyPlain = DNSUpstream.defaultPlainServer
+    var proxyUDP = DNSUpstream.defaultUDPServer
     var proxyDoH = DNSUpstream.defaultDoHURL
-    var echPlain = DNSUpstream.defaultPlainServer
+    var echUDP = DNSUpstream.defaultUDPServer
     var echDoH = DNSUpstream.defaultDoHURL
-    var fallback = DNSUpstream.defaultPlainServer
+    var fallback = DNSUpstream.defaultUDPServer
 }
 
 struct DNSSettingsView: View {
@@ -41,8 +41,8 @@ struct DNSSettingsView: View {
                 switch settings.subscriptionDNSMode {
                 case .default:
                     EmptyView()
-                case .plain:
-                    plainRow($drafts.subscriptionPlain)
+                case .udp:
+                    udpRow($drafts.subscriptionUDP)
                 case .doh:
                     dohRow($drafts.subscriptionDoH)
                 }
@@ -60,8 +60,8 @@ struct DNSSettingsView: View {
                 switch settings.localRequestDNSMode {
                 case .default:
                     EmptyView()
-                case .plain:
-                    plainRow($drafts.localRequestPlain)
+                case .udp:
+                    udpRow($drafts.localRequestUDP)
                 case .doh:
                     dohRow($drafts.localRequestDoH)
                 }
@@ -76,8 +76,8 @@ struct DNSSettingsView: View {
                 switch settings.proxyDNSMode {
                 case .default:
                     EmptyView()
-                case .plain:
-                    plainRow($drafts.proxyPlain)
+                case .udp:
+                    udpRow($drafts.proxyUDP)
                 case .doh:
                     dohRow($drafts.proxyDoH)
                 }
@@ -92,8 +92,8 @@ struct DNSSettingsView: View {
                 switch settings.echDNSMode {
                 case .default:
                     EmptyView()
-                case .plain:
-                    plainRow($drafts.echPlain)
+                case .udp:
+                    udpRow($drafts.echUDP)
                 case .doh:
                     dohRow($drafts.echDoH)
                 }
@@ -108,8 +108,8 @@ struct DNSSettingsView: View {
                 switch settings.fallbackDNSMode {
                 case .default:
                     EmptyView()
-                case .plain:
-                    plainRow($drafts.fallback)
+                case .udp:
+                    udpRow($drafts.fallback)
                 }
             }
         }
@@ -131,9 +131,9 @@ struct DNSSettingsView: View {
     // MARK: - Rows
 
     @ViewBuilder
-    private func plainRow(_ draft: Binding<String>) -> some View {
+    private func udpRow(_ draft: Binding<String>) -> some View {
         serverRow(draft, placeholder: String("1.1.1.1"), keyboard: .numbersAndPunctuation) {
-            DNSUpstream.parsePlain($0) != nil
+            DNSUpstream.parseUDP($0) != nil
         }
     }
 
@@ -168,13 +168,13 @@ struct DNSSettingsView: View {
 
     private func loadInitial() {
         drafts = ServerDrafts(
-            subscriptionPlain: settings.subscriptionDNSPlainServer,
+            subscriptionUDP: settings.subscriptionDNSUDPServer,
             subscriptionDoH: settings.subscriptionDNSDoHURL,
-            localRequestPlain: settings.localRequestDNSPlainServer,
+            localRequestUDP: settings.localRequestDNSUDPServer,
             localRequestDoH: settings.localRequestDNSDoHURL,
-            proxyPlain: settings.proxyDNSPlainServer,
+            proxyUDP: settings.proxyDNSUDPServer,
             proxyDoH: settings.proxyDNSDoHURL,
-            echPlain: settings.echDNSPlainServer,
+            echUDP: settings.echDNSUDPServer,
             echDoH: settings.echDNSDoHURL,
             fallback: settings.fallbackDNSServer
         )
@@ -182,37 +182,37 @@ struct DNSSettingsView: View {
 
     private func save() {
         drafts = ServerDrafts(
-            subscriptionPlain: Self.normalized(drafts.subscriptionPlain, empty: DNSUpstream.defaultPlainServer),
+            subscriptionUDP: Self.normalized(drafts.subscriptionUDP, empty: DNSUpstream.defaultUDPServer),
             subscriptionDoH: Self.normalized(drafts.subscriptionDoH, empty: DNSUpstream.defaultDoHURL),
-            localRequestPlain: Self.normalized(drafts.localRequestPlain, empty: DNSUpstream.defaultPlainServer),
+            localRequestUDP: Self.normalized(drafts.localRequestUDP, empty: DNSUpstream.defaultUDPServer),
             localRequestDoH: Self.normalized(drafts.localRequestDoH, empty: DNSUpstream.defaultDoHURL),
-            proxyPlain: Self.normalized(drafts.proxyPlain, empty: DNSUpstream.defaultPlainServer),
+            proxyUDP: Self.normalized(drafts.proxyUDP, empty: DNSUpstream.defaultUDPServer),
             proxyDoH: Self.normalized(drafts.proxyDoH, empty: DNSUpstream.defaultDoHURL),
-            echPlain: Self.normalized(drafts.echPlain, empty: DNSUpstream.defaultPlainServer),
+            echUDP: Self.normalized(drafts.echUDP, empty: DNSUpstream.defaultUDPServer),
             echDoH: Self.normalized(drafts.echDoH, empty: DNSUpstream.defaultDoHURL),
-            fallback: Self.normalized(drafts.fallback, empty: DNSUpstream.defaultPlainServer)
+            fallback: Self.normalized(drafts.fallback, empty: DNSUpstream.defaultUDPServer)
         )
         
-        if settings.subscriptionDNSPlainServer != drafts.subscriptionPlain {
-            settings.subscriptionDNSPlainServer = drafts.subscriptionPlain
+        if settings.subscriptionDNSUDPServer != drafts.subscriptionUDP {
+            settings.subscriptionDNSUDPServer = drafts.subscriptionUDP
         }
         if settings.subscriptionDNSDoHURL != drafts.subscriptionDoH {
             settings.subscriptionDNSDoHURL = drafts.subscriptionDoH
         }
-        if settings.localRequestDNSPlainServer != drafts.localRequestPlain {
-            settings.localRequestDNSPlainServer = drafts.localRequestPlain
+        if settings.localRequestDNSUDPServer != drafts.localRequestUDP {
+            settings.localRequestDNSUDPServer = drafts.localRequestUDP
         }
         if settings.localRequestDNSDoHURL != drafts.localRequestDoH {
             settings.localRequestDNSDoHURL = drafts.localRequestDoH
         }
-        if settings.proxyDNSPlainServer != drafts.proxyPlain {
-            settings.proxyDNSPlainServer = drafts.proxyPlain
+        if settings.proxyDNSUDPServer != drafts.proxyUDP {
+            settings.proxyDNSUDPServer = drafts.proxyUDP
         }
         if settings.proxyDNSDoHURL != drafts.proxyDoH {
             settings.proxyDNSDoHURL = drafts.proxyDoH
         }
-        if settings.echDNSPlainServer != drafts.echPlain {
-            settings.echDNSPlainServer = drafts.echPlain
+        if settings.echDNSUDPServer != drafts.echUDP {
+            settings.echDNSUDPServer = drafts.echUDP
         }
         if settings.echDNSDoHURL != drafts.echDoH {
             settings.echDNSDoHURL = drafts.echDoH

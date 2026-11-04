@@ -26,9 +26,9 @@ nonisolated enum DNSUpstreamClient {
             switch upstream {
             case .system:
                 throw AnywhereError.dns(.resolutionFailed(host: host, detail: "no upstream configured"))
-            case .plain(let server, let port):
+            case .udp(let server, let port):
                 addresses = try await queryAll(host, family: family) { name, type in
-                    try await queryPlain(name, type: type, server: server, port: port)
+                    try await queryUDP(name, type: type, server: server, port: port)
                 }
             case .doh(let url):
                 addresses = try await queryAll(host, family: family) { name, type in
@@ -56,8 +56,8 @@ nonisolated enum DNSUpstreamClient {
             switch upstream {
             case .system:
                 throw AnywhereError.dns(.resolutionFailed(host: host, detail: "no upstream configured"))
-            case .plain(let server, let port):
-                return try await queryRecordPlain(host, type: type, server: server, port: port, accept: accept)
+            case .udp(let server, let port):
+                return try await queryRecordUDP(host, type: type, server: server, port: port, accept: accept)
             case .doh(let url):
                 return try await queryRecordDoH(host, type: type, url: url, accept: accept)
             }
@@ -92,9 +92,9 @@ nonisolated enum DNSUpstreamClient {
         }
     }
 
-    // MARK: - Plain
+    // MARK: - UDP
 
-    private static func queryPlain(
+    private static func queryUDP(
         _ name: String,
         type: UInt16,
         server: String,
@@ -122,7 +122,7 @@ nonisolated enum DNSUpstreamClient {
         }
     }
 
-    private static func queryRecordPlain(
+    private static func queryRecordUDP(
         _ name: String,
         type: UInt16,
         server: String,
@@ -260,7 +260,7 @@ nonisolated enum DNSUpstreamClient {
     private static func describe(_ upstream: DNSUpstream) -> String {
         switch upstream {
         case .system: return "system"
-        case .plain(let host, let port): return "\(host):\(port)"
+        case .udp(let host, let port): return "\(host):\(port)"
         case .doh(let url): return "DoH \(url.host ?? "?")"
         }
     }

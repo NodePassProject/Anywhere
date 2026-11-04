@@ -702,7 +702,7 @@ actor UDPPlane {
 
         let upstream = DNSUpstream.forwardingServers(
             preferring: AWCore.getFallbackDNSUpstream(), includeIPv6: false
-        ).first ?? DNSUpstream.defaultPlainServer
+        ).first ?? DNSUpstream.defaultUDPServer
         let payload = datagram.payload
         let dstPort = datagram.destination.port
 

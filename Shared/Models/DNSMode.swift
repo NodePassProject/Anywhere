@@ -9,13 +9,13 @@ import Foundation
 
 nonisolated enum DNSMode: String, CaseIterable {
     case `default`
-    case plain
+    case udp
     case doh
 
     var title: String {
         switch self {
         case .default: return String(localized: "Default")
-        case .plain: return String(localized: "Plain")
+        case .udp: return String(localized: "UDP")
         case .doh: return String(localized: "DoH")
         }
     }
@@ -23,31 +23,31 @@ nonisolated enum DNSMode: String, CaseIterable {
 
 nonisolated enum FallbackDNSMode: String, CaseIterable {
     case `default`
-    case plain
+    case udp
 
     var title: String {
         switch self {
         case .default: return String(localized: "Default")
-        case .plain: return String(localized: "Plain")
+        case .udp: return String(localized: "UDP")
         }
     }
 }
 
 nonisolated enum DNSUpstream: Sendable, Equatable {
     case system
-    case plain(host: String, port: UInt16)
+    case udp(host: String, port: UInt16)
     case doh(URL)
 
     static let defaultPort: UInt16 = 53
-    static let defaultPlainServer = "1.1.1.1"
+    static let defaultUDPServer = "1.1.1.1"
     static let defaultDoHURL = "https://cloudflare-dns.com/dns-query"
 
-    static let defaultPlain = DNSUpstream.plain(host: defaultPlainServer, port: defaultPort)
+    static let defaultUDP = DNSUpstream.udp(host: defaultUDPServer, port: defaultPort)
     static let defaultDoH = DNSUpstream.doh(URL(string: defaultDoHURL)!)
     
     static func forwardingServers(preferring preferred: DNSUpstream, includeIPv6: Bool) -> [String] {
         let builtIn = builtInServers(includeIPv6: includeIPv6)
-        guard case .plain(let host, _) = preferred,
+        guard case .udp(let host, _) = preferred,
               includeIPv6 || !isIPv6Literal(host)
         else { return builtIn }
         return [host] + builtIn.filter { $0 != host }
@@ -59,38 +59,36 @@ nonisolated enum DNSUpstream: Sendable, Equatable {
             : ["1.1.1.1", "1.0.0.1"]
     }
 
-    init(mode: DNSMode, plainServer: String, dohURL: String) {
+    init(mode: DNSMode, udpServer: String, dohURL: String) {
         switch mode {
         case .default: self = .system
-        case .plain: self = Self.parsePlain(plainServer) ?? Self.defaultPlain
+        case .udp: self = Self.parseUDP(udpServer) ?? Self.defaultUDP
         case .doh: self = Self.parseDoH(dohURL) ?? Self.defaultDoH
         }
     }
 
     var isSystem: Bool { self == .system }
     
-    static func parsePlain(_ server: String) -> DNSUpstream? {
+    static func parseUDP(_ server: String) -> DNSUpstream? {
         let trimmed = server.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
 
-        // Bracketed IPv6, optionally with a port: [::1] / [::1]:53.
         if trimmed.hasPrefix("["), let close = trimmed.firstIndex(of: "]") {
             let host = String(trimmed[trimmed.index(after: trimmed.startIndex)..<close])
             let rest = trimmed[trimmed.index(after: close)...]
             guard let canonicalHost = canonicalIPv6(host) else { return nil }
-            if rest.isEmpty { return .plain(host: canonicalHost, port: defaultPort) }
+            if rest.isEmpty { return .udp(host: canonicalHost, port: defaultPort) }
             guard rest.hasPrefix(":"), let port = parsePort(rest.dropFirst()) else { return nil }
-            return .plain(host: canonicalHost, port: port)
+            return .udp(host: canonicalHost, port: port)
         }
 
-        // Bare IPv6 carries colons of its own, so it can't also carry a port.
-        if let canonicalHost = canonicalIPv6(trimmed) { return .plain(host: canonicalHost, port: defaultPort) }
+        if let canonicalHost = canonicalIPv6(trimmed) { return .udp(host: canonicalHost, port: defaultPort) }
 
         let parts = trimmed.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
         guard let canonicalHost = canonicalIPv4(String(parts[0])) else { return nil }
-        guard parts.count == 2 else { return .plain(host: canonicalHost, port: defaultPort) }
+        guard parts.count == 2 else { return .udp(host: canonicalHost, port: defaultPort) }
         guard let port = parsePort(parts[1]) else { return nil }
-        return .plain(host: canonicalHost, port: port)
+        return .udp(host: canonicalHost, port: port)
     }
     
     static func parseDoH(_ urlString: String) -> DNSUpstream? {

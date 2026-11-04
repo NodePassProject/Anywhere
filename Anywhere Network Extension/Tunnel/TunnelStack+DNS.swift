@@ -33,7 +33,7 @@ extension TunnelStack {
             AWCore.getFallbackDNSUpstream()
         ]
         var addresses: Set<String> = []
-        for case .plain(let host, _) in upstreams
+        for case .udp(let host, _) in upstreams
         where interceptedDNSServers[host] == .publicResolver {
             addresses.insert(host)
         }
