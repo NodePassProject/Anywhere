@@ -656,7 +656,7 @@ actor UDPPlane {
             let zeroIP = [UInt8](repeating: 0, count: qtype == 1 ? 4 : 16)
             return sendAddressAnswer(
                 answering: datagram,
-                ip: zeroIP,
+                ips: [zeroIP],
                 qtype: qtype,
                 ttl: TunnelConstants.dnsBlockedAnswerTTL
             )
@@ -677,6 +677,14 @@ actor UDPPlane {
         }
 
         if udpConfig.syntheticAddressExcludedDomains.contains(domain) {
+            if let mapped = DNSHosts.shared.addresses(for: domain, family: .ipv4) {
+                return sendAddressAnswer(
+                    answering: datagram,
+                    ips: mapped.compactMap(Self.ipv4Bytes),
+                    qtype: qtype,
+                    ttl: TunnelConstants.dnsHostMappingAnswerTTL
+                )
+            }
             if destination == .anywhereResolver {
                 if await forwardToUpstreamResolver(datagram) {
                     return true
@@ -690,7 +698,7 @@ actor UDPPlane {
         let ipv4 = SyntheticAddressPool.ipv4Bytes(offset: offset)
         return sendAddressAnswer(
             answering: datagram,
-            ip: [ipv4.0, ipv4.1, ipv4.2, ipv4.3],
+            ips: [[ipv4.0, ipv4.1, ipv4.2, ipv4.3]],
             qtype: qtype,
             ttl: TunnelConstants.dnsSyntheticAddressAnswerTTL
         )
@@ -764,7 +772,7 @@ actor UDPPlane {
             guard let base = ptr.bindMemory(to: UInt8.self).baseAddress else { return nil }
             return DNSPacket.generateResponse(
                 query: UnsafeBufferPointer(start: base, count: ptr.count),
-                answerIP: nil,
+                answerIPs: [],
                 qtype: qtype
             )
         }) else { return false }
@@ -776,7 +784,7 @@ actor UDPPlane {
 
     private func sendAddressAnswer(
         answering datagram: InboundDatagram,
-        ip: [UInt8],
+        ips: [[UInt8]],
         qtype: UInt16,
         ttl: UInt32
     ) -> Bool {
@@ -784,7 +792,7 @@ actor UDPPlane {
             guard let base = ptr.bindMemory(to: UInt8.self).baseAddress else { return nil }
             return DNSPacket.generateResponse(
                 query: UnsafeBufferPointer(start: base, count: ptr.count),
-                answerIP: ip,
+                answerIPs: ips,
                 qtype: qtype,
                 ttl: ttl
             )
@@ -793,6 +801,12 @@ actor UDPPlane {
         stack.writeOutboundUDP(responseData, from: datagram.destination, to: datagram.source)
 
         return true
+    }
+
+    private static func ipv4Bytes(_ address: String) -> [UInt8]? {
+        var raw = in_addr()
+        guard inet_pton(AF_INET, address, &raw) == 1 else { return nil }
+        return withUnsafeBytes(of: raw) { Array($0) }
     }
 
     // MARK: - Reclaim

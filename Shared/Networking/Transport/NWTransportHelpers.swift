@@ -106,6 +106,10 @@ extension NWEndpoint.Host {
             return .name(host, nil)
         case .proxies:
             let resolver = DNSResolver.proxies
+            if let mapped = resolver.mappedAddress(for: host),
+               let literal = NWEndpoint.Host(ipLiteral: mapped) {
+                return literal
+            }
             guard !resolver.usesSystemUpstream,
                   let resolved = await resolver.resolveHost(host),
                   let literal = NWEndpoint.Host(ipLiteral: resolved)

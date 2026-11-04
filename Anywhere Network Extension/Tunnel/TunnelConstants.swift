@@ -98,4 +98,5 @@ nonisolated enum TunnelConstants {
     
     static let dnsSyntheticAddressAnswerTTL: UInt32 = 300
     static let dnsBlockedAnswerTTL: UInt32 = 10
+    static let dnsHostMappingAnswerTTL: UInt32 = 300
 }

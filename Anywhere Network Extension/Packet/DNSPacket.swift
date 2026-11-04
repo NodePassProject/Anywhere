@@ -8,6 +8,8 @@
 import Foundation
 
 nonisolated enum DNSPacket {
+    private static let maxUDPResponseLength = 512
+
     static func parseQuery(_ data: UnsafeBufferPointer<UInt8>) -> (domain: String, qtype: UInt16)? {
         guard data.count >= 12 else { return nil }
 
@@ -46,7 +48,7 @@ nonisolated enum DNSPacket {
     
     static func generateResponse(
         query queryData: UnsafeBufferPointer<UInt8>,
-        answerIP: [UInt8]?,
+        answerIPs: [[UInt8]],
         qtype: UInt16,
         ttl: UInt32 = TunnelConstants.dnsSyntheticAddressAnswerTTL
     ) -> Data? {
@@ -65,68 +67,53 @@ nonisolated enum DNSPacket {
 
         let questionEnd = offset
 
-        var rdLength: UInt16 = 0
-        var ansType: UInt16 = 0
-        if answerIP != nil {
-            if qtype == 1 {
-                rdLength = 4
-                ansType = 1
-            } else if qtype == 28 {
-                rdLength = 16
-                ansType = 28
+        let rdLength: Int
+        switch qtype {
+        case 1: rdLength = 4
+        case 28: rdLength = 16
+        default: rdLength = 0
+        }
+        let answerRecordLength = 12 + rdLength
+        let capacity = rdLength > 0 ? max((maxUDPResponseLength - questionEnd) / answerRecordLength, 0) : 0
+        let answers = Array(answerIPs.lazy.filter { $0.count == rdLength }.prefix(capacity))
+
+        var response = Data(count: questionEnd + answers.count * answerRecordLength)
+        response.withUnsafeMutableBytes { pointer in
+            guard let p = pointer.bindMemory(to: UInt8.self).baseAddress,
+                  let source = queryData.baseAddress else { return }
+
+            memcpy(p, source, questionEnd)
+
+            p[2] = 0x85
+            p[3] = 0x80
+            p[4] = 0x00
+            p[5] = 0x01
+            p[6] = UInt8(answers.count >> 8)
+            p[7] = UInt8(answers.count & 0xFF)
+            p[8] = 0x00
+            p[9] = 0x00
+            p[10] = 0x00
+            p[11] = 0x00
+
+            var cursor = questionEnd
+            for ip in answers {
+                p[cursor + 0] = 0xC0
+                p[cursor + 1] = 0x0C
+                p[cursor + 2] = UInt8(qtype >> 8)
+                p[cursor + 3] = UInt8(qtype & 0xFF)
+                p[cursor + 4] = 0x00; p[cursor + 5] = 0x01
+                p[cursor + 6] = UInt8((ttl >> 24) & 0xFF)
+                p[cursor + 7] = UInt8((ttl >> 16) & 0xFF)
+                p[cursor + 8] = UInt8((ttl >> 8) & 0xFF)
+                p[cursor + 9] = UInt8(ttl & 0xFF)
+                p[cursor + 10] = UInt8(rdLength >> 8)
+                p[cursor + 11] = UInt8(rdLength & 0xFF)
+                ip.withUnsafeBufferPointer { bytes in
+                    if let base = bytes.baseAddress { memcpy(p + cursor + 12, base, rdLength) }
+                }
+                cursor += answerRecordLength
             }
         }
-
-        if rdLength > 0, let ipBytes = answerIP {
-            let answerRecLen = 12 + Int(rdLength)
-            let responseLen = questionEnd + answerRecLen
-
-            var response = Data(count: responseLen)
-            response.withUnsafeMutableBytes { pointer in
-                guard let p = pointer.bindMemory(to: UInt8.self).baseAddress,
-                      let source = queryData.baseAddress else { return }
-
-                memcpy(p, source, questionEnd)
-                
-                p[2] = 0x85
-                p[3] = 0x80
-                p[4] = 0x00
-                p[5] = 0x01
-                p[6] = 0x00
-                p[7] = 0x01
-                p[8] = 0x00
-                p[9] = 0x00
-                p[10] = 0x00
-                p[11] = 0x00
-
-                let answerOffset = questionEnd
-                p[answerOffset + 0] = 0xC0
-                p[answerOffset + 1] = 0x0C
-                p[answerOffset + 2] = UInt8(ansType >> 8)
-                p[answerOffset + 3] = UInt8(ansType & 0xFF)
-                p[answerOffset + 4] = 0x00; p[answerOffset + 5] = 0x01
-                p[answerOffset + 6] = UInt8((ttl >> 24) & 0xFF)
-                p[answerOffset + 7] = UInt8((ttl >> 16) & 0xFF)
-                p[answerOffset + 8] = UInt8((ttl >> 8) & 0xFF)
-                p[answerOffset + 9] = UInt8(ttl & 0xFF)
-                p[answerOffset + 10] = UInt8(rdLength >> 8)
-                p[answerOffset + 11] = UInt8(rdLength & 0xFF)
-                
-                memcpy(p + answerOffset + 12, ipBytes, Int(rdLength))
-            }
-            return response
-        } else {
-            var response = Data(count: questionEnd)
-            response.withUnsafeMutableBytes { pointer in
-                guard let p = pointer.bindMemory(to: UInt8.self).baseAddress,
-                      let source = queryData.baseAddress else { return }
-                memcpy(p, source, questionEnd)
-                p[2] = 0x85; p[3] = 0x80
-                p[4] = 0x00; p[5] = 0x01
-                p[6] = 0x00; p[7] = 0x00
-                p[8] = 0x00; p[9] = 0x00; p[10] = 0x00; p[11] = 0x00
-            }
-            return response
-        }
+        return response
     }
 }

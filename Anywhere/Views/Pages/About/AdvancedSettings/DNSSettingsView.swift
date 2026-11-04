@@ -32,6 +32,12 @@ struct DNSSettingsView: View {
     var body: some View {
         @Bindable var settings = settings
         Form {
+            Section {
+                NavigationLink("Host Mappings") {
+                    HostMappingsView()
+                }
+            }
+
             Section("Subscriptions") {
                 Picker("Resolver", selection: $settings.subscriptionDNSMode) {
                     ForEach(DNSMode.allCases, id: \.self) { mode in
@@ -49,9 +55,6 @@ struct DNSSettingsView: View {
             }
 
             Section("Local Requests") {
-                NavigationLink("Host Mappings") {
-                    HostMappingsView()
-                }
                 Picker("Resolver", selection: $settings.localRequestDNSMode) {
                     ForEach(DNSMode.allCases, id: \.self) { mode in
                         Text(mode.title).tag(mode)
