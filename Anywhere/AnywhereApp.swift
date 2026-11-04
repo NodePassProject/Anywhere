@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import AppIntents
 
 @main
 struct AnywhereApp: App {
@@ -26,6 +27,10 @@ struct AnywhereApp: App {
             tunnel?.reconnect()
         }
 
+        AppDependencyManager.shared.add(dependency: container)
+        AppDependencyManager.shared.add(dependency: operations)
+        AppDependencyManager.shared.add(dependency: settings)
+
         Task { await CloudSync.shared.start { keys in await operations.reload(keys) } }
 
         _container = State(initialValue: container)
@@ -36,6 +41,7 @@ struct AnywhereApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .modifier(AppShortcutParametersSync())
                 .dynamicTypeSize(...DynamicTypeSize.large)
                 .environment(operations)
                 .environment(container.appState)

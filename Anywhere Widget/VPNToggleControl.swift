@@ -53,6 +53,7 @@ struct VPNStatusProvider: ControlValueProvider {
 
 struct ToggleVPNIntent: SetValueIntent {
     static let title: LocalizedStringResource = "Toggle VPN"
+    static let isDiscoverable = false
 
     @Parameter(title: "VPN Enabled")
     var value: Bool
@@ -61,13 +62,11 @@ struct ToggleVPNIntent: SetValueIntent {
         guard let manager = try await loadManager() else { return .result() }
 
         if value {
-            // Re-enable the manager in case another VPN app disabled it.
             if !manager.isEnabled {
                 manager.isEnabled = true
                 try await manager.saveToPreferences()
                 try await manager.loadFromPreferences()
             }
-            // The extension reads lastConfigurationData from the App Group.
             try manager.connection.startVPNTunnel()
         } else {
             manager.connection.stopVPNTunnel()

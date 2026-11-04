@@ -27,7 +27,7 @@ struct ModeToggleControl: ControlWidget {
             }
         }
         .displayName("Switch Mode")
-        .description("Switch between Proxy Mode and Global Mode.")
+        .description("Switches between Proxy Mode and Global Mode.")
     }
 }
 
@@ -41,6 +41,7 @@ struct ProxyModeProvider: ControlValueProvider {
 
 struct SwitchModeIntent: SetValueIntent {
     static let title: LocalizedStringResource = "Switch Mode"
+    static let isDiscoverable = false
 
     @Parameter(title: "Global Mode")
     var value: Bool
